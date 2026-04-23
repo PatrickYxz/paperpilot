@@ -1,0 +1,75 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ===== Virtual environments =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== Env / secrets =====
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Jupyter / notebooks =====
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ===== Test / coverage =====
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# ===== PaperPilot 项目数据 =====
+# 下载的论文 PDF、ColBERT 索引、NetworkX 图谱缓存
+data/
+!data/.gitkeep
+
+# 日志、临时文件
+logs/
+*.log
+tmp/
+.cache/
+
+# 大文件 / 二进制
+*.pkl
+*.pt
+*.bin
+*.safetensors
+
+# nanobot 本地状态(按需保留)
+.nanobot/
+
+# ===== 私人文档(不公开) =====
+PaperPilot_方案C_总体设计.md
+daily_logs/
