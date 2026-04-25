@@ -42,3 +42,17 @@ def test_tool_call_roundtrip(tmp_path):
         assert echo_tool.handler({"text": "hello"}).strip() == "hello"
     finally:
         c.close()
+
+
+def test_server_error_raises_MCPToolError(tmp_path):
+    """server 端 raise → CallToolResult.isError=True → handler 抛 MCPToolError。
+       agent_loop 现有 except Exception 会接走,转成 is_error tool_result。"""
+    from paperpilot.tools.mcp_client import MCPToolError
+    c = MCPClient(_make_manifest(tmp_path))
+    c.start()
+    try:
+        boom = next(t for t in c.list_tools() if t.name == "mcp__echo__boom")
+        with pytest.raises(MCPToolError, match="intentional failure"):
+            boom.handler({})
+    finally:
+        c.close()
