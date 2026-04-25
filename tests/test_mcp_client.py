@@ -1,0 +1,33 @@
+"""MCPClient 单元测试。用 tests/fixtures/echo_server.py 做对端。"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from paperpilot.tools.mcp_client import MCPClient
+
+FIXTURE = Path(__file__).parent / "fixtures" / "echo_server.py"
+
+
+def _make_manifest(tmp_path: Path) -> Path:
+    m = tmp_path / "manifest.json"
+    m.write_text(json.dumps({
+        "mcpServers": {
+            "echo": {"command": "python", "args": [str(FIXTURE)]}
+        }
+    }))
+    return m
+
+
+def test_namespacing_and_listing(tmp_path):
+    """tool 名加 mcp__echo__ 前缀;list_tools 返回正确数量。"""
+    c = MCPClient(_make_manifest(tmp_path))
+    c.start()
+    try:
+        names = {t.name for t in c.list_tools()}
+        assert "mcp__echo__echo" in names
+        assert "mcp__echo__boom" in names
+    finally:
+        c.close()
