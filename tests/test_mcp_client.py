@@ -31,3 +31,14 @@ def test_namespacing_and_listing(tmp_path):
         assert "mcp__echo__boom" in names
     finally:
         c.close()
+
+
+def test_tool_call_roundtrip(tmp_path):
+    """handler 同步调用穿过线程边界,返回正确结果。"""
+    c = MCPClient(_make_manifest(tmp_path))
+    c.start()
+    try:
+        echo_tool = next(t for t in c.list_tools() if t.name == "mcp__echo__echo")
+        assert echo_tool.handler({"text": "hello"}).strip() == "hello"
+    finally:
+        c.close()
