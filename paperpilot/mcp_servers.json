@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "arxiv": {
+      "command": "python",
+      "args": ["-m", "paperpilot.mcp_servers.arxiv"]
+    }
+  }
+}
