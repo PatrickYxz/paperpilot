@@ -1,0 +1,20 @@
+# ===== Day 4: Agent Loop + LLM Client =====
+anthropic>=0.40.0
+python-dotenv>=1.0.0
+
+# ===== Day 5: MCP server + 第一个 server (arxiv) =====
+mcp>=1.0.0
+arxiv>=2.1.0
+requests>=2.32.0
+pytest>=8.0.0
+
+# ===== Day 6+: PDF 解析 =====
+# PyMuPDF>=1.24.0
+
+# ===== Day 8+: ColBERT 检索 =====
+# ragatouille>=0.0.9
+
+# ===== Day 11+: 引用图谱 =====
+# networkx>=3.2
+
+# ===== Week 4: 评估 / 测试扩展 =====
