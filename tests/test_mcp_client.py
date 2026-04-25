@@ -56,3 +56,15 @@ def test_server_error_raises_MCPToolError(tmp_path):
             boom.handler({})
     finally:
         c.close()
+
+
+def test_startup_hardfail_on_bad_command(tmp_path):
+    """server 起不来 → start() 抛 MCPStartupError,不返回半完成状态。"""
+    from paperpilot.tools.mcp_client import MCPStartupError
+    m = tmp_path / "manifest.json"
+    m.write_text(json.dumps({
+        "mcpServers": {"bad": {"command": "no-such-binary-xyz", "args": []}}
+    }))
+    c = MCPClient(m)
+    with pytest.raises(MCPStartupError):
+        c.start()
