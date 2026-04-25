@@ -24,9 +24,10 @@ ENV/
 *.pem
 *.key
 
-# ===== IDE =====
+# ===== IDE / 工具 =====
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~
