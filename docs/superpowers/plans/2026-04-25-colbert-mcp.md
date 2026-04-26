@@ -6,7 +6,9 @@
 
 **Architecture:** 两个独立 MCP server 进程(arxiv 单文件加 tool, colbert 包式两层 `server.py` + `index_manager.py`);server 间不互通信,串联只在 LLM 那一层;mcp_client 超时常量 60→180s 适应 ColBERT `build_index` ~30-90s 耗时。Spec: `docs/superpowers/specs/2026-04-25-colbert-mcp-design.md`。
 
-**Tech Stack:** Python 3.11+, mcp SDK (FastMCP), PyMuPDF (PDF 解析), ragatouille 0.0.9 (ColBERT v2.0 包装), pytest。
+**Tech Stack:** Python 3.12 (3.13 上 ragatouille 0.0.9 dep hell), mcp SDK (FastMCP), PyMuPDF (PDF 解析), **PyLate 1.4+ (ColBERT v2 现代实现, 替代 ragatouille)**, pytest。
+
+> **2026-04-25 update**: ColBERT 后端从 ragatouille 切到 PyLate; spec §2 已更新, Task 1 step 1.6 + Task 3 step 3.2 已重写; Task 4 (build/search 实现, 本次 session 不跑) 的代码段下次 session 启动 Task 4 前再批量重写, **下次 implementer 不要直接抄 Task 4 步骤里的 ragatouille 代码**。
 
 **Spec 与现状的几处对齐(plan 决策):**
 1. arxiv 仍是 `paperpilot/mcp_servers/arxiv.py` 单文件(Day 5 落地形态),不重组成包;`download_paper` 函数加进同文件
@@ -23,22 +25,32 @@
 - Create: `tests/mcp_servers/__init__.py` (empty)
 - Create: `tests/fixtures/sample_paper.pdf` (binary, downloaded)
 
-- [ ] **Step 1.1: 改 `requirements.txt` 解注释 + 调整 Day 6 部分**
-
-替换文件 11-15 行的注释段,改为已启用:
+- [ ] **Step 1.1: 改 `requirements.txt` 加 Day 6 依赖 (PyLate, 不是 ragatouille)**
 
 ```
 # ===== Day 6: PDF 解析 + ColBERT 检索 =====
+# PyLate (Stanford ColBERT v2 现代 Python 重写) 取代 ragatouille:
+# ragatouille 0.0.9 在 Windows + Py3.12 上 dep hell, 0.0.10 自身也切 PyLate 后端
 PyMuPDF>=1.24.0
-ragatouille>=0.0.9
+pylate>=1.1.0
 ```
 
-- [ ] **Step 1.2: 装依赖**
+- [ ] **Step 1.2: 装依赖 (Python 3.12 venv)**
 
-Run: `pip install -r requirements.txt`
-Expected: 安装 PyMuPDF (~30MB) + ragatouille 及其依赖(torch / transformers / faiss-cpu 等,~2GB)。如果在 Windows + 没装 CUDA,faiss-cpu 是默认。
+需要 Python 3.12 (3.13 上 PyLate 间接依赖 voyager 等无 wheel)。先确认:
+```bash
+py -3.12 --version  # 应输出 Python 3.12.x;若 'no Python 3.12' 则 winget install Python.Python.3.12
+```
 
-如失败:`pip install --upgrade pip setuptools wheel` 后重试。
+建/重建 venv:
+```bash
+rm -rf .venv
+py -3.12 -m venv .venv
+.venv/Scripts/python.exe -m pip install --upgrade pip
+.venv/Scripts/python.exe -m pip install -r requirements.txt
+```
+
+Expected: 安装 PyMuPDF + PyLate 及其依赖 (torch / transformers 4.x / sentence-transformers / fast-plaid / fastkmeans / accelerate 等, ~3GB)。**没有 ragatouille / colbert-ai / langchain / llama-index** —— 不依赖这些。
 
 - [ ] **Step 1.3: 创建测试子目录 + __init__.py**
 
@@ -72,18 +84,20 @@ Expected: `pages=16` 加首页 text 含 `BERT` 字串。
 
 Run:
 ```bash
-python -c "from ragatouille import RAGPretrainedModel; m=RAGPretrainedModel.from_pretrained('colbert-ir/colbertv2.0'); print('model loaded')"
+.venv/Scripts/python.exe -c "from pylate import models; m=models.ColBERT(model_name_or_path='lightonai/colbertv2.0'); print('model loaded')"
 ```
 Expected: 第一次 ~3-10 分钟下载 + 加载,最后打印 `model loaded`。文件落到 `~/.cache/huggingface/hub/`。
 
-如果失败(网络 / HF token 等),后续所有 task 都会卡。必须先解决。
+**模型名是 `lightonai/colbertv2.0`** (不是 `colbert-ir/colbertv2.0`) —— PyLate 用 sentence-transformers 格式。
+
+如果失败(网络 / HF token 等),后续所有 task 都会卡。必须先解决。试 `HF_ENDPOINT=https://hf-mirror.com` 镜像。
 
 - [ ] **Step 1.7: Commit**
 
 ```bash
 git status     # 确认只新增/修改了预期文件
 git add requirements.txt tests/mcp_servers/__init__.py tests/fixtures/sample_paper.pdf
-git commit -m "Day 6 Task 1: 加 PyMuPDF + ragatouille 依赖, 预备 fixture 与测试目录"
+git commit -m "Day 6 Task 1: 加 PyMuPDF + PyLate 依赖, 预备 fixture 与测试目录"
 ```
 
 ---
@@ -307,11 +321,11 @@ Run: `mkdir -p paperpilot/mcp_servers/colbert && touch paperpilot/mcp_servers/co
 Create file with content:
 
 ```python
-"""colbert-mcp 的索引层。唯一接触 ragatouille 的地方。
+"""colbert-mcp 的索引层。唯一接触 PyLate 的地方。
 
 启动期(__init__):
-  1. rm -rf data/colbert_index/colbert/indexes/paperpilot_current/  (Q6)
-  2. RAGPretrainedModel.from_pretrained("colbert-ir/colbertv2.0")    (Q5)
+  1. rm -rf data/colbert_index/paperpilot_current/  (Q6)
+  2. models.ColBERT(model_name_or_path="lightonai/colbertv2.0")  (Q5)
 任何启动期失败 → 直接抛,触发 mcp_client 启动 hard-fail。
 """
 from __future__ import annotations
@@ -319,11 +333,11 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from ragatouille import RAGPretrainedModel
+from pylate import models
 
 INDEX_NAME = "paperpilot_current"
 INDEX_ROOT = Path("data/colbert_index")
-MODEL_NAME = "colbert-ir/colbertv2.0"
+MODEL_NAME = "lightonai/colbertv2.0"
 
 
 class IndexNotFoundError(RuntimeError):
@@ -334,13 +348,13 @@ class IndexManager:
     def __init__(self) -> None:
         self._clear_stale_index()
         INDEX_ROOT.mkdir(parents=True, exist_ok=True)
-        self._model = RAGPretrainedModel.from_pretrained(MODEL_NAME)
+        self._model = models.ColBERT(model_name_or_path=MODEL_NAME)
 
     def build(self, documents: list[dict]) -> dict:
-        raise NotImplementedError("Task 4 实现")
+        raise NotImplementedError("Task 4 实现 - 使用 self._model.encode + indexes.PLAID")
 
     def search(self, query: str, top_k: int) -> list[dict]:
-        raise NotImplementedError("Task 4 实现")
+        raise NotImplementedError("Task 4 实现 - 使用 self._model.encode + retrieve.ColBERT")
 
     def _clear_stale_index(self) -> None:
         """Q6: 启动时把 paperpilot_current/ 干净清掉。

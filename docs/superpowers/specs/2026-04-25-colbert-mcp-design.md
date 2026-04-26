@@ -37,15 +37,18 @@
 | Q5 | 模型加载时机 | **进程启动时立即加载,留内存复用** | 首次模型下载失败立即 hard-fail(对齐 Day 5 启动红线);后续 build_index/search 复用模型实例零加载成本;代价启动多 5-10s |
 | Q6 | 启动期索引清理 | **colbert-mcp 进程启动时 `rm -rf data/colbert_index/colbert/indexes/paperpilot_current/`** | 自审新增。守"session-local"语义:启动 = 干净;新 session 不先 build_index 直接 search → `IndexNotFoundError` → LLM 知道要先 build。否则上次 session 的旧索引会"漏"到新 session,破坏语义 |
 
-### 5 个隐含决策(已锁,无需再讨论)
+### 隐含决策(已锁)
+
+> **2026-04-25 update**: ColBERT 后端从 ragatouille 切到 **PyLate** —— ragatouille 0.0.9 在 Windows + Py3.12 上 dep hell 严重(pyarrow init segfault / langchain 1.x 重构 / transformers 5.x 不兼容 / 默认 splitter 强依赖 llama-index 等),且 ragatouille 0.0.10 自身将切到 PyLate 后端。直接用 PyLate 干净。详见今日 daily log。
 
 | 项 | 值 | 备注 |
 |---|---|---|
-| Chunk 策略 | ragatouille `RAGPretrainedModel.index()` 默认 | document_max_length 512,自动按句子切。**不写自定义 chunker** |
-| ColBERT 模型 | `colbert-ir/colbertv2.0` | ragatouille 默认;首次 ~400MB 落 HF cache |
-| PDF→text 实现 | `pymupdf` (`fitz`) | 比 pdfminer 快 5-10x;对学术 PDF 公式/表格降级合理 |
-| build_index 暴露 | 是,LLM 在 loop 里调 | 守"决策由 LLM 做" —— 何时建索引也是决策,不做内部 lazy-rebuild |
-| download_paper 批量 | 否,一次一篇 | LLM 想下 N 篇调 N 次,进度可见可中断 |
+| Chunk 策略 | **自己实现 paragraph splitter**(Task 4) | PyLate 不自动 chunk(每 doc 一个多向量,~512 token 上限)。学术 paper 全文需切段后逐段喂入 |
+| ColBERT 模型 | `lightonai/colbertv2.0` | PyLate 用 sentence-transformers 格式;`colbert-ir/colbertv2.0` 是 Stanford 原生格式不能直接用 |
+| ColBERT 后端 | `pylate.indexes.PLAID` + `pylate.retrieve.ColBERT` | 自带 fast-plaid + fastkmeans;不需要 MSVC;不依赖 langchain / llama-index |
+| PDF→text 实现 | `pymupdf` (`fitz`) | 不变 |
+| build_index 暴露 | 是,LLM 在 loop 里调 | 不变 |
+| download_paper 批量 | 否,一次一篇 | 不变 |
 
 ---
 
