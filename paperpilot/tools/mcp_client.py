@@ -22,7 +22,8 @@ from mcp.client.stdio import stdio_client
 from paperpilot.core.adapter import Tool
 
 MCP_TOOL_TIMEOUT = int(os.environ.get("MCP_TOOL_TIMEOUT", 60))
-_INITIALIZE_TIMEOUT = 10  # 单个 server initialize 握手超时,边界值
+# colbert-mcp 启动时需加载 PyLate 模型 (~15s on CPU),因此 initialize 超时设 60s
+_INITIALIZE_TIMEOUT = int(os.environ.get("MCP_INITIALIZE_TIMEOUT", 60))
 
 
 class MCPStartupError(RuntimeError):
