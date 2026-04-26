@@ -8,11 +8,13 @@ arxiv>=2.1.0
 requests>=2.32.0
 pytest>=8.0.0
 
-# ===== Day 6+: PDF 解析 =====
-# PyMuPDF>=1.24.0
-
-# ===== Day 8+: ColBERT 检索 =====
-# ragatouille>=0.0.9
+# ===== Day 6: PDF 解析 + ColBERT 检索 =====
+# PyLate (Stanford ColBERT v2 现代 Python 重写) 取代 ragatouille:
+# ragatouille 0.0.9 在 Windows + Py3.12 上 dep hell (pyarrow init segfault /
+# langchain 1.x 重构 / transformers 5.x 不兼容 / llama_index 必需);
+# 0.0.10 自身也将切到 PyLate 后端,直接用源头干净
+PyMuPDF>=1.24.0
+pylate>=1.1.0
 
 # ===== Day 11+: 引用图谱 =====
 # networkx>=3.2
