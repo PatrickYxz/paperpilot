@@ -614,24 +614,58 @@ addopts = -m "not slow"
 
 ```python
     def build(self, documents: list[dict]) -> dict:
-        raise NotImplementedError("Task 4 实现")
+        raise NotImplementedError("Task 4 实现 - 使用 self._model.encode + indexes.PLAID")
 ```
 
 替换为:
 
 ```python
     def build(self, documents: list[dict]) -> dict:
-        """对 documents 建立 ColBERT 索引;固定 index_name=paperpilot_current,强制覆盖。"""
-        collection = [d["text"] for d in documents]
-        document_ids = [d["paper_id"] for d in documents]
-        self._model.index(
-            collection=collection,
-            document_ids=document_ids,
-            index_name=INDEX_NAME,
-            index_root=str(INDEX_ROOT),
-            overwrite="force",
+        """对 documents 建立 ColBERT 索引;固定 index_name=paperpilot_current,强制覆盖。
+
+        chunk 在内部完成(256 token 滑窗,overlap 32);chunk_text 留在
+        self._chunk_texts 供 search 时回填。LLM 视角是 paper 级,不感知 chunk。
+        """
+        if not documents:
+            raise ValueError("documents must not be empty")
+
+        all_ids: list[str] = []
+        all_texts: list[str] = []
+        for d in documents:
+            for i, ck in enumerate(self._chunk(d["text"])):
+                all_ids.append(f"{d['paper_id']}::chunk_{i}")
+                all_texts.append(ck)
+
+        embs = self._model.encode(
+            all_texts, is_query=False, show_progress_bar=False
         )
+
+        index = indexes.PLAID(
+            index_folder=str(INDEX_ROOT),
+            index_name=INDEX_NAME,
+            override=True,
+        )
+        index.add_documents(documents_ids=all_ids, documents_embeddings=embs)
+
+        self._index = index
+        self._chunk_texts = dict(zip(all_ids, all_texts))
+
         return {"indexed_count": len(documents), "index_name": INDEX_NAME}
+
+    def _chunk(self, text: str) -> list[str]:
+        """固定 token 滑窗;空 text 返空 list(跳过)。"""
+        tokens = self._model.tokenizer.encode(text, add_special_tokens=False)
+        if not tokens:
+            return []
+        out: list[str] = []
+        i = 0
+        while i < len(tokens):
+            sub = tokens[i : i + self.CHUNK_SIZE]
+            out.append(self._model.tokenizer.decode(sub))
+            if i + self.CHUNK_SIZE >= len(tokens):
+                break
+            i += self.CHUNK_SIZE - self.OVERLAP
+        return out
 ```
 
 - [ ] **Step 4.3: 实现 `IndexManager.search`**
@@ -640,29 +674,33 @@ addopts = -m "not slow"
 
 ```python
     def search(self, query: str, top_k: int) -> list[dict]:
-        raise NotImplementedError("Task 4 实现")
+        raise NotImplementedError("Task 4 实现 - 使用 self._model.encode + retrieve.ColBERT")
 ```
 
 替换为:
 
 ```python
     def search(self, query: str, top_k: int) -> list[dict]:
-        """在当前 paperpilot_current 索引上查 top_k 段落。"""
-        if not self._index_path().exists():
+        """在 paperpilot_current 索引上查 top_k 段落;chunk_text 从内存映射回填。"""
+        if self._index is None or not self._index_path().exists():
             raise IndexNotFoundError(
                 "no index at paperpilot_current; call build_index first"
             )
-        # ragatouille 0.0.x: 第一次 search 前需绑定到磁盘上的索引
-        # build() 跑过的话 self._model 已自动绑定;否则要 from_index 加载
-        results = self._model.search(query=query, k=top_k)
-        # ragatouille 返回 list[dict],含 content / score / document_id 等;归一化字段名
+
+        q_emb = self._model.encode(
+            [query], is_query=True, show_progress_bar=False
+        )
+        retr = retrieve.ColBERT(index=self._index)
+        scores = retr.retrieve(queries_embeddings=q_emb, k=top_k)
+        # shape: list[list[{id, score}]] — 外层 query (len=1),内层 top-k
+
         return [
             {
-                "paper_id": r.get("document_id", r.get("doc_id", "")),
-                "chunk_text": r.get("content", ""),
-                "score": float(r.get("score", 0.0)),
+                "paper_id": r["id"].split("::", 1)[0],
+                "chunk_text": self._chunk_texts[r["id"]],
+                "score": float(r["score"]),
             }
-            for r in results
+            for r in scores[0]
         ]
 ```
 
@@ -690,7 +728,7 @@ from paperpilot.tools.mcp_client import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 INDEX_ROOT = REPO_ROOT / "data" / "colbert_index"
-CURRENT_INDEX = INDEX_ROOT / "colbert" / "indexes" / "paperpilot_current"
+CURRENT_INDEX = INDEX_ROOT / "paperpilot_current"
 
 
 def _make_manifest(tmp_path: Path) -> Path:

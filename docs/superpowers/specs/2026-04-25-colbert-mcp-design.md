@@ -49,6 +49,8 @@
 | PDF→text 实现 | `pymupdf` (`fitz`) | 不变 |
 | build_index 暴露 | 是,LLM 在 loop 里调 | 不变 |
 | download_paper 批量 | 否,一次一篇 | 不变 |
+| chunk_text 持久化 | `IndexManager._chunk_texts: dict[chunk_id, str]`(进程内,与 PyLate index 同生命周期) | PyLate 索引层只存 embedding+id,不存原文;LLM 引用回答必须看到 chunk 原文(子 spec Q1) |
+| Chunking 参数 | 固定 token 滑窗 size=256, overlap=32, 用 `_model.tokenizer` 切 | PyLate 不自动 chunk;ColBERT 多向量鲁棒于切割位置;PyMuPDF 输出的 `\n\n` 不可靠所以不用段落切(子 spec Q2) |
 
 ---
 
@@ -159,15 +161,19 @@ Output:
   }
 
 行为:
-  1. 校验 documents 非空、每个 dict 含 paper_id + text 字段
-  2. RAGPretrainedModel.index(
-       collection=[d["text"] for d in documents],
-       document_ids=[d["paper_id"] for d in documents],
-       index_name="paperpilot_current",
-       index_root="data/colbert_index/",
-       overwrite="force",       # 方案 1 的核心
-     )
-  3. 返回 {"indexed_count": len(documents), "index_name": "paperpilot_current"}
+  1. 校验 documents 非空、每个 dict 含 paper_id + text 字段(空 → ValueError)
+  2. 对每篇 paper 用 self._model.tokenizer 切 256/overlap=32 token 滑窗
+       chunk_id 命名 f"{paper_id}::chunk_{i}"
+       text 为空 / 全空白的 paper 跳过(不产生 chunk,不抛错)
+  3. self._model.encode(all_chunks, is_query=False) → 多向量 embedding
+  4. pylate.indexes.PLAID(index_folder=str(INDEX_ROOT),
+                          index_name="paperpilot_current",
+                          override=True)
+     index.add_documents(documents_ids=all_chunk_ids,
+                         documents_embeddings=embs)
+  5. 原子替换 self._index = index;self._chunk_texts = dict(zip(ids, texts))
+  6. 返回 {"indexed_count": len(documents),  # 按 paper 数,不是 chunk 数
+           "index_name": "paperpilot_current"}
 ```
 
 ### `colbert.search`(Day 6 新增)
@@ -181,10 +187,17 @@ Output:
   list[{"paper_id": str, "chunk_text": str, "score": float}]
 
 行为:
-  1. 若 data/colbert_index/colbert/indexes/paperpilot_current/ 不存在
+  1. 若 self._index is None 或 data/colbert_index/paperpilot_current/ 不存在
      → raise IndexNotFoundError("must call build_index first")
-  2. 复用启动期加载的 RAGPretrainedModel 实例(若 build_index 跑过则已绑定到当前索引)
-  3. .search(query=query, k=top_k) → 转换格式返回
+  2. q_emb = self._model.encode([query], is_query=True)
+  3. retr = pylate.retrieve.ColBERT(index=self._index)
+     scores = retr.retrieve(queries_embeddings=q_emb, k=top_k)
+       # shape: list[list[{id, score}]] — 外层 query (len=1),内层 top-k
+  4. 每条 r:
+       paper_id = r["id"].split("::", 1)[0]
+       chunk_text = self._chunk_texts[r["id"]]   # 用 [] 不掩盖 KeyError
+       score = float(r["score"])
+     返回 list[{paper_id, chunk_text, score}]
 ```
 
 ---
@@ -229,9 +242,9 @@ Output:
 
 | 失败 | 触发 |
 |---|---|
-| `import ragatouille` / `import fitz` 失败 | 依赖装漏 |
+| `import pylate` / `import fitz` 失败 | 依赖装漏 |
 | `data/colbert_index/` 不可写 | 权限/路径错 |
-| `RAGPretrainedModel.from_pretrained("colbert-ir/colbertv2.0")` 失败 | HF cache miss + 网络断 |
+| `pylate.models.ColBERT(model_name_or_path="lightonai/colbertv2.0")` 失败 | HF cache miss + 网络断 |
 
 **启动期还会做(不是 fail,是 setup)**:
 - `rm -rf data/colbert_index/colbert/indexes/paperpilot_current/`(Q6 决策);若该路径不存在则跳过;`shutil.rmtree(..., ignore_errors=False)`,**清理本身失败时 hard-fail**(权限错说明环境坏)
