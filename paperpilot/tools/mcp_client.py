@@ -3,7 +3,7 @@
 设计依据:docs/superpowers/specs/2026-04-25-mcp-layer-architecture-design.md (§4)
 - agent_loop 保持同步;async 复杂度关在本文件
 - 每个 MCP tool 包成 paperpilot.core.adapter.Tool,handler 是 sync 闭包
-- 错误:启动 hard-fail / 运行 soft-fail / 60s 超时为边界
+- 错误:启动 hard-fail / 运行 soft-fail / 180s 超时为边界
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from mcp.client.stdio import stdio_client
 
 from paperpilot.core.adapter import Tool
 
-MCP_TOOL_TIMEOUT = int(os.environ.get("MCP_TOOL_TIMEOUT", 60))
+MCP_TOOL_TIMEOUT = int(os.environ.get("MCP_TOOL_TIMEOUT", 180))
 # colbert-mcp 启动时需加载 PyLate 模型 (~15s on CPU),因此 initialize 超时设 60s
 _INITIALIZE_TIMEOUT = int(os.environ.get("MCP_INITIALIZE_TIMEOUT", 60))
 
