@@ -22,9 +22,13 @@ _manager: IndexManager | None = None
 def build_index(documents: list[dict]) -> dict:
     """对一组论文全文建立 ColBERT 索引(覆盖前一次)。
 
+    调用示例: build_index(documents=[{"paper_id": "2401.12345", "text": "...全文..."}])
+    download_paper 的返回值 (含 paper_id 和 text) 可直接封装进列表传入。
+
     Args:
         documents: list,每项 dict 含 paper_id (str) 与 text (str) 字段。
             非空,字段缺失会抛 ValueError。
+            示例: [{"paper_id": "2401.12345", "text": "论文全文内容..."}]
 
     Returns:
         dict 含 indexed_count 与 index_name="paperpilot_current"。

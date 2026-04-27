@@ -6,11 +6,13 @@ paperpilot/mcp_servers.json。
 """
 from __future__ import annotations
 
+import ssl
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 import arxiv
+import certifi
 import fitz
 from mcp.server.fastmcp import FastMCP
 
@@ -104,8 +106,9 @@ def _download_paper_impl(arxiv_id: str) -> dict:
 
 def _fetch_pdf(arxiv_id: str) -> bytes:
     url = f"https://arxiv.org/pdf/{arxiv_id}"
+    ctx = ssl.create_default_context(cafile=certifi.where())
     try:
-        with urllib.request.urlopen(url, timeout=30) as resp:
+        with urllib.request.urlopen(url, timeout=30, context=ctx) as resp:
             return resp.read()
     except urllib.error.HTTPError as e:
         if e.code == 404:
