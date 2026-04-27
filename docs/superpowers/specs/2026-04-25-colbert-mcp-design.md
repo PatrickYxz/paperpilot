@@ -35,7 +35,7 @@
 | Q3 | 全文获取链路 | **C: 扩 arxiv-mcp 加 `download_paper`,colbert-mcp 接 text 输入** | server 单一职责(arxiv 取文档 / colbert 索引检索);A 只索引 abstract 把 ColBERT 用废;B 让 colbert 越权干 arxiv 活;D 推迟全文 ETL 让 smoke 没意义 |
 | Q4 | text 缓存策略 | **A: text 永久累加,索引覆盖** | text 是 raw data(下载+解析慢,体积小 50-200KB/篇);索引是 derived data(便宜,30-90s 重建);两者生命周期天然不同 |
 | Q5 | 模型加载时机 | **进程启动时立即加载,留内存复用** | 首次模型下载失败立即 hard-fail(对齐 Day 5 启动红线);后续 build_index/search 复用模型实例零加载成本;代价启动多 5-10s |
-| Q6 | 启动期索引清理 | **colbert-mcp 进程启动时 `rm -rf data/colbert_index/colbert/indexes/paperpilot_current/`** | 自审新增。守"session-local"语义:启动 = 干净;新 session 不先 build_index 直接 search → `IndexNotFoundError` → LLM 知道要先 build。否则上次 session 的旧索引会"漏"到新 session,破坏语义 |
+| Q6 | 启动期索引清理 | **colbert-mcp 进程启动时 `rm -rf data/colbert_index/paperpilot_current/`** | 自审新增。守"session-local"语义:启动 = 干净;新 session 不先 build_index 直接 search → `IndexNotFoundError` → LLM 知道要先 build。否则上次 session 的旧索引会"漏"到新 session,破坏语义 |
 
 ### 隐含决策(已锁)
 
@@ -71,12 +71,12 @@
 │      └──► colbert-mcp 进程  ← Day 6 新建                     │
 │              └── build_index                                 │
 │              └── search                                      │
-│              (内部: ragatouille → ColBERT v2.0)              │
+│              (内部: PyLate → ColBERT v2.0)                   │
 │              (索引根: data/colbert_index/)                   │
 └──────────────────────────────────────────────────────────────┘
 
   data/papers/<arxiv_id>.txt              ← download_paper 长期缓存(永不删)
-  data/colbert_index/colbert/indexes/
+  data/colbert_index/
       paperpilot_current/                 ← ColBERT 索引(每次 build 覆盖)
 ```
 
@@ -93,12 +93,12 @@
 | `paperpilot/mcp_servers/arxiv/server.py` | 改 | + `download_paper` tool handler(urllib + pymupdf + 缓存读写) | +~50 |
 | `paperpilot/mcp_servers/arxiv/manifest.json` | 改 | + download_paper 描述 | +5 |
 | `paperpilot/mcp_servers/colbert/__init__.py` | 新 | 空文件 | 0 |
-| `paperpilot/mcp_servers/colbert/server.py` | 新 | MCP 协议入口;2 个 tool handler;**不接触 ragatouille** | ~80 |
-| `paperpilot/mcp_servers/colbert/index_manager.py` | 新 | 唯一接触 ragatouille 的地方;`build()` / `search()` / `_index_root()` | ~80 |
+| `paperpilot/mcp_servers/colbert/server.py` | 新 | MCP 协议入口;2 个 tool handler;**不接触 PyLate** | ~80 |
+| `paperpilot/mcp_servers/colbert/index_manager.py` | 新 | 唯一接触 PyLate 的地方;`build()` / `search()` / `_index_path()` | ~80 |
 | `paperpilot/mcp_servers/colbert/manifest.json` | 新 | tool 描述 | ~30 |
 | `paperpilot/mcp_servers.json` | 改 | + colbert entry | +5 |
 | `paperpilot/tools/mcp_client.py` | 改 | 全局 tool 超时 60s → 180s(改一个常量) | +1 -1 |
-| `requirements.txt` | 改 | + `pymupdf>=1.24.0`、`ragatouille>=0.0.9` | +2 |
+| `requirements.txt` | 改 | + `PyMuPDF>=1.24.0`、`pylate>=1.1.0` | +2 |
 | `scripts/day6_smoke.py` | 新 | 端到端冒烟,加 `sys.stdout.reconfigure(encoding="utf-8")` | ~50 |
 | `scripts/day5_smoke.py` | 改 | 顺手加 `sys.stdout.reconfigure(encoding="utf-8")` 修 Windows GBK | +1 |
 | `tests/fixtures/sample_paper.pdf` | 新 | 真实 arxiv PDF(BERT 或类似公开老 paper) | (binary) |
@@ -115,10 +115,10 @@
 ### 布局决策
 
 1. **colbert-mcp 内部分两层** (`server.py` / `index_manager.py`)
-   - `server.py` 不 import ragatouille,纯协议层;单测 mock `index_manager` 即可,跑得飞快
-   - `index_manager.py` 唯一接触 ragatouille,日后换检索后端只改这一文件
+   - `server.py` 不 import PyLate,纯协议层;单测 mock `index_manager` 即可,跑得飞快
+   - `index_manager.py` 唯一接触 PyLate,日后换检索后端只改这一文件
 2. **download_paper 直接放进 `arxiv/server.py`,不另开 `pdf_extractor.py`** —— 下载+pymupdf 总共 ~30 行,YAGNI;后续若 graph/vlm 也要 PDF→text 再抽公共模块(rule of three)
-3. **索引根路径硬编码 `data/colbert_index/`(绝对路径)** —— 不让 ragatouille 默认散到 cwd 下的 `.ragatouille/`
+3. **索引根路径硬编码 `data/colbert_index/`(绝对路径)** —— 不让 PyLate 默认散到 cwd
 
 ---
 
@@ -218,7 +218,7 @@ Output:
 [6] Claude → tool_use(colbert__build_index, documents=[5 份 {id, text}])
 [7] mcp_client → colbert-mcp:
       index_manager.build():
-        RAGPretrainedModel.index(... overwrite="force")
+        chunk + self._model.encode + indexes.PLAID(override=True)
         chunking + embedding ~30-90s
       返回 {indexed_count: 5, index_name: "paperpilot_current"}
 [8] Claude → tool_use(colbert__search, q="RAGAS faithfulness NQ", top_k=5)
@@ -247,7 +247,7 @@ Output:
 | `pylate.models.ColBERT(model_name_or_path="lightonai/colbertv2.0")` 失败 | HF cache miss + 网络断 |
 
 **启动期还会做(不是 fail,是 setup)**:
-- `rm -rf data/colbert_index/colbert/indexes/paperpilot_current/`(Q6 决策);若该路径不存在则跳过;`shutil.rmtree(..., ignore_errors=False)`,**清理本身失败时 hard-fail**(权限错说明环境坏)
+- `rm -rf data/colbert_index/paperpilot_current/`(Q6 决策);若该路径不存在则跳过;`shutil.rmtree(..., ignore_errors=False)`,**清理本身失败时 hard-fail**(权限错说明环境坏)
 
 理由:配置 bug,LLM 看到也无能为力;立即吵醒。
 
@@ -259,9 +259,9 @@ Output:
 | download_paper: 网络超时 | `urllib.error.URLError` | "网络挂了" |
 | download_paper: pymupdf 解析挂 | `PDFParseError`(自定义,wrap fitz 异常) | "PDF 坏了" |
 | build_index: documents 空或字段缺失 | `ValueError` | "输入有问题" |
-| build_index: 内部 ragatouille 抛 | 透传 | LLM 决定重试或换 |
+| build_index: 内部 PyLate 抛 | 透传 | LLM 决定重试或换 |
 | search: index 目录不存在 | `IndexNotFoundError` | "你没 build_index 就 search" |
-| search: 索引损坏 | 透传 ragatouille 异常 | LLM 决定 rebuild |
+| search: 索引损坏 | 透传 PyLate 异常 | LLM 决定 rebuild |
 
 **全部不做**: 重试、退避、降级、fallback。
 
@@ -342,7 +342,7 @@ prompt: "搜一下 attention 相关的 paper, 下 1 篇全文, 在里面查 mult
 1. `pytest tests/` 全绿(slow 测试本地手跑)
 2. `python scripts/day5_smoke.py` 无回归
 3. `python scripts/day6_smoke.py` 退出 0 + 打印 PASSED
-4. `data/colbert_index/colbert/indexes/paperpilot_current/` 存在且 ~50-150MB
+4. `data/colbert_index/paperpilot_current/` 存在且 ~50-150MB
 5. `data/papers/` 下有至少 1 个 .txt
 6. 所有改动按合理粒度分 commit(参考 Day 5 教训: 每 task 开始前 `git status` 确认 index 干净)
 

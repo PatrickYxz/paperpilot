@@ -378,7 +378,7 @@ Create file with content:
 启动:python -m paperpilot.mcp_servers.colbert.server
 通过 stdio 被 paperpilot.tools.mcp_client 拉起,manifest 见 paperpilot/mcp_servers.json。
 
-协议层职责: 输入校验 + 路由到 IndexManager。**不接触 ragatouille**。
+协议层职责: 输入校验 + 路由到 IndexManager。**不接触 PyLate**。
 """
 from __future__ import annotations
 
@@ -561,7 +561,7 @@ OK
 - 加载 ColBERT 模型(若 Step 1.6 成功预热,这步 5-10 秒)
 
 如果启动失败:
-- `MCPStartupError: failed to start server 'colbert'` → 检查 ragatouille / fitz 装好,模型缓存存在
+- `MCPStartupError: failed to start server 'colbert'` → 检查 pylate / fitz 装好,模型缓存存在
 - 卡 60 秒以上无输出 → 可能在下载模型(说明 Step 1.6 没真预热)
 
 - [ ] **Step 3.8: 跑全套测试确认无回归**
@@ -843,7 +843,7 @@ def test_startup_hard_fail_when_index_root_unwritable(tmp_path, monkeypatch):
 Run: `pytest tests/mcp_servers/test_colbert_via_client.py -v -m slow`
 Expected: `3 passed, 1 skipped`,总耗时 ~60-180 秒(主要是 build 一次 + search 一次)。
 
-如 `test_build_and_search` 失败(p3 不在 top-3):说明 ColBERT 实际 ranking 不灵或字段映射错。打印 `results` 看 ragatouille 实际返回的字段名,改 `index_manager.search` 里的字段映射。常见 keys: `content` / `score` / `document_id` / `passage_id` / `rank`。
+如 `test_build_and_search` 失败(p3 不在 top-3):说明 ColBERT 排序不灵或 chunk_id 命名错位。打印 `results` 看 paper_id 分布;PyLate 返 `{id, score}`,id 即 `paper_id::chunk_i`,build 与 search 必须用同一命名。
 
 如 `test_startup_clears_stale_index` 失败:检查 `IndexManager._clear_stale_index` 是否真的在 `__init__` 调到 + `_index_path()` 路径计算正确。
 
@@ -1011,7 +1011,7 @@ if __name__ == "__main__":
 - stdout 末尾: `✅ Day 6 smoke PASSED`
 - 退出码 0
 
-如果 build_index 撞 180s 超时:说明这一篇 paper 太长 or ragatouille 慢,先把 max_iter 上调到 15 + 让 LLM 自己 retry;若仍慢,把 `MCP_TOOL_TIMEOUT` env var 临时拉到 300 跑过一次,记录在 daily log。
+如果 build_index 撞 180s 超时:说明这一篇 paper 太长 or PyLate 慢,先把 max_iter 上调到 15 + 让 LLM 自己 retry;若仍慢,把 `MCP_TOOL_TIMEOUT` env var 临时拉到 300 跑过一次,记录在 daily log。
 
 如果某 tool 没被 LLM 调用(比如它直接看 abstract 就答了):改 prompt 强制走 colbert 路径,例如加上"不要只看 abstract,必须用 colbert 在全文里搜 multi-head 的具体定义"。
 
@@ -1019,7 +1019,7 @@ if __name__ == "__main__":
 
 ```bash
 # 1) 索引目录存在且 50-150 MB
-du -sh data/colbert_index/colbert/indexes/paperpilot_current/
+du -sh data/colbert_index/paperpilot_current/
 
 # 2) data/papers/ 至少 1 个 .txt
 ls -la data/papers/
@@ -1083,7 +1083,7 @@ data/colbert_index/
 2. ✅ `pytest -m slow tests/mcp_servers/test_colbert_via_client.py` 3 passed + 1 skipped
 3. ✅ `python scripts/day5_smoke.py` 无回归 + 不再 emoji UnicodeError
 4. ✅ `python scripts/day6_smoke.py` 退出 0 + 打印 `✅ Day 6 smoke PASSED`
-5. ✅ `data/colbert_index/colbert/indexes/paperpilot_current/` 存在且非空
+5. ✅ `data/colbert_index/paperpilot_current/` 存在且非空
 6. ✅ `data/papers/` 至少有 1 个 `.txt`
 7. ✅ git log 显示 Day 6 任务分 6 个原子 commit,无 squash 痕迹
 
@@ -1095,7 +1095,7 @@ data/colbert_index/
 |---|---|---|
 | Task 1 step 1.6 卡 30+ 分钟 | 中国大陆访问 HuggingFace 慢 | 设 `HF_ENDPOINT=https://hf-mirror.com`(国内镜像)再跑;或挂代理 |
 | Task 3 step 3.7 启动卡 60s+ 静默 | 模型未预热,正在偷偷下载 | Ctrl+C,回去做 step 1.6 |
-| Task 4 集成测试 `p3 not in top-3` | ragatouille 字段名变了 | print results 看实际 keys,改 `index_manager.search` 字段映射 |
+| Task 4 集成测试 `p3 not in top-3` | ColBERT 排序不灵 / chunk_id 命名错位 | print results 看 paper_id 分布与 chunk_id 命名一致 |
 | Day 6 smoke build_index 撞 180s 超时 | 单篇 paper 太长 | 临时 `MCP_TOOL_TIMEOUT=300 python scripts/day6_smoke.py`;记录到 daily log;若多次复现考虑下次 spec 微调 |
 | Day 6 smoke LLM 不调 colbert | prompt 让 LLM 觉得看 abstract 够了 | prompt 强制要求"必须在全文里查具体定义" |
 | FastMCP `dict` 返回值在 LLM tool_result 里看不到字段 | FastMCP 序列化 dict → JSON string;LLM 看到 JSON 文本 | 这是预期行为;LLM 能解析 JSON。如希望人类可读,改 server 返回 str |
@@ -1118,7 +1118,7 @@ data/colbert_index/
 | Spec 章节 | 覆盖在 |
 |---|---|
 | Q1-Q6 决策 | Task 3 / Task 4(代码硬编码体现) |
-| 5 个隐含决策 | Task 2 (PDF→text 用 pymupdf, download 一次一篇) + Task 4 (ragatouille 默认 chunking, 模型选 colbertv2.0) + Task 3 (build_index 暴露给 LLM) |
+| 5 个隐含决策 | Task 2 (PDF→text 用 pymupdf, download 一次一篇) + Task 4 (自实现 chunking 256/32, 模型选 lightonai/colbertv2.0) + Task 3 (build_index 暴露给 LLM) |
 | 文件布局 §4 | Task 1-6 每个 task 文件清单,`arxiv/server.py` 替换为 `arxiv.py`(plan 决策) |
 | Tool 签名 §5 | Task 2 (download_paper) + Task 3 (build_index/search 签名 + validation) + Task 4 (build/search 实现) |
 | 数据流 §6 | Task 6 day6_smoke 真实跑一遍 |
