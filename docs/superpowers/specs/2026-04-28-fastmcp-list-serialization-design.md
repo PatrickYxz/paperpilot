@@ -167,8 +167,11 @@ results = payload["results"]
 
 ## 决策记录
 
-（实施时填）
-- 三信号实测：C1=?, C2=?, C3=?
-- 决策：fix / no-fix
-- 时间戳：?
-- 重测条件触发后须重跑此脚本
+- **运行时间**: 2026-04-28T18:27:03+08:00
+- **三信号实测**:
+  - C1 (结构, 多 JSON 对象拼接): true — 实测 search 调用 1 次, 每次 block 数: [8]
+  - C2 (LLM 引用全 vs 缺失): PASS — tool_result paper_ids: ['2604.23681']; answer cited: ['2604.22583', '2604.23681', '2604.23740', '2604.24715', '2604.24717']
+  - C3 (LLM 不抱怨 JSON): PASS — LLM 答案无 JSON 解析抱怨词
+- **决策**: no-fix
+- **理由**: LLM 当前模型 DeepSeek 能正确解析多 JSON 对象拼接 (top_k=5 返回 8 对象, C2+C3 均 PASS), baseline 已稳
+- **重测条件**（fix 与否都适用）：换 LLM model / paper 数 >10 / top_k >10 任一变更必须重跑 `scripts/day7_fastmcp_repro.py`
