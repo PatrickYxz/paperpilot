@@ -41,6 +41,11 @@ generates structured research reports.
 - **Multimodal**: Qwen-VL for figure understanding
 - **LLM**: DeepSeek-V3 / Qwen
 
+## Configuration
+
+- `graph-mcp` reads `SEMANTIC_SCHOLAR_API_KEY` when present; unauthenticated
+  Semantic Scholar requests also work for small local demos.
+
 ## Roadmap
 
 - [x] Project setup
