@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Callable
 
 from paperpilot.core.adapter import LLMClient, Tool, ToolResult
@@ -29,6 +30,7 @@ def agent_loop(
     guard = guardrail or Guardrail()
     tool_by_name = {t.name: t for t in tools}
     emit = on_event or (lambda _k, _v: None)
+    downloaded_documents: list[dict] = []
 
     while True:
         if guard.should_stop():
@@ -50,21 +52,40 @@ def agent_loop(
         results: list[ToolResult] = []
         stopped = False
         for tc in response.tool_calls:
-            try:
-                guard.check_repeated_call(tc)
-            except GuardrailStop as e:
-                emit("guardrail_stop", {"reason": str(e)})
-                stopped = True
-                break
-
             spec = tool_by_name.get(tc.name)
             if spec is None:
                 content, is_error = f"Error: tool '{tc.name}' not found", True
             else:
+                if _should_repair_build_index_args(tc, downloaded_documents):
+                    original = dict(tc.arguments)
+                    tc.arguments = {
+                        **tc.arguments,
+                        "documents": list(downloaded_documents),
+                    }
+                    emit("tool_arg_repair", {
+                        "name": tc.name,
+                        "original": original,
+                        "repaired": {
+                            "documents_count": len(downloaded_documents),
+                            "paper_ids": [
+                                d.get("paper_id") for d in downloaded_documents
+                            ],
+                        },
+                    })
+                try:
+                    guard.check_repeated_call(tc)
+                except GuardrailStop as e:
+                    emit("guardrail_stop", {"reason": str(e)})
+                    stopped = True
+                    break
+
                 emit("tool_call", {"name": tc.name, "arguments": tc.arguments})
                 try:
                     content = str(spec.handler(tc.arguments))
                     is_error = False
+                    doc = _extract_downloaded_document(tc.name, content)
+                    if doc is not None:
+                        downloaded_documents = [doc]
                 except Exception as e:
                     content = f"Error: {type(e).__name__}: {e}"
                     is_error = True
@@ -78,3 +99,28 @@ def agent_loop(
             break
 
     return messages
+
+
+def _should_repair_build_index_args(
+    tc: ToolCall, downloaded_documents: list[dict]
+) -> bool:
+    if not tc.name.endswith("__build_index") or not downloaded_documents:
+        return False
+    documents = tc.arguments.get("documents")
+    return not documents
+
+
+def _extract_downloaded_document(tool_name: str, content: str) -> dict | None:
+    if not tool_name.endswith("__download_paper"):
+        return None
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if (
+        isinstance(data, dict)
+        and isinstance(data.get("paper_id"), str)
+        and isinstance(data.get("text"), str)
+    ):
+        return {"paper_id": data["paper_id"], "text": data["text"]}
+    return None

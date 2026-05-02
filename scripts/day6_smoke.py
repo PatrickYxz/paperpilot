@@ -31,7 +31,9 @@ def main() -> None:
     def tracer(kind: str, payload: dict) -> None:
         if kind == "tool_call":
             saw.add(payload["name"])
-            print(f"  → {payload['name']}({payload.get('arguments', {})})")
+            print(f"  → {payload['name']}({_preview_args(payload.get('arguments', {}))})")
+        elif kind == "tool_arg_repair":
+            print(f"  ↻ repaired {payload['name']}: {payload['repaired']}")
         elif kind == "tool_result":
             content = payload.get("content", "")
             preview = content[:160] if isinstance(content, str) else str(content)[:160]
@@ -40,10 +42,16 @@ def main() -> None:
             print(f"  ⚠ guardrail: {payload['reason']}")
 
     messages = run(
-        "搜一篇 attention 相关的 arxiv 论文(最近一两年的就行),下载它的全文,"
-        "然后在全文里查 multi-head attention 是怎么定义的,用一段话回答我。"
-        "回答必须基于 colbert.search 返回的具体段落,不要只看 abstract。",
-        max_iter=10,
+        "请按固定流程验证全文检索链路。"
+        "第一步必须调用 mcp__arxiv__search_papers,参数用 query='1706.03762', max_results=3。"
+        "如果 search 返回 429 或结果不理想,不要继续换 query 搜索,直接进入下一步。"
+        "第二步必须调用 mcp__arxiv__download_paper,参数 arxiv_id='1706.03762'。"
+        "第三步必须调用 mcp__colbert__build_index,documents 参数必须是一个非空列表,"
+        "其中唯一元素就是 download_paper 返回的对象,形如 documents=[{'paper_id': ..., 'text': ...}],"
+        "绝不能传空对象 {}。"
+        "第四步必须调用 mcp__colbert__search,查询 'multi-head attention definition', top_k=3。"
+        "最后用一段话回答 multi-head attention 是怎么定义的,回答必须基于 colbert.search 返回的具体段落。",
+        max_iter=8,
         on_event=tracer,
     )
 
@@ -59,6 +67,20 @@ def main() -> None:
     missing = EXPECT_TOOLS - saw
     assert not missing, f"FAIL: 期望调用的 tool 缺失 {missing};实际只见 {saw}"
     print("\n✅ Day 6 smoke PASSED")
+
+
+def _preview_args(args: dict) -> dict:
+    if "documents" not in args:
+        return args
+    docs = args.get("documents") or []
+    preview_docs = []
+    for doc in docs:
+        if isinstance(doc, dict):
+            preview_docs.append({
+                "paper_id": doc.get("paper_id"),
+                "text_len": len(doc.get("text", "")),
+            })
+    return {**args, "documents": preview_docs}
 
 
 if __name__ == "__main__":
