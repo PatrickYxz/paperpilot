@@ -7,6 +7,10 @@
     "colbert": {
       "command": "python",
       "args": ["-m", "paperpilot.mcp_servers.colbert.server"]
+    },
+    "graph": {
+      "command": "python",
+      "args": ["-m", "paperpilot.mcp_servers.graph.server"]
     }
   }
 }
