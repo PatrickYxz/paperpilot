@@ -144,13 +144,6 @@ class MCPClient:
             text = "\n".join(
                 b.text for b in result.content if hasattr(b, "text")
             )
-            # [REPRO] Day 7 临时诊断日志，Task 5 必须删除
-            import sys
-            print(
-                f"[REPRO] tool=mcp__{server}__{tool} blocks={len(result.content)} "
-                f"joined_text:\n{text}\n[REPRO END]",
-                file=sys.stderr, flush=True,
-            )
             if getattr(result, "isError", False):
                 raise MCPToolError(f"mcp__{server}__{tool} failed: {text}")
             return text
