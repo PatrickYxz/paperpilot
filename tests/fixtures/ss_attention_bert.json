@@ -1,0 +1,1683 @@
+[
+  {
+    "paperId": "4e53c699ae1b096b5b33e118371cd4c330ebc95e",
+    "externalIds": {
+      "ArXiv": "2401.00001",
+      "CorpusId": 266693671
+    },
+    "title": "Sector Rotation by Factor Model and Fundamental Analysis",
+    "year": 2023,
+    "openAccessPdf": {
+      "url": "",
+      "status": null,
+      "license": null,
+      "disclaimer": "Notice: Paper or abstract available at https://arxiv.org/abs/2401.00001, which is subject to the license by the author or copyright owner provided with this content. Please go to the source to verify the license and copyright information for your use."
+    },
+    "authors": [
+      {
+        "authorId": "2332239724",
+        "name": "Runjia Yang"
+      },
+      {
+        "authorId": "2374183627",
+        "name": "Beining Shi"
+      }
+    ],
+    "citations": [
+      {
+        "paperId": "5c5fb20da523ac78207b0cfebb6dcd48bdc470bd",
+        "externalIds": {
+          "DOI": "10.1109/ICoICI65217.2025.11253036",
+          "CorpusId": 283470356
+        },
+        "title": "Privacy-Enhanced Social Proximity Matching Protocols for Decentralized Online Social Networks",
+        "year": 2025,
+        "authors": [
+          {
+            "authorId": "2374975689",
+            "name": "Vishakha Salunkhe"
+          },
+          {
+            "authorId": "2374970591",
+            "name": "Mayuri Satpute"
+          },
+          {
+            "authorId": "2395923724",
+            "name": "Mayuri Shahir"
+          },
+          {
+            "authorId": "2393507270",
+            "name": "Roshani V. Pawar"
+          }
+        ]
+      },
+      {
+        "paperId": "0515ca9f212d098fcebe58d2eb8918002f8e148d",
+        "externalIds": {
+          "DBLP": "journals/access/HuangYXY24",
+          "DOI": "10.1109/ACCESS.2024.3505208",
+          "CorpusId": 274343427
+        },
+        "title": "Enhanced YOLOv8 With VTR Integration: A Robust Solution for Automated Recognition of OCS Mast Number Plates",
+        "year": 2024,
+        "authors": [
+          {
+            "authorId": "2332814358",
+            "name": "Xiaofeng Huang"
+          },
+          {
+            "authorId": "2374555641",
+            "name": "Shuya Yang"
+          },
+          {
+            "authorId": "2383718399",
+            "name": "A.-K. Xiong"
+          },
+          {
+            "authorId": "2332811933",
+            "name": "Yuqi Yang"
+          }
+        ]
+      }
+    ],
+    "references": []
+  },
+  {
+    "paperId": "8d23fe090aa9ceb309c8295ff8b6714553ac0483",
+    "externalIds": {
+      "ArXiv": "2401.00002",
+      "DOI": "10.1007/s13538-024-01629-1",
+      "CorpusId": 266693596
+    },
+    "title": "Prompt Emission of Relativistic Protons up to GeV Energies from M6.4-Class Solar Flare on July 17, 2023",
+    "year": 2023,
+    "openAccessPdf": {
+      "url": "",
+      "status": "CLOSED",
+      "license": null,
+      "disclaimer": "Notice: Paper or abstract available at https://arxiv.org/abs/2401.00002, which is subject to the license by the author or copyright owner provided with this content. Please go to the source to verify the license and copyright information for your use."
+    },
+    "authors": [
+      {
+        "authorId": "2277245744",
+        "name": "Carlos E. Navia"
+      },
+      {
+        "authorId": "2208153596",
+        "name": "M. Oliveira"
+      },
+      {
+        "authorId": "2277245383",
+        "name": "A. Nepomuceno"
+      }
+    ],
+    "citations": [
+      {
+        "paperId": "dfa7184add5335a891083a36495b262342744031",
+        "externalIds": {
+          "DOI": "10.1007/s13538-025-01977-6",
+          "CorpusId": 283800290
+        },
+        "title": "Compton–Getting Anisotropy in the South Atlantic Anomaly: Ground-Level Observations",
+        "year": 2025,
+        "authors": [
+          {
+            "authorId": "2127038467",
+            "name": "R. de Aguiar"
+          },
+          {
+            "authorId": "2068386011",
+            "name": "A. C. Fauth"
+          },
+          {
+            "authorId": "91282913",
+            "name": "C. Navia"
+          },
+          {
+            "authorId": "145807684",
+            "name": "A. Nepomuceno"
+          },
+          {
+            "authorId": "2127492337",
+            "name": "M. N. de Oliveira"
+          }
+        ]
+      },
+      {
+        "paperId": "0515ca9f212d098fcebe58d2eb8918002f8e148d",
+        "externalIds": {
+          "DBLP": "journals/access/HuangYXY24",
+          "DOI": "10.1109/ACCESS.2024.3505208",
+          "CorpusId": 274343427
+        },
+        "title": "Enhanced YOLOv8 With VTR Integration: A Robust Solution for Automated Recognition of OCS Mast Number Plates",
+        "year": 2024,
+        "authors": [
+          {
+            "authorId": "2332814358",
+            "name": "Xiaofeng Huang"
+          },
+          {
+            "authorId": "2374555641",
+            "name": "Shuya Yang"
+          },
+          {
+            "authorId": "2383718399",
+            "name": "A.-K. Xiong"
+          },
+          {
+            "authorId": "2332811933",
+            "name": "Yuqi Yang"
+          }
+        ]
+      },
+      {
+        "paperId": "3240e69493b1bfd3807ff61ad5977834f65f9e03",
+        "externalIds": {
+          "DOI": "10.1016/j.newast.2025.102468",
+          "CorpusId": 281143587
+        },
+        "title": "Solar energetic particle transport via the heliospheric current sheet: Evidence of a ground-level response on All Saints Day, 2014",
+        "year": null,
+        "authors": [
+          {
+            "authorId": "2368859670",
+            "name": "Marcel Nogueira de Oliveira"
+          },
+          {
+            "authorId": "2277245744",
+            "name": "Carlos E. Navia"
+          },
+          {
+            "authorId": "2277245383",
+            "name": "A. Nepomuceno"
+          }
+        ]
+      }
+    ],
+    "references": [
+      {
+        "paperId": "c6aa7a8252094cad355a0bb0f7351493755480a3",
+        "externalIds": {
+          "ArXiv": "2010.11313",
+          "PubMedCentral": "7578192",
+          "MAG": "3093476748",
+          "DOI": "10.1186/s40623-020-01252-9",
+          "CorpusId": 224811839,
+          "PubMed": "33122959"
+        },
+        "title": "The CHAOS-7 geomagnetic field model and observed changes in the South Atlantic Anomaly",
+        "year": 2020,
+        "authors": [
+          {
+            "authorId": "3122876",
+            "name": "C. Finlay"
+          },
+          {
+            "authorId": "113362982",
+            "name": "C. Kloss"
+          },
+          {
+            "authorId": "47265332",
+            "name": "N. Olsen"
+          },
+          {
+            "authorId": "102875570",
+            "name": "M. Hammer"
+          },
+          {
+            "authorId": "1398173997",
+            "name": "L. Tøffner‐Clausen"
+          },
+          {
+            "authorId": "6189860",
+            "name": "A. Grayver"
+          },
+          {
+            "authorId": "8673992",
+            "name": "A. Kuvshinov"
+          }
+        ]
+      },
+      {
+        "paperId": "00a7f5d3af6009a659bc81554c7f3d5cbf0d6306",
+        "externalIds": {
+          "MAG": "2801540271",
+          "ArXiv": "1805.05277",
+          "DOI": "10.1007/s11207-018-1303-8",
+          "CorpusId": 119330890
+        },
+        "title": "The 2015 Summer Solstice Storm: One of the Major Geomagnetic Storms of Solar Cycle 24 Observed at Ground Level",
+        "year": 2018,
+        "authors": [
+          {
+            "authorId": "102493074",
+            "name": "C. Augusto"
+          },
+          {
+            "authorId": "91282913",
+            "name": "C. Navia"
+          },
+          {
+            "authorId": "144884585",
+            "name": "M. N. Oliveira"
+          },
+          {
+            "authorId": "145807684",
+            "name": "A. Nepomuceno"
+          },
+          {
+            "authorId": "49271421",
+            "name": "J. Raulin"
+          },
+          {
+            "authorId": "84152976",
+            "name": "E. Tueros"
+          },
+          {
+            "authorId": "145336681",
+            "name": "R. R. S. Mendonça"
+          },
+          {
+            "authorId": "1388818512",
+            "name": "A. Fauth"
+          },
+          {
+            "authorId": "146944158",
+            "name": "H. Vieira de Souza"
+          },
+          {
+            "authorId": "71709756",
+            "name": "V. Kopenkin"
+          },
+          {
+            "authorId": "102859761",
+            "name": "T. Sinzi"
+          }
+        ]
+      },
+      {
+        "paperId": "7de9b4126f3700db7e112966c8cb597569042070",
+        "externalIds": {
+          "ArXiv": "1706.00775",
+          "MAG": "2622320868",
+          "DOI": "10.1007/s11207-017-1116-1",
+          "CorpusId": 118906609
+        },
+        "title": "Muon Excess at Sea Level during the Progress of a Geomagnetic Storm and High-Speed Stream Impact Near the Time of Earth’s Heliospheric Sheet Crossing",
+        "year": 2017,
+        "authors": [
+          {
+            "authorId": "102493074",
+            "name": "C. Augusto"
+          },
+          {
+            "authorId": "91282913",
+            "name": "C. Navia"
+          },
+          {
+            "authorId": "144884585",
+            "name": "M. N. Oliveira"
+          },
+          {
+            "authorId": "145807684",
+            "name": "A. Nepomuceno"
+          },
+          {
+            "authorId": "71709756",
+            "name": "V. Kopenkin"
+          },
+          {
+            "authorId": "102859761",
+            "name": "T. Sinzi"
+          }
+        ]
+      },
+      {
+        "paperId": "a53197857ce95cc1c14d17d3413b0df0e4192166",
+        "externalIds": {
+          "MAG": "2337761542",
+          "DOI": "10.3389/feart.2016.00040",
+          "CorpusId": 15195049
+        },
+        "title": "The South Atlantic Anomaly: The Key for a Possible Geomagnetic Reversal",
+        "year": 2016,
+        "authors": [
+          {
+            "authorId": "2074317995",
+            "name": "Luis Manuel"
+          },
+          {
+            "authorId": "2064063449",
+            "name": "A. Valdivia"
+          },
+          {
+            "authorId": "1399190099",
+            "name": "F. Pavón‐Carrasco"
+          },
+          {
+            "authorId": "13406413",
+            "name": "A. De Santis"
+          }
+        ]
+      },
+      {
+        "paperId": "e8f7c36d7d00dea87d5d9a625b7ed51398cd7935",
+        "externalIds": {
+          "MAG": "2315478801",
+          "DOI": "10.3847/0004-637X/821/1/62",
+          "CorpusId": 123232912
+        },
+        "title": "DOUBLE POWER LAWS IN THE EVENT-INTEGRATED SOLAR ENERGETIC PARTICLE SPECTRUM",
+        "year": 2016,
+        "authors": [
+          {
+            "authorId": "48096503",
+            "name": "Lulu Zhao"
+          },
+          {
+            "authorId": "48984966",
+            "name": "Ming Zhang"
+          },
+          {
+            "authorId": "6198301",
+            "name": "H. Rassoul"
+          }
+        ]
+      },
+      {
+        "paperId": "3bb559949b499d2107c27cfdf85da7ed4cdcb698",
+        "externalIds": {
+          "ArXiv": "1507.03954",
+          "DOI": "10.1093/pasj/psv111",
+          "CorpusId": 55073920
+        },
+        "title": "Signals at ground level of relativistic solar particles associated to the\"All Saints\"filament eruption on 2014",
+        "year": 2015,
+        "authors": [
+          {
+            "authorId": "102493074",
+            "name": "C. Augusto"
+          },
+          {
+            "authorId": "91282913",
+            "name": "C. Navia"
+          },
+          {
+            "authorId": "144884585",
+            "name": "M. N. Oliveira"
+          },
+          {
+            "authorId": "103321823",
+            "name": "H. Shigueoka"
+          },
+          {
+            "authorId": "145807684",
+            "name": "A. Nepomuceno"
+          },
+          {
+            "authorId": "1388818512",
+            "name": "A. Fauth"
+          }
+        ]
+      },
+      {
+        "paperId": "fe04491e13a90b5773db402a2843d29eba81d4f4",
+        "externalIds": {
+          "MAG": "2159941307",
+          "DOI": "10.1088/1742-6596/409/1/012128",
+          "CorpusId": 122816386
+        },
+        "title": "Calculations of temperature and barometric effects for cosmic ray flux on the Earth surface using the CORSIKA code",
+        "year": 2013,
+        "authors": [
+          {
+            "authorId": "102236742",
+            "name": "A. Kovylyaeva"
+          },
+          {
+            "authorId": "87054405",
+            "name": "A. Dmitrieva"
+          },
+          {
+            "authorId": "4292136",
+            "name": "N. V. Tolkacheva"
+          },
+          {
+            "authorId": "35161430",
+            "name": "E. Yakovleva"
+          }
+        ]
+      },
+      {
+        "paperId": "4b11b4c9d53db50326af146de8358fd5e37a905f",
+        "externalIds": {
+          "MAG": "3014204258",
+          "DBLP": "journals/corr/abs-1212-1916",
+          "ArXiv": "1212.1916",
+          "CorpusId": 41142765
+        },
+        "title": "Astrophysics Source Code Library",
+        "year": 2012,
+        "authors": [
+          {
+            "authorId": "1799308",
+            "name": "Alice Allen"
+          },
+          {
+            "authorId": "1784567",
+            "name": "K. DuPrie"
+          },
+          {
+            "authorId": "2259418966",
+            "name": "Bruce Berriman"
+          },
+          {
+            "authorId": "2257237943",
+            "name": "R. J. Hanisch"
+          },
+          {
+            "authorId": "38790630",
+            "name": "J. Mink"
+          },
+          {
+            "authorId": "35938381",
+            "name": "P. Teuben"
+          }
+        ]
+      },
+      {
+        "paperId": "29548e8342a242aefbf483f5aa2a88101297ecc1",
+        "externalIds": {
+          "MAG": "1985209682",
+          "DOI": "10.1007/S11214-012-9923-Z",
+          "CorpusId": 120113545
+        },
+        "title": "Space Weather and the Ground-Level Solar Proton Events of the 23rd Solar Cycle",
+        "year": 2012,
+        "authors": [
+          {
+            "authorId": "91875645",
+            "name": "M. Shea"
+          },
+          {
+            "authorId": "91408951",
+            "name": "D. Smart"
+          }
+        ]
+      },
+      {
+        "paperId": "0ad13d2063925313f1f9e49cd2ecdef0baec2d1d",
+        "externalIds": {
+          "MAG": "3010044801",
+          "CorpusId": 220758405
+        },
+        "title": "CORSIKA: An Air Shower Simulation Program",
+        "year": 2012,
+        "authors": [
+          {
+            "authorId": "145735830",
+            "name": "D. Heck"
+          },
+          {
+            "authorId": "117910273",
+            "name": "T. Pierog"
+          },
+          {
+            "authorId": "39341483",
+            "name": "J. Knapp"
+          }
+        ]
+      },
+      {
+        "paperId": "97d31d36c7c9358051dce50105c64d8f062a623c",
+        "externalIds": {
+          "MAG": "2029743715",
+          "DOI": "10.1016/J.NIMA.2010.08.091",
+          "CorpusId": 121056593
+        },
+        "title": "The Yangbajing Muon–Neutron Telescope",
+        "year": 2010,
+        "authors": [
+          {
+            "authorId": "1519113002",
+            "name": "J. Zhang"
+          },
+          {
+            "authorId": "2335430219",
+            "name": "Y. Tan"
+          },
+          {
+            "authorId": "2108874718",
+            "name": "Haidong Wang"
+          },
+          {
+            "authorId": "2157764218",
+            "name": "H. Lu"
+          },
+          {
+            "authorId": "2311318823",
+            "name": "X. Meng"
+          },
+          {
+            "authorId": "1726612",
+            "name": "Y. Muraki"
+          }
+        ]
+      },
+      {
+        "paperId": "457f0f93fa65a5bc22f9cbd6b7d63743c9358c47",
+        "externalIds": {
+          "MAG": "2795726643",
+          "DOI": "10.1029/2010GL042531",
+          "CorpusId": 56118025
+        },
+        "title": "The east‐west effect in solar proton flux measurements in geostationary orbit: A new GOES capability",
+        "year": 2010,
+        "authors": [
+          {
+            "authorId": "2237605754",
+            "name": "Juan V. Rodriguez"
+          },
+          {
+            "authorId": "2239436521",
+            "name": "Terrance Onsager"
+          },
+          {
+            "authorId": "46391710",
+            "name": "J. Mazur"
+          }
+        ]
+      },
+      {
+        "paperId": "591a273e1235aeaf7c5727de3058b15babe3c6ac",
+        "externalIds": {
+          "MAG": "1988075771",
+          "DOI": "10.1016/J.ASR.2009.07.005",
+          "CorpusId": 119839936
+        },
+        "title": "Fifty years of progress in geomagnetic cutoff rigidity determinations",
+        "year": 2009,
+        "authors": [
+          {
+            "authorId": "91408951",
+            "name": "D. Smart"
+          },
+          {
+            "authorId": "91875645",
+            "name": "M. Shea"
+          }
+        ]
+      },
+      {
+        "paperId": "d85495fbfd6c2be7c3956a2656f2041babb37441",
+        "externalIds": {
+          "MAG": "2074884880",
+          "DOI": "10.1016/J.NUCLPHYSBPS.2009.03.102",
+          "CorpusId": 122594845
+        },
+        "title": "Cosmic ray measurements with Pamela experiment",
+        "year": 2009,
+        "authors": [
+          {
+            "authorId": "49964332",
+            "name": "M. Casolino"
+          },
+          {
+            "authorId": "37879989",
+            "name": "N. Simone"
+          },
+          {
+            "authorId": "41200093",
+            "name": "M. P. Pascale"
+          },
+          {
+            "authorId": "48425219",
+            "name": "V. Felice"
+          },
+          {
+            "authorId": "5046574",
+            "name": "L. Marcelli"
+          },
+          {
+            "authorId": "14448524",
+            "name": "M. Minori"
+          },
+          {
+            "authorId": "153224953",
+            "name": "P. Picozza"
+          },
+          {
+            "authorId": "115299297",
+            "name": "R. Sparvoli"
+          },
+          {
+            "authorId": "1711114",
+            "name": "G. Castellini"
+          },
+          {
+            "authorId": "83264258",
+            "name": "O. Adriani"
+          },
+          {
+            "authorId": "5391380",
+            "name": "L. Bonechi"
+          },
+          {
+            "authorId": "4051010",
+            "name": "M. Bongi"
+          },
+          {
+            "authorId": "101424672",
+            "name": "S. Bottai"
+          },
+          {
+            "authorId": "49728384",
+            "name": "D. Fedele"
+          },
+          {
+            "authorId": "30922126",
+            "name": "P. Papini"
+          },
+          {
+            "authorId": "69450727",
+            "name": "S. Ricciarini"
+          },
+          {
+            "authorId": "114343237",
+            "name": "P. Spillantini"
+          },
+          {
+            "authorId": "49520313",
+            "name": "E. Taddei"
+          },
+          {
+            "authorId": "89405128",
+            "name": "E. Vannuccini"
+          },
+          {
+            "authorId": "1908224",
+            "name": "G. Barbarino"
+          },
+          {
+            "authorId": "145199759",
+            "name": "D. Campana"
+          },
+          {
+            "authorId": "92403516",
+            "name": "R. Carbone"
+          },
+          {
+            "authorId": "46321049",
+            "name": "G. Rosa"
+          },
+          {
+            "authorId": "114830917",
+            "name": "G. Osteria"
+          },
+          {
+            "authorId": "4098674",
+            "name": "M. Boezio"
+          },
+          {
+            "authorId": "30151666",
+            "name": "V. Bonvicini"
+          },
+          {
+            "authorId": "3652186",
+            "name": "E. Mocchiutti"
+          },
+          {
+            "authorId": "2225316",
+            "name": "A. Vacchi"
+          },
+          {
+            "authorId": "102427425",
+            "name": "G. Zampa"
+          },
+          {
+            "authorId": "152221923",
+            "name": "N. Zampa"
+          },
+          {
+            "authorId": "49074802",
+            "name": "A. Bruno"
+          },
+          {
+            "authorId": "48932072",
+            "name": "F. Cafagna"
+          },
+          {
+            "authorId": "145402467",
+            "name": "M. Ricci"
+          },
+          {
+            "authorId": "113820564",
+            "name": "P. Hofverberg"
+          },
+          {
+            "authorId": "144726213",
+            "name": "M. Pearce"
+          },
+          {
+            "authorId": "2059765798",
+            "name": "P. Carlson"
+          },
+          {
+            "authorId": "115658472",
+            "name": "É. Bogomolov"
+          },
+          {
+            "authorId": "117967995",
+            "name": "S. Krutkov"
+          },
+          {
+            "authorId": "47607819",
+            "name": "N. Nikonov"
+          },
+          {
+            "authorId": "114931819",
+            "name": "G. Vasilyev"
+          },
+          {
+            "authorId": "88797687",
+            "name": "W. Menn"
+          },
+          {
+            "authorId": "2374550775",
+            "name": "M. Simon"
+          },
+          {
+            "authorId": "91275615",
+            "name": "A. Galper"
+          },
+          {
+            "authorId": "102737158",
+            "name": "L. Grishantseva"
+          },
+          {
+            "authorId": "4658246",
+            "name": "S. Koldashov"
+          },
+          {
+            "authorId": "120563066",
+            "name": "A. Leonov"
+          },
+          {
+            "authorId": "34045732",
+            "name": "V. Mikhailov"
+          },
+          {
+            "authorId": "91595427",
+            "name": "S. Voronov"
+          },
+          {
+            "authorId": "3877362",
+            "name": "Y. Yurkin"
+          },
+          {
+            "authorId": "92145109",
+            "name": "V. Zverev"
+          },
+          {
+            "authorId": "92504630",
+            "name": "G. Bazilevskaya"
+          },
+          {
+            "authorId": "118549471",
+            "name": "A. Kvashnin"
+          },
+          {
+            "authorId": "30819375",
+            "name": "O. Maksumov"
+          },
+          {
+            "authorId": "91475681",
+            "name": "Y. Stozhkov"
+          }
+        ]
+      },
+      {
+        "paperId": "4c339d814d94349a353a90d84862e1c724cecc09",
+        "externalIds": {
+          "MAG": "1975211111",
+          "DOI": "10.1016/J.ASR.2008.09.023",
+          "CorpusId": 120843640
+        },
+        "title": "Solar neutron events as a tool to study particle acceleration at the Sun",
+        "year": 2009,
+        "authors": [
+          {
+            "authorId": "1403097672",
+            "name": "J. Valdés-Galicia"
+          },
+          {
+            "authorId": "1726612",
+            "name": "Y. Muraki"
+          },
+          {
+            "authorId": "145834679",
+            "name": "K. Watanabe"
+          },
+          {
+            "authorId": "49587961",
+            "name": "Y. Matsubara"
+          },
+          {
+            "authorId": "92445951",
+            "name": "T. Sako"
+          },
+          {
+            "authorId": "145831281",
+            "name": "L. González"
+          },
+          {
+            "authorId": "90925912",
+            "name": "O. Musalem"
+          },
+          {
+            "authorId": "152983162",
+            "name": "A. Hurtado"
+          }
+        ]
+      },
+      {
+        "paperId": "eb8f6f1f5308db4ca1f414322426f08eb42f13dc",
+        "externalIds": {
+          "MAG": "2126685367",
+          "ArXiv": "hep-ph/0612075",
+          "DOI": "10.1016/j.nuclphysbps.2007.10.013",
+          "CorpusId": 2426162
+        },
+        "title": "The hadronic models for cosmic ray physics: the FLUKA code solutions",
+        "year": 2006,
+        "authors": [
+          {
+            "authorId": "6383884",
+            "name": "G. Battistoni"
+          },
+          {
+            "authorId": "46762010",
+            "name": "F. Cerutti"
+          },
+          {
+            "authorId": "144840047",
+            "name": "A. Empl"
+          },
+          {
+            "authorId": "143811391",
+            "name": "A. Fassò"
+          },
+          {
+            "authorId": "2027234531",
+            "name": "A. Ferrari"
+          },
+          {
+            "authorId": "13879444",
+            "name": "E. Gadioli"
+          },
+          {
+            "authorId": "2273995",
+            "name": "M. Garzelli"
+          },
+          {
+            "authorId": "4931315",
+            "name": "S. Muraro"
+          },
+          {
+            "authorId": "6197935",
+            "name": "M. Pelliccioni"
+          },
+          {
+            "authorId": "47144583",
+            "name": "L. Pinsky"
+          },
+          {
+            "authorId": "48940482",
+            "name": "J. Ranft"
+          },
+          {
+            "authorId": "4832419",
+            "name": "S. Roesler"
+          },
+          {
+            "authorId": "2937750",
+            "name": "P. Sala"
+          },
+          {
+            "authorId": "7772564",
+            "name": "R. Villari"
+          }
+        ]
+      },
+      {
+        "paperId": "57ea96353f058bf90d6450d824011a03c0285519",
+        "externalIds": {
+          "MAG": "48406972",
+          "CorpusId": 127749837
+        },
+        "title": "The Geostationary Operational Environmental Satellite (GOES) Product Generation System",
+        "year": 2004,
+        "authors": [
+          {
+            "authorId": "20355273",
+            "name": "S. Haines"
+          },
+          {
+            "authorId": "101951457",
+            "name": "R. Suggs"
+          },
+          {
+            "authorId": "52418917",
+            "name": "G. Jedlovec"
+          }
+        ]
+      },
+      {
+        "paperId": "7b6ac9586c343d0049f2000c516e0b32501b079c",
+        "externalIds": {
+          "MAG": "1812863401",
+          "DOI": "10.1007/978-94-017-1187-6_14",
+          "CorpusId": 120338058
+        },
+        "title": "Design and co-Ordination of Multi-Station International Neutron Monitor Networks",
+        "year": 2000,
+        "authors": [
+          {
+            "authorId": "98592806",
+            "name": "H. Moraal"
+          },
+          {
+            "authorId": "145476384",
+            "name": "A. Belov"
+          },
+          {
+            "authorId": "2237253886",
+            "name": "J. Clem"
+          }
+        ]
+      },
+      {
+        "paperId": "1078bb4828cf08668e337dd07e3a2947414e11d8",
+        "externalIds": {
+          "MAG": "290334947",
+          "DOI": "10.1023/A:1026567706183",
+          "CorpusId": 117949880
+        },
+        "title": "The Cosmic Ray Nucleonic Component: The Invention and Scientific Uses of the Neutron Monitor – (Keynote Lecture)",
+        "year": 2000,
+        "authors": [
+          {
+            "authorId": "117930277",
+            "name": "J. Simpson"
+          }
+        ]
+      },
+      {
+        "paperId": "103e01e9e78f125bc2635c3f2b268dbff1bb4acf",
+        "externalIds": {
+          "MAG": "1987781408",
+          "DOI": "10.1023/A:1005088115759",
+          "CorpusId": 115540562
+        },
+        "title": "Electron, Proton, and Alpha Monitor on the Advanced Composition Explorer spacecraft",
+        "year": 1998,
+        "authors": [
+          {
+            "authorId": "2259301292",
+            "name": "Robert E Gold"
+          },
+          {
+            "authorId": "145312312",
+            "name": "S. Krimigis"
+          },
+          {
+            "authorId": "70090233",
+            "name": "S. E. Hawkins"
+          },
+          {
+            "authorId": "5636056",
+            "name": "D. Haggerty"
+          },
+          {
+            "authorId": "35040521",
+            "name": "D. Lohr"
+          },
+          {
+            "authorId": "1883243",
+            "name": "E. Fiore"
+          },
+          {
+            "authorId": "31579592",
+            "name": "T. Armstrong"
+          },
+          {
+            "authorId": "2362178291",
+            "name": "Greg J. Holland"
+          },
+          {
+            "authorId": "2419065",
+            "name": "L. Lanzerotti"
+          }
+        ]
+      },
+      {
+        "paperId": "4d5587393b1027bffaff7b10973d7e6280037aec",
+        "externalIds": {
+          "MAG": "1633694286",
+          "DOI": "10.1007/978-94-011-4762-0_15",
+          "CorpusId": 16609619
+        },
+        "title": "The Solar Isotope Spectrometer for the Advanced Composition Explorer",
+        "year": 1998,
+        "authors": [
+          {
+            "authorId": "1976724",
+            "name": "E. Stone"
+          },
+          {
+            "authorId": "145802707",
+            "name": "C. Cohen"
+          },
+          {
+            "authorId": "39786893",
+            "name": "W. Cook"
+          },
+          {
+            "authorId": "1997868",
+            "name": "A. Cummings"
+          },
+          {
+            "authorId": "97939545",
+            "name": "B. Gauld"
+          },
+          {
+            "authorId": "35103269",
+            "name": "B. Kecman"
+          },
+          {
+            "authorId": "101011330",
+            "name": "R. Leske"
+          },
+          {
+            "authorId": "3203922",
+            "name": "R. Mewaldt"
+          },
+          {
+            "authorId": "145143217",
+            "name": "M. R. Thayer"
+          },
+          {
+            "authorId": "39440484",
+            "name": "B. Dougherty"
+          },
+          {
+            "authorId": "116773400",
+            "name": "R. Grumm"
+          },
+          {
+            "authorId": "75161423",
+            "name": "B. Milliken"
+          },
+          {
+            "authorId": "4641501",
+            "name": "R. Radocinski"
+          },
+          {
+            "authorId": "2304096",
+            "name": "M. Wiedenbeck"
+          },
+          {
+            "authorId": "92429056",
+            "name": "E. Christian"
+          },
+          {
+            "authorId": "92929681",
+            "name": "S. Shuman"
+          },
+          {
+            "authorId": "2159967640",
+            "name": "T. T. Rosenvinge"
+          }
+        ]
+      },
+      {
+        "paperId": "6bd0a9a0f1e4988d785d28f7fcd9e0bb94714ba2",
+        "externalIds": {
+          "MAG": "1997671991",
+          "DOI": "10.1117/12.254075",
+          "CorpusId": 120053417
+        },
+        "title": "Operational uses of the GOES energetic particle detectors",
+        "year": 1996,
+        "authors": [
+          {
+            "authorId": "3666443",
+            "name": "T. Onsager"
+          },
+          {
+            "authorId": "48734313",
+            "name": "R. Grubb"
+          },
+          {
+            "authorId": "5214835",
+            "name": "J. Kunches"
+          },
+          {
+            "authorId": "145468864",
+            "name": "L. Matheson"
+          },
+          {
+            "authorId": "91702993",
+            "name": "D. Speich"
+          },
+          {
+            "authorId": "102225210",
+            "name": "R. Zwickl"
+          },
+          {
+            "authorId": "49662384",
+            "name": "H. Sauer"
+          }
+        ]
+      },
+      {
+        "paperId": "c3267c0dfdd6ef68ffdaff7e7c90842b6b2cb38d",
+        "externalIds": {
+          "MAG": "2074730040",
+          "DOI": "10.1088/0026-1394/32/6/50",
+          "CorpusId": 121257473
+        },
+        "title": "The Coronal Diagnostic Spectrometer for the solar and heliospheric observatory",
+        "year": 1995,
+        "authors": [
+          {
+            "authorId": "2246873031",
+            "name": "R. A. Harrison"
+          },
+          {
+            "authorId": "2317581032",
+            "name": "Eric Sawyer"
+          },
+          {
+            "authorId": "145543409",
+            "name": "M. Carter"
+          },
+          {
+            "authorId": "1388599281",
+            "name": "A. M. Cruise"
+          },
+          {
+            "authorId": "2120583135",
+            "name": "R. Cutler"
+          },
+          {
+            "authorId": "72988150",
+            "name": "A. Fludra"
+          },
+          {
+            "authorId": "2054273887",
+            "name": "R. Hayes"
+          },
+          {
+            "authorId": "22391820",
+            "name": "B. Kent"
+          },
+          {
+            "authorId": "152258097",
+            "name": "J. Lang"
+          },
+          {
+            "authorId": "133849762",
+            "name": "D. Parker"
+          },
+          {
+            "authorId": "145271819",
+            "name": "J. Payne"
+          },
+          {
+            "authorId": "101821770",
+            "name": "C. Pike"
+          },
+          {
+            "authorId": "102389505",
+            "name": "S. Peskett"
+          },
+          {
+            "authorId": "144513714",
+            "name": "A. Richards"
+          },
+          {
+            "authorId": "143674009",
+            "name": "J. Culhane"
+          },
+          {
+            "authorId": "145343691",
+            "name": "K. Norman"
+          },
+          {
+            "authorId": "144986581",
+            "name": "A. Breeveld"
+          },
+          {
+            "authorId": "12253906",
+            "name": "E. R. Breeveld"
+          },
+          {
+            "authorId": "2239593975",
+            "name": "K. A. Janabi"
+          },
+          {
+            "authorId": "30599405",
+            "name": "A. McCalden"
+          },
+          {
+            "authorId": "36255504",
+            "name": "J. H. Parkinson"
+          },
+          {
+            "authorId": "144363733",
+            "name": "D. Self"
+          },
+          {
+            "authorId": "153561166",
+            "name": "P. Thomas"
+          },
+          {
+            "authorId": "102029569",
+            "name": "A. Poland"
+          },
+          {
+            "authorId": "2110939793",
+            "name": "R. Thomas"
+          },
+          {
+            "authorId": "2363156802",
+            "name": "W. Thompson"
+          },
+          {
+            "authorId": "1405180399",
+            "name": "O. Kjeldseth-moe"
+          },
+          {
+            "authorId": "69922183",
+            "name": "P. Brekke"
+          },
+          {
+            "authorId": "97534762",
+            "name": "J. Karud"
+          },
+          {
+            "authorId": "4632246",
+            "name": "P. Maltby"
+          },
+          {
+            "authorId": "4694528",
+            "name": "B. Aschenbach"
+          },
+          {
+            "authorId": "152390952",
+            "name": "H. Bräuninger"
+          },
+          {
+            "authorId": "102290733",
+            "name": "M. Kühne"
+          },
+          {
+            "authorId": "2195864108",
+            "name": "Jörg Hollandt"
+          },
+          {
+            "authorId": "32686919",
+            "name": "O. Siegmund"
+          },
+          {
+            "authorId": "145076968",
+            "name": "M. Huber"
+          },
+          {
+            "authorId": "91273027",
+            "name": "A. Gabriel"
+          },
+          {
+            "authorId": "46952725",
+            "name": "H. Mason"
+          },
+          {
+            "authorId": "46504474",
+            "name": "B. Bromage"
+          }
+        ]
+      },
+      {
+        "paperId": "03bf2845f2de12a4d7b43213b08a1f39c355764d",
+        "externalIds": {
+          "MAG": "2571313061",
+          "DOI": "10.1023/A:1005082526237",
+          "CorpusId": 10744811
+        },
+        "title": "The Advanced Composition Explorer",
+        "year": 1988,
+        "authors": [
+          {
+            "authorId": "1976724",
+            "name": "E. Stone"
+          },
+          {
+            "authorId": "102197142",
+            "name": "L. Burlaga"
+          },
+          {
+            "authorId": "1997868",
+            "name": "A. Cummings"
+          },
+          {
+            "authorId": "48287829",
+            "name": "W. Feldman"
+          },
+          {
+            "authorId": "103455234",
+            "name": "W. Frain"
+          },
+          {
+            "authorId": "8109756",
+            "name": "J. Geiss"
+          },
+          {
+            "authorId": "6261583",
+            "name": "G. Gloeckler"
+          },
+          {
+            "authorId": "145311226",
+            "name": "R. Gold"
+          },
+          {
+            "authorId": "2202806",
+            "name": "D. Hovestadt"
+          },
+          {
+            "authorId": "145312312",
+            "name": "S. Krimigis"
+          },
+          {
+            "authorId": "2371604",
+            "name": "G. Mason"
+          },
+          {
+            "authorId": "145390435",
+            "name": "D. McComas"
+          },
+          {
+            "authorId": "3203922",
+            "name": "R. Mewaldt"
+          },
+          {
+            "authorId": "144652928",
+            "name": "J. Simpson"
+          },
+          {
+            "authorId": "103146567",
+            "name": "T. T. Rosenvinge"
+          },
+          {
+            "authorId": "2304096",
+            "name": "M. Wiedenbeck"
+          }
+        ]
+      },
+      {
+        "paperId": "6d4844eb5e47070958f08fd9310656628c8d3f54",
+        "externalIds": {
+          "MAG": "2088066661",
+          "DOI": "10.1086/165423",
+          "CorpusId": 122622643
+        },
+        "title": "Solar neutron emissivity during the large flare on 1982 June 3",
+        "year": 1987,
+        "authors": [
+          {
+            "authorId": "7347441",
+            "name": "E. Chupp"
+          },
+          {
+            "authorId": "49552139",
+            "name": "D. Forrest"
+          },
+          {
+            "authorId": "6784118",
+            "name": "G. Kanbach"
+          },
+          {
+            "authorId": "35522460",
+            "name": "E. Flueckiger"
+          },
+          {
+            "authorId": "103118133",
+            "name": "F. Golliez"
+          }
+        ]
+      },
+      {
+        "paperId": "bb416d4329be5854691b2cf6e3cda4495b8b3b76",
+        "externalIds": {
+          "MAG": "2087896071",
+          "DOI": "10.1007/BF00225188",
+          "CorpusId": 122979616
+        },
+        "title": "Possible evidence for a rigidity-dependent release of relativistic protons from the solar corona",
+        "year": 1982,
+        "authors": [
+          {
+            "authorId": "91875645",
+            "name": "M. Shea"
+          },
+          {
+            "authorId": "91408951",
+            "name": "D. Smart"
+          }
+        ]
+      },
+      {
+        "paperId": "1a0bb0d1d392c7589937fcf234071cea43ada736",
+        "externalIds": {
+          "MAG": "2042709738",
+          "DOI": "10.1103/PHYSREV.104.768",
+          "CorpusId": 121837062
+        },
+        "title": "Solar Cosmic Rays of February, 1956 and Their Propagation through Interplanetary Space",
+        "year": 1956,
+        "authors": [
+          {
+            "authorId": "145091485",
+            "name": "P. Meyer"
+          },
+          {
+            "authorId": "92544594",
+            "name": "E. Parker"
+          },
+          {
+            "authorId": "117930277",
+            "name": "J. Simpson"
+          }
+        ]
+      },
+      {
+        "paperId": "8527ce59b9cf2e615d45a041622aba419fab4e1e",
+        "externalIds": {
+          "CorpusId": 262009494
+        },
+        "title": "Calibration of the GOES 6–16 high-energy proton detectors based on modelling of ground level enhancement energy spectra",
+        "year": 2022,
+        "authors": [
+          {
+            "authorId": "2243271919",
+            "name": "Shaowen Hu"
+          },
+          {
+            "authorId": "49682742",
+            "name": "E. Semones"
+          }
+        ]
+      },
+      {
+        "paperId": null,
+        "externalIds": null,
+        "title": "arXiv preprint",
+        "year": 2016,
+        "authors": []
+      },
+      {
+        "paperId": null,
+        "externalIds": null,
+        "title": "Theoriginof“spaceweather.”SpaceWeather",
+        "year": 2015,
+        "authors": []
+      },
+      {
+        "paperId": null,
+        "externalIds": null,
+        "title": "High-energy gamma-ray emission from solar ﬂares: summary of fermi large area telescope detections and analysis of two m-class ﬂares",
+        "year": 2014,
+        "authors": []
+      },
+      {
+        "paperId": null,
+        "externalIds": null,
+        "title": "Relativistic nucleon and electronproduction inthe2003October28solarevent",
+        "year": 2005,
+        "authors": []
+      },
+      {
+        "paperId": "9f520096ed83d46e6645099cda46b2b4b0b3a862",
+        "externalIds": {
+          "MAG": "2078750904",
+          "DOI": "10.1086/177779",
+          "CorpusId": 122960337
+        },
+        "title": "Search for gamma-ray bursts at photon energies E>=10 GeV and E>=80 TeV",
+        "year": 1996,
+        "authors": [
+          {
+            "authorId": "2026867777",
+            "name": "M. Aglietta"
+          },
+          {
+            "authorId": "144413047",
+            "name": "B. Alessandro"
+          },
+          {
+            "authorId": "104697143",
+            "name": "P. Antonioli"
+          },
+          {
+            "authorId": "1725705",
+            "name": "F. Arneodo"
+          },
+          {
+            "authorId": "48752826",
+            "name": "L. Bergamasco"
+          },
+          {
+            "authorId": "2223606617",
+            "name": "M. Bertaina"
+          },
+          {
+            "authorId": "91236271",
+            "name": "A. Castellina"
+          },
+          {
+            "authorId": "49287099",
+            "name": "C. Castagnoli"
+          },
+          {
+            "authorId": "50219594",
+            "name": "A. Chiavassa"
+          },
+          {
+            "authorId": "93096196",
+            "name": "G. Castagnoli"
+          },
+          {
+            "authorId": "91593922",
+            "name": "B. Piazzoli"
+          },
+          {
+            "authorId": "83481551",
+            "name": "G. Disciascio"
+          },
+          {
+            "authorId": "6907284",
+            "name": "W. Fulgione"
+          },
+          {
+            "authorId": "70201222",
+            "name": "P. Galeotti"
+          },
+          {
+            "authorId": "152319708",
+            "name": "P. Ghia"
+          },
+          {
+            "authorId": "152457269",
+            "name": "R. Granella"
+          },
+          {
+            "authorId": "30598699",
+            "name": "M. Iacovacci"
+          },
+          {
+            "authorId": "151012725",
+            "name": "G. Mannocchi"
+          },
+          {
+            "authorId": "100870945",
+            "name": "C. Melagrana"
+          },
+          {
+            "authorId": "145611558",
+            "name": "N. M. Silva"
+          },
+          {
+            "authorId": "152456803",
+            "name": "C. Morello"
+          },
+          {
+            "authorId": "32738458",
+            "name": "G. Navarra"
+          },
+          {
+            "authorId": "152326795",
+            "name": "L. Riccati"
+          },
+          {
+            "authorId": "2074328601",
+            "name": "O. Saavedra"
+          },
+          {
+            "authorId": "102493410",
+            "name": "G. Trinchero"
+          },
+          {
+            "authorId": "70463726",
+            "name": "P. Vallania"
+          },
+          {
+            "authorId": "12874487",
+            "name": "S. Vernetto"
+          },
+          {
+            "authorId": "3606529",
+            "name": "C. Vigorito"
+          }
+        ]
+      },
+      {
+        "paperId": null,
+        "externalIds": null,
+        "title": "Space Science Reviews, 32, 251 —",
+        "year": 1982,
+        "authors": []
+      }
+    ]
+  }
+]

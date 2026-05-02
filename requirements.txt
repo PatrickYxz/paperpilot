@@ -16,7 +16,9 @@ pytest>=8.0.0
 PyMuPDF>=1.24.0
 pylate>=1.1.0
 
-# ===== Day 11+: 引用图谱 =====
-# networkx>=3.2
+# ===== Day 8: 引用关系图 =====
+# graph-mcp 用 NetworkX 存图 + httpx 调 Semantic Scholar Graph API
+networkx>=3.2
+httpx>=0.27
 
 # ===== Week 4: 评估 / 测试扩展 =====
