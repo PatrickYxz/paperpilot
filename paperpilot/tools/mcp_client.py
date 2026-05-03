@@ -11,6 +11,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import sys
 import threading
 import time
 from contextlib import AsyncExitStack
@@ -74,7 +75,7 @@ class MCPClient:
             fut = asyncio.run_coroutine_threadsafe(self._async_init(), self._loop)
             fut.result()
         except Exception as e:
-            self._shutdown_loop()
+            self.close()
             if isinstance(e, MCPStartupError):
                 raise
             raise MCPStartupError(str(e)) from e
@@ -105,7 +106,9 @@ class MCPClient:
 
             env = {**os.environ, **cfg.get("env", {})}
             params = StdioServerParameters(
-                command=cfg["command"], args=list(cfg["args"]), env=env,
+                command=_resolve_command(cfg["command"]),
+                args=list(cfg["args"]),
+                env=env,
             )
             try:
                 stdio = await self._exit_stack.enter_async_context(stdio_client(params))
@@ -173,3 +176,9 @@ class MCPClient:
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
+
+
+def _resolve_command(command: str) -> str:
+    if command.lower() in {"python", "python.exe"}:
+        return sys.executable
+    return command

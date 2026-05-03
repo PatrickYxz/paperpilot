@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
-from paperpilot.tools.mcp_client import MCPClient
+from paperpilot.tools.mcp_client import MCPClient, _resolve_command
 
 FIXTURE = Path(__file__).parent / "fixtures" / "echo_server.py"
 
@@ -68,3 +69,9 @@ def test_startup_hardfail_on_bad_command(tmp_path):
     c = MCPClient(m)
     with pytest.raises(MCPStartupError):
         c.start()
+
+
+def test_python_command_resolves_to_current_interpreter():
+    assert _resolve_command("python") == sys.executable
+    assert _resolve_command("python.exe") == sys.executable
+    assert _resolve_command("custom-python") == "custom-python"
