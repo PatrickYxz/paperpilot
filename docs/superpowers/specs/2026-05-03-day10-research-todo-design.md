@@ -376,7 +376,7 @@ smoke prompt **不**显式说 "先 research_todo / 先 load_skill" — 让 LLM �
 
 **完工标志 (Definition of Done)**:
 
-1. `pytest tests -q --ignore=tests/mcp_servers/test_graph_via_client.py` 全绿 (原 57 + Task 1 新 13 + Task 3 新 1 fast = 71 个; slow 5 + Task 3 扩 1 = 6 个 deselected)
+1. `pytest tests -q --ignore=tests/mcp_servers/test_graph_via_client.py` 全绿 (原 57 + Task 1 新 13 + Task 3 新 1 fast = 71 个; slow 5 个 deselected, Task 3 只是给已有 slow 测加 1 个 assertion 不增加 slow 测数)
 2. `python scripts/day9_smoke.py` 无回归 (deep-read 链路仍通)
 3. `python scripts/day10_smoke.py` 退出 0 + stdout 末尾 `Day 10 smoke PASSED`
 4. day10 smoke tracer 必须抓到 `research_todo` 至少 2 次 + `load_skill(name="find-classics")` 至少 1 次
