@@ -208,7 +208,7 @@ def render(items: list[dict]) -> str:
             mark = "[x]"
             suffix = ""
         elif it["status"] == "in_progress":
-            mark = "[→]"
+            mark = "[->]"
             suffix = " (in progress)"
         else:
             mark = "[ ]"
@@ -223,7 +223,7 @@ def render(items: list[dict]) -> str:
 ## Research Todos (3 items)
 
 - [x] 找出 diffusion 领域 5 篇代表性论文
-- [→] 构建引用图并跑共引 (in progress)
+- [->] 构建引用图并跑共引 (in progress)
 - [ ] 把 top-10 共引按 cited_by_count 排序综合
 ```
 

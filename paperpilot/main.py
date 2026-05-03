@@ -16,7 +16,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from paperpilot.builtin_tools.research_todo import (
-    RESEARCH_TASK_NUDGE,
+    RESEARCH_TODO_NUDGE,
     TodoStore,
     research_todo_tool,
 )
@@ -48,7 +48,7 @@ def _build_system_prompt(registry: SkillRegistry | None = None) -> str:
         SYSTEM_PROMPT_BASE
         + render_skill_section(registry.list_metadata())
         + "\n\n"
-        + RESEARCH_TASK_NUDGE
+        + RESEARCH_TODO_NUDGE
     )
 
 

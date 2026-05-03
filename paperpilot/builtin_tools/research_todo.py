@@ -10,7 +10,7 @@ from typing import Any
 from paperpilot.core.adapter import Tool
 
 
-RESEARCH_TASK_NUDGE = """
+RESEARCH_TODO_NUDGE = """
 ## 多步任务规划
 涉及多步研究 (找论文 -> 检索 -> 综合 / 比较多篇 paper / 跨 server 协同) 时, 先调
 research_todo 列计划, 每完成一步把对应项 status 标 completed, 推进 in_progress
