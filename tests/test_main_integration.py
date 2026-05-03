@@ -1,0 +1,28 @@
+"""main startup integration tests for skill loading."""
+from __future__ import annotations
+
+import pytest
+
+from paperpilot.main import _build_system_prompt, _build_tools
+
+
+def test_build_system_prompt_includes_skills():
+    prompt = _build_system_prompt()
+    assert "## 可用 skill" in prompt
+    assert "deep-read-paper" in prompt
+    assert "explore-citations" in prompt
+    assert "find-classics" in prompt
+    assert "PaperPilot" in prompt
+    assert "build_index" in prompt
+
+
+@pytest.mark.slow
+def test_build_tools_contains_load_skill_and_mcp_tools():
+    tools, mcp = _build_tools()
+    try:
+        names = [tool.name for tool in tools]
+        assert "load_skill" in names
+        assert any(name.startswith("mcp__") for name in names)
+    finally:
+        mcp.close()
+
