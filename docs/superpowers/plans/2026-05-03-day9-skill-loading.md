@@ -356,7 +356,7 @@ def load_skill_tool(registry: SkillRegistry) -> Tool:
 - [ ] **Step 1.5: Run tests to verify they pass**
 
 Run: `python -m pytest tests/builtin_tools/test_skill_loader.py -v`
-Expected: PASS, 12 tests passed
+Expected: PASS, 13 tests passed
 
 - [ ] **Step 1.6: Commit**
 
@@ -588,12 +588,16 @@ def _build_system_prompt() -> str:
 
 def _build_tools() -> tuple[list[Tool], MCPClient]:
     """返 (tools, mcp_client);调用方负责 mcp_client.close()。"""
-    mcp = MCPClient(MANIFEST_PATH)
-    mcp.start()
-
     registry = SkillRegistry(SKILLS_DIR)
-    tools: list[Tool] = [load_skill_tool(registry), *mcp.list_tools()]
-    return tools, mcp
+
+    mcp = MCPClient(MANIFEST_PATH)
+    try:
+        mcp.start()
+        tools: list[Tool] = [load_skill_tool(registry), *mcp.list_tools()]
+        return tools, mcp
+    except Exception:
+        mcp.close()
+        raise
 
 
 def _default_logger(kind: str, payload: dict) -> None:
@@ -657,7 +661,7 @@ Expected: 1 passed (真启 mcp servers, ~5s)
 - [ ] **Step 3.5: Run full default test suite to check for regressions**
 
 Run: `python -m pytest tests -q --ignore=tests/mcp_servers/test_graph_via_client.py`
-Expected: PASS, all default tests green (原 42 + Task 1 新 12 + Task 3 新 1 fast = 55 个; slow 1 个 deselected)
+Expected: PASS, all default tests green (原 43 + Task 1 新 13 + Task 3 新 1 fast = 57 个; slow 5 个 deselected)
 
 - [ ] **Step 3.6: Commit**
 
@@ -790,7 +794,7 @@ git commit -m "Day 9 Task 4: day9_smoke 端到端 (load_skill -> arxiv -> colber
 
 ## Definition of Done
 
-1. `python -m pytest tests -q --ignore=tests/mcp_servers/test_graph_via_client.py` 全绿(原 42 + Task 1 新 12 + Task 3 新 1 fast = 55 个;Task 3 slow 1 个 deselected)
+1. `python -m pytest tests -q --ignore=tests/mcp_servers/test_graph_via_client.py` 全绿(原 43 + Task 1 新 13 + Task 3 新 1 fast = 57 个;slow 5 个 deselected)
 2. `python scripts/day5_smoke.py` 无回归(可选,arxiv 抖动允许跳过)
 3. `python scripts/day6_smoke.py` 无回归(可选)
 4. `python scripts/day8_smoke.py` 无回归(可选)

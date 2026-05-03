@@ -407,14 +407,14 @@ verification 必须包含 `assert "load_skill" in saw, "skill loading 没起作�
 | 阶段 | 预估 |
 |---|---|
 | 写 plan | ~30 min |
-| Task 1: SkillRegistry + frontmatter 解析 + 12 个单测 | ~60 min |
+| Task 1: SkillRegistry + frontmatter 解析 + 13 个单测 | ~60 min |
 | Task 2: 写 3 个 skill markdown | ~60 min |
 | Task 3: main.py 集成 (system prompt 拼接 + tool 注册 + 集成单测) | ~45 min |
 | Task 4: scripts/day9_smoke.py + 真 LLM 联调 | ~45 min |
 | **合计** | **~3.5 小时** (预算 6-7h, 留 ~3h buffer 给 LLM 真不主动 load_skill 时调 prompt) |
 
 **完工标志 (Definition of Done)**:
-1. `pytest tests/` 全绿 (含 `test_skill_loader.py` 12 个新测; main 集成测)
+1. `pytest tests/` 全绿 (含 `test_skill_loader.py` 13 个新测; main 集成测)
 2. `python scripts/day5_smoke.py` 无回归
 3. `python scripts/day6_smoke.py` 无回归
 4. `python scripts/day8_smoke.py` 无回归
@@ -462,7 +462,7 @@ verification 必须包含 `assert "load_skill" in saw, "skill loading 没起作�
 ## 附: 与已有 spec / 架构的衔接点
 
 - **复用 Day 4 agent_loop** —— 内嵌 tool 与 mcp tool 走同一 `Tool` dataclass + handler dispatch, agent_loop 一行不改
-- **复用 Day 5 mcp_client 启动** —— skill 注册不影响 mcp_client; main.py 启动顺序: mcp_client.startup() → SkillRegistry.scan() → tools 合并 → agent_loop
+- **复用 Day 5 mcp_client 启动** —— skill 注册不影响 mcp_client; main.py 启动顺序: SkillRegistry.scan() → mcp_client.start() → tools 合并 → agent_loop。先校验 skill,再启动 MCP,避免 skill frontmatter 错误时留下已启动的 MCP 后台线程/子进程；若 MCP 启动或 list_tools 期间异常,调用方应 close 后再抛出。
 - **复用 Day 6 build_index 参数 repair** —— 不冲突; deep-read-paper skill 的 prose 与 main.py SYSTEM_PROMPT 里 build_index 强约束一致, 双保险
 - **复用 Day 7 trip wire** —— `load_skill` 不是 list[dict] 输出, 不撞 FastMCP 监控
 - **复用 Day 8 graph-mcp** —— `explore-citations` 和 `find-classics` 两个 skill 直接 prose 调 graph 4 个 tool, 验证 Day 8 工作真能被 LLM 串起来
