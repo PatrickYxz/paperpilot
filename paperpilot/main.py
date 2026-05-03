@@ -15,6 +15,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from paperpilot.builtin_tools.research_todo import (
+    RESEARCH_TASK_NUDGE,
+    TodoStore,
+    research_todo_tool,
+)
 from paperpilot.builtin_tools.skill_loader import (
     SkillRegistry,
     load_skill_tool,
@@ -39,19 +44,30 @@ SYSTEM_PROMPT_BASE = """你是 PaperPilot,一个学术论文研究助手。
 
 def _build_system_prompt(registry: SkillRegistry | None = None) -> str:
     registry = registry or SkillRegistry(SKILLS_DIR)
-    return SYSTEM_PROMPT_BASE + render_skill_section(registry.list_metadata())
+    return (
+        SYSTEM_PROMPT_BASE
+        + render_skill_section(registry.list_metadata())
+        + "\n\n"
+        + RESEARCH_TASK_NUDGE
+    )
 
 
 def _build_tools(
     registry: SkillRegistry | None = None,
+    todo_store: TodoStore | None = None,
 ) -> tuple[list[Tool], MCPClient]:
     """Return (tools, mcp_client); caller is responsible for close()."""
     registry = registry or SkillRegistry(SKILLS_DIR)
+    todo_store = todo_store or TodoStore()
 
     mcp = MCPClient(MANIFEST_PATH)
     try:
         mcp.start()
-        tools: list[Tool] = [load_skill_tool(registry), *mcp.list_tools()]
+        tools: list[Tool] = [
+            load_skill_tool(registry),
+            research_todo_tool(todo_store),
+            *mcp.list_tools(),
+        ]
         return tools, mcp
     except Exception:
         mcp.close()
@@ -72,7 +88,8 @@ def run(query: str, *, max_iter: int = 8, on_event=None) -> list[dict]:
     load_dotenv()
 
     registry = SkillRegistry(SKILLS_DIR)
-    tools, mcp = _build_tools(registry)
+    todo_store = TodoStore()
+    tools, mcp = _build_tools(registry, todo_store)
     try:
         messages = [{"role": "user", "content": query}]
         return agent_loop(
