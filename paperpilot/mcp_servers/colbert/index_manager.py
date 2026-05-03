@@ -14,6 +14,7 @@ Windows DLL 顺序说明:
 """
 from __future__ import annotations
 
+import gc
 import shutil
 from pathlib import Path
 
@@ -52,6 +53,7 @@ class IndexManager:
         """
         if not documents:
             raise ValueError("documents must not be empty")
+        self._release_current_index()
 
         all_ids: list[str] = []
         all_texts: list[str] = []
@@ -124,3 +126,9 @@ class IndexManager:
 
     def _index_path(self) -> Path:
         return INDEX_ROOT / INDEX_NAME
+
+    def _release_current_index(self) -> None:
+        """Release old PLAID handles before overriding the fixed index path."""
+        self._index = None
+        self._chunk_texts = {}
+        gc.collect()

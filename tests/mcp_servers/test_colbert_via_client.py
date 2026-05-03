@@ -32,6 +32,20 @@ def _make_manifest(tmp_path: Path) -> Path:
     return m
 
 
+def _decode_results(search_result):
+    if not isinstance(search_result, str):
+        return search_result
+    dec = json.JSONDecoder()
+    results = []
+    s = search_result.strip()
+    idx = 0
+    while idx < len(s):
+        obj, end = dec.raw_decode(s, idx)
+        results.append(obj)
+        idx = end + len(s[end:]) - len(s[end:].lstrip())
+    return results
+
+
 @pytest.mark.slow
 def test_build_and_search(tmp_path):
     """3 篇短 dummy text → build → search → 命中关键词且 chunk_text 非空。"""
@@ -55,19 +69,7 @@ def test_build_and_search(tmp_path):
         assert b["index_name"] == "paperpilot_current"
 
         search_result = search.handler({"query": "late interaction retrieval", "top_k": 3})
-        # FastMCP serializes list[dict] as N text blocks joined by "\n",
-        # giving concatenated JSON objects rather than a JSON array.
-        if isinstance(search_result, str):
-            dec = json.JSONDecoder()
-            results = []
-            s = search_result.strip()
-            idx = 0
-            while idx < len(s):
-                obj, end = dec.raw_decode(s, idx)
-                results.append(obj)
-                idx = end + len(s[end:]) - len(s[end:].lstrip())
-        else:
-            results = search_result
+        results = _decode_results(search_result)
         assert len(results) >= 1
         assert any(r["paper_id"] == "p3" for r in results), \
             f"expected p3 (ColBERT) in top-3, got {results}"
@@ -76,6 +78,37 @@ def test_build_and_search(tmp_path):
         assert len(top1["chunk_text"]) > 50, \
             f"chunk_text 太短不像真段落: {top1['chunk_text']!r}"
         assert isinstance(top1["score"], float)
+    finally:
+        c.close()
+
+
+@pytest.mark.slow
+def test_consecutive_rebuild_releases_previous_index(tmp_path):
+    """Repeated build_index calls in one server session should work on Windows."""
+    c = MCPClient(_make_manifest(tmp_path))
+    c.start()
+    try:
+        build = next(t for t in c.list_tools() if t.name == "mcp__colbert__build_index")
+        search = next(t for t in c.list_tools() if t.name == "mcp__colbert__search")
+
+        build.handler({
+            "documents": [{
+                "paper_id": "p1",
+                "text": "Transformers use self attention for sequence transduction.",
+            }],
+        })
+        build.handler({
+            "documents": [{
+                "paper_id": "p2",
+                "text": "ColBERT retrieval uses late interaction over token embeddings.",
+            }],
+        })
+
+        results = _decode_results(
+            search.handler({"query": "late interaction retrieval", "top_k": 3})
+        )
+        assert results
+        assert results[0]["paper_id"] == "p2"
     finally:
         c.close()
 

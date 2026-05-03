@@ -23,6 +23,7 @@ def test_build_tools_contains_load_skill_research_todo_and_mcp_tools():
         names = [tool.name for tool in tools]
         assert "load_skill" in names
         assert "research_todo" in names
+        assert "paper_deep_read" in names
         assert any(name.startswith("mcp__") for name in names)
     finally:
         mcp.close()
@@ -32,3 +33,9 @@ def test_build_system_prompt_includes_research_todo_nudge():
     prompt = _build_system_prompt()
     assert "## 多步任务规划" in prompt
     assert "research_todo" in prompt
+
+
+def test_build_system_prompt_includes_paper_deep_read_nudge():
+    prompt = _build_system_prompt()
+    assert "## Multi-paper deep reading" in prompt
+    assert "paper_deep_read" in prompt

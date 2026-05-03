@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+from typing import Callable
 
 from dotenv import load_dotenv
 
@@ -19,6 +20,10 @@ from paperpilot.builtin_tools.research_todo import (
     RESEARCH_TODO_NUDGE,
     TodoStore,
     research_todo_tool,
+)
+from paperpilot.builtin_tools.subagent import (
+    PAPER_DEEP_READ_NUDGE,
+    paper_deep_read_tool,
 )
 from paperpilot.builtin_tools.skill_loader import (
     SkillRegistry,
@@ -49,24 +54,34 @@ def _build_system_prompt(registry: SkillRegistry | None = None) -> str:
         + render_skill_section(registry.list_metadata())
         + "\n\n"
         + RESEARCH_TODO_NUDGE
+        + "\n\n"
+        + PAPER_DEEP_READ_NUDGE
     )
 
 
 def _build_tools(
     registry: SkillRegistry | None = None,
     todo_store: TodoStore | None = None,
+    on_event: Callable[[str, dict], None] | None = None,
 ) -> tuple[list[Tool], MCPClient]:
     """Return (tools, mcp_client); caller is responsible for close()."""
     registry = registry or SkillRegistry(SKILLS_DIR)
     todo_store = todo_store or TodoStore()
+    emit = on_event or _default_logger
 
     mcp = MCPClient(MANIFEST_PATH)
     try:
         mcp.start()
+        mcp_tools = mcp.list_tools()
         tools: list[Tool] = [
             load_skill_tool(registry),
             research_todo_tool(todo_store),
-            *mcp.list_tools(),
+            paper_deep_read_tool(
+                client_factory=lambda: LLMClient(),
+                mcp_tools=mcp_tools,
+                on_event=emit,
+            ),
+            *mcp_tools,
         ]
         return tools, mcp
     except Exception:
@@ -87,9 +102,10 @@ def run(query: str, *, max_iter: int = 8, on_event=None) -> list[dict]:
     """Run one complete agent conversation and return final messages."""
     load_dotenv()
 
+    emit = on_event or _default_logger
     registry = SkillRegistry(SKILLS_DIR)
     todo_store = TodoStore()
-    tools, mcp = _build_tools(registry, todo_store)
+    tools, mcp = _build_tools(registry, todo_store, on_event=emit)
     try:
         messages = [{"role": "user", "content": query}]
         return agent_loop(
@@ -101,7 +117,7 @@ def run(query: str, *, max_iter: int = 8, on_event=None) -> list[dict]:
                 max_iterations=max_iter,
                 budget_tokens=int(os.environ.get("BUDGET_TOKENS", 50_000)),
             ),
-            on_event=on_event or _default_logger,
+            on_event=emit,
         )
     finally:
         mcp.close()
