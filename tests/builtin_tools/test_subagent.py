@@ -257,8 +257,18 @@ def test_event_aggregation_prefixes_paper_id():
     assert len(turn_payloads) == 2
     assert {payload["subagent_paper_id"] for payload in turn_payloads} == {"A", "B"}
 
+    start_payloads = [
+        payload for kind, payload in received if kind == "subagent_start"
+    ]
+    done_payloads = [
+        payload for kind, payload in received if kind == "subagent_done"
+    ]
+    assert {payload["subagent_paper_id"] for payload in start_payloads} == {"A", "B"}
+    assert {payload["subagent_paper_id"] for payload in done_payloads} == {"A", "B"}
+    assert {payload["status"] for payload in done_payloads} == {"ok"}
 
-def test_tool_metadata_and_conservative_worker_count():
+
+def test_tool_metadata_and_worker_count():
     tool = paper_deep_read_tool(
         client_factory=lambda: FakeClient(lambda m: _text_response("x")),
         mcp_tools=[],
@@ -270,7 +280,8 @@ def test_tool_metadata_and_conservative_worker_count():
     assert tool.input_schema["properties"]["paper_ids"]["maxItems"] == MAX_PAPERS
     assert MAX_PAPERS == 8
     assert SUBAGENT_MAX_ITER == 8
-    assert THREAD_POOL_SIZE == 1
+    assert THREAD_POOL_SIZE == 3
     assert "paper_deep_read" in PAPER_DEEP_READ_NUDGE
     assert "paper_ids" not in SUBAGENT_SYSTEM
+    assert "paper_id=" in SUBAGENT_SYSTEM
     assert "mcp__colbert__search(query" in SUBAGENT_SYSTEM

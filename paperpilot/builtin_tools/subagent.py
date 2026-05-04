@@ -1,9 +1,8 @@
 """paper_deep_read built-in tool.
 
-Day 11 conservative version: each paper is read by an independent agent loop,
-but workers are serialized because the current ColBERT MCP server has one
-global index name. The ThreadPoolExecutor boundary remains so true parallelism
-can be enabled after ColBERT gains isolated indexes.
+Each paper is read by an independent agent loop with isolated context. Workers
+run in parallel via ThreadPoolExecutor; ColBERT MCP gives each paper its own
+index so concurrent build/search calls do not race.
 """
 from __future__ import annotations
 
@@ -18,7 +17,7 @@ from paperpilot.core.loop import EventCallback, agent_loop
 MAX_PAPERS = 8
 SUBAGENT_MAX_ITER = 8
 SUBAGENT_BUDGET_TOKENS = 120_000
-THREAD_POOL_SIZE = 1
+THREAD_POOL_SIZE = 3
 
 SUBAGENT_TOOL_NAMES = {
     "mcp__arxiv__download_paper",
@@ -42,8 +41,9 @@ the user's query through detailed reading.
 Recommended workflow:
 1. Call mcp__arxiv__download_paper(arxiv_id="<paper_id>").
 2. Call mcp__colbert__build_index(documents=[download_result]).
-3. Call mcp__colbert__search(query="...", top_k=5) several times for method,
-   experiments, findings, limitations, and query-specific evidence.
+3. Call mcp__colbert__search(query="...", paper_id="<paper_id>", top_k=5)
+   several times for method, experiments, findings, limitations, and
+   query-specific evidence.
 4. Write the final answer as markdown text.
 
 Final markdown format, around 500 tokens:
@@ -107,6 +107,7 @@ def _run_one(
         ),
     }]
     guard = Guardrail(max_iterations=max_iter, budget_tokens=budget_tokens)
+    on_event("subagent_start", {})
     try:
         agent_loop(
             sub_messages,
@@ -117,14 +118,17 @@ def _run_one(
             on_event=on_event,
         )
     except Exception as exc:
+        status = f"error: {type(exc).__name__}: {exc}"
+        on_event("subagent_done", {"status": status})
         return {
             "paper_id": paper_id,
             "summary": _extract_last_text(sub_messages) or "",
-            "status": f"error: {type(exc).__name__}: {exc}",
+            "status": status,
         }
 
     summary = _extract_last_text(sub_messages) or ""
     status = "max_iter_reached" if guard.stop_reason() else "ok"
+    on_event("subagent_done", {"status": status})
     return {"paper_id": paper_id, "summary": summary, "status": status}
 
 
@@ -196,8 +200,7 @@ def paper_deep_read_tool(
         description=(
             "Deep-read 1-8 papers with isolated subagents and return markdown "
             "summaries for comparison or synthesis. Use for multi-paper "
-            "questions where abstracts are not enough. Day 11 runs workers "
-            "serially to avoid the current single ColBERT index race."
+            "questions where abstracts are not enough."
         ),
         input_schema={
             "type": "object",
