@@ -12,6 +12,7 @@ def test_build_system_prompt_includes_skills():
     assert "deep-read-paper" in prompt
     assert "explore-citations" in prompt
     assert "find-classics" in prompt
+    assert "compare-papers" in prompt
     assert "PaperPilot" in prompt
     assert "build_index" in prompt
 
@@ -39,3 +40,9 @@ def test_build_system_prompt_includes_paper_deep_read_nudge():
     prompt = _build_system_prompt()
     assert "## Multi-paper deep reading" in prompt
     assert "paper_deep_read" in prompt
+
+
+def test_build_system_prompt_mentions_search_paper_id_required():
+    prompt = _build_system_prompt()
+    assert "mcp__colbert__search" in prompt
+    assert "paper_id" in prompt

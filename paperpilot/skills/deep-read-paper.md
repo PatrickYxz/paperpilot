@@ -17,7 +17,8 @@ when_to_use: 用户给定 arxiv id 或论文标题要求详细讲解,或追问�
    - `documents` 必须是非空 list。
    - 每个元素必须包含 `paper_id` 和 `text`。
    - 通常直接把 `download_paper` 返回对象作为 list 里的唯一元素。
-3. 多轮检索: 针对用户问题里的关键概念调 `mcp__colbert__search(query="...", top_k=3)`。
+3. 多轮检索: 针对用户问题里的关键概念调 `mcp__colbert__search(query="...", paper_id="<step 2 build 的 paper_id>", top_k=3)`。
+   - paper_id 必传,值与 step 2 build_index 时的 paper_id 一致。
    - 一个 query 不够时,拆成多个具体 query 多搜几次。
    - query 应围绕用户真正关心的术语,例如 definition、architecture、experiment、ablation。
 4. 综合回答: 只基于 `colbert.search` 返回的具体段落回答,并引用或转述段落里的证据。
@@ -26,4 +27,3 @@ when_to_use: 用户给定 arxiv id 或论文标题要求详细讲解,或追问�
 - 不要只看 abstract 回答细节问题。
 - 不要编造段落、标题、作者或结论。
 - 如果 search 返回内容与问题无关,换 query 继续搜,而不是凭印象回答。
-
