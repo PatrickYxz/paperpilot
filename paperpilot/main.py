@@ -16,6 +16,10 @@ from typing import Callable
 
 from dotenv import load_dotenv
 
+from paperpilot.builtin_tools.compact import (
+    COMPACT_CONTEXT_NUDGE,
+    compact_context_tool,
+)
 from paperpilot.builtin_tools.research_todo import (
     RESEARCH_TODO_NUDGE,
     TodoStore,
@@ -57,17 +61,21 @@ def _build_system_prompt(registry: SkillRegistry | None = None) -> str:
         + RESEARCH_TODO_NUDGE
         + "\n\n"
         + PAPER_DEEP_READ_NUDGE
+        + "\n\n"
+        + COMPACT_CONTEXT_NUDGE
     )
 
 
 def _build_tools(
     registry: SkillRegistry | None = None,
     todo_store: TodoStore | None = None,
+    messages_ref: list[dict] | None = None,
     on_event: Callable[[str, dict], None] | None = None,
 ) -> tuple[list[Tool], MCPClient]:
     """Return (tools, mcp_client); caller is responsible for close()."""
     registry = registry or SkillRegistry(SKILLS_DIR)
     todo_store = todo_store or TodoStore()
+    messages_ref = messages_ref if messages_ref is not None else []
     emit = on_event or _default_logger
 
     mcp = MCPClient(MANIFEST_PATH)
@@ -80,6 +88,11 @@ def _build_tools(
             paper_deep_read_tool(
                 client_factory=lambda: LLMClient(),
                 mcp_tools=mcp_tools,
+                on_event=emit,
+            ),
+            compact_context_tool(
+                messages_ref=messages_ref,
+                client_factory=lambda: LLMClient(),
                 on_event=emit,
             ),
             *mcp_tools,
@@ -106,9 +119,14 @@ def run(query: str, *, max_iter: int = 8, on_event=None) -> list[dict]:
     emit = on_event or _default_logger
     registry = SkillRegistry(SKILLS_DIR)
     todo_store = TodoStore()
-    tools, mcp = _build_tools(registry, todo_store, on_event=emit)
+    messages: list[dict] = [{"role": "user", "content": query}]
+    tools, mcp = _build_tools(
+        registry,
+        todo_store,
+        messages_ref=messages,
+        on_event=emit,
+    )
     try:
-        messages = [{"role": "user", "content": query}]
         return agent_loop(
             messages,
             system=_build_system_prompt(registry),
