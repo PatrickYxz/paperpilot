@@ -9,7 +9,7 @@
 
 - **B 层(架构)**:ColBERT 索引按 paper_id 隔离,每篇一套独立 PLAID 索引;`build_index`
   命中即跳过 + 跨 session 持久化;`search` 加必填入参 `paper_id`;`paper_deep_read`
-  的 `THREAD_POOL_SIZE` 提到 `min(4, len(paper_ids))`,撕掉 Day 11 保守注释。
+  的 `THREAD_POOL_SIZE` 提到 `min(3, len(paper_ids))`,撕掉 Day 11 保守注释。
 - **A 层(业务)**:新增 `compare-papers` skill,极简版——给定 3-8 个 paper_id,
   调一次 `paper_deep_read` 后综合对比。
 - **不做**:候选论文发现 / research_todo 集成 / pdf-parse / VLM / 任何
@@ -19,11 +19,11 @@
 
 | 项 | 结论 | 理由 |
 |---|---|---|
-| 索引隔离粒度 | per-paper 目录 `data/colbert_index/<paper_id>/` | paper_id 是稳定 hashable key,跨 session 可缓存,真并发零锁,deep-read-paper 老路径无破坏 |
+| 索引隔离粒度 | per-paper 目录 `data/colbert_index/<paper_key>/` | paper_id 是稳定逻辑 key,但旧 arXiv ID 可含 `/`;磁盘目录必须经 `_paper_key(paper_id)` 转义,跨 session 可缓存,真并发零锁 |
 | `search` 接口 | `paper_id: str`(单值,必填) | 当前 0 个调用点需要多 paper 检索;按"不要推测性抽象"红线选单值 |
 | `build_index` 重复行为 | 命中即跳过 | 重复 build 同一 paper 跳过 ColBERT encode(~30-90s),回访同一 paper 演示/调试场景显著省时 |
 | 启动期清理 | 不清,持久化 | 配合命中跳过,跨 session 复用 |
-| `THREAD_POOL_SIZE` | `min(4, len(paper_ids))` | 单卡本地 sentence_transformers 并发舒适区上限 4;3 篇用例不浪费 thread 占位 |
+| `THREAD_POOL_SIZE` | `min(3, len(paper_ids))` | Day 12 smoke 只需 3 篇即可证明真并发;先降低本地 ColBERT/CPU 压力,稳定后再考虑提到 4 |
 | `compare-papers` skill 范围 | 极简(只管 N 篇综合) | 候选发现交给 LLM 自决;skill 越聚焦触发越准;不与 find-classics 重叠 |
 
 ## 组件改动
@@ -34,15 +34,17 @@
 
 ```
 data/colbert_index/
-  <paper_id_A>/
+  <paper_key_A>/
     paperpilot_current/      # PLAID 索引目录(沿用 INDEX_NAME 常量)
     chunks.json              # {chunk_id: chunk_text}, search 时回填
-  <paper_id_B>/
+  <paper_key_B>/
     ...
 ```
 
 `INDEX_NAME = "paperpilot_current"` 保留为 PLAID 内部目录名;`INDEX_ROOT = Path("data/colbert_index")` 不变;
-新加 helper `_paper_root(paper_id) -> INDEX_ROOT / paper_id`、
+新加 helper `_paper_key(paper_id)` 把 `/`、`\`、`:` 等路径字符转成 filesystem-safe key,
+例如旧式 arXiv ID `cs/0501001` 不能直接作为目录名;`chunks.json` 内仍保留原始 chunk id / paper_id。
+再加 helper `_paper_root(paper_id) -> INDEX_ROOT / _paper_key(paper_id)`、
 `_index_path(paper_id) -> _paper_root(paper_id) / INDEX_NAME`、
 `_chunks_path(paper_id) -> _paper_root(paper_id) / "chunks.json"`。
 
@@ -89,7 +91,7 @@ return {"indexed_count": len(documents), "index_name": INDEX_NAME, "cached_paper
 `cold_build`:
 1. chunk 文本(沿用 256/32 滑窗)
 2. encode chunk_texts
-3. 构造 `indexes.PLAID(index_folder=str(_paper_root(pid)), index_name=INDEX_NAME, override=True)`(不再多 paper 共用一个 folder,override=True 保护本 paper 旧索引被新版顶掉)
+3. 构造 `indexes.PLAID(index_folder=str(_paper_root(pid)), index_name=INDEX_NAME, override=True)`(不再多 paper 共用一个 folder,override=True 保护本 paper 旧索引被新版顶掉;`_paper_root` 必须使用 `_paper_key`)
 4. `add_documents`
 5. dump `chunks.json` 到 `_chunks_path(pid)`(JSON,utf-8)
 6. `self._states[pid] = _IndexState(index, chunk_texts)`
@@ -118,7 +120,7 @@ return {"indexed_count": len(documents), "index_name": INDEX_NAME, "cached_paper
 ### `paperpilot/builtin_tools/subagent.py`(撕保守限制)
 
 ```python
-THREAD_POOL_SIZE = 4    # was 1
+THREAD_POOL_SIZE = 3    # was 1
 ```
 
 `SUBAGENT_SYSTEM` workflow 第 3 步改为:
@@ -132,6 +134,12 @@ THREAD_POOL_SIZE = 4    # was 1
 handler 内 `max_workers = min(THREAD_POOL_SIZE, len(paper_ids))` 已就位,无需改。
 
 工具 description 删 "Day 11 runs workers serially..."句。
+
+为 day12 smoke 提供稳定并发证据,`paper_deep_read` 还需要在每个 subagent worker 的生命周期 emit 两个事件:
+- `subagent_start`
+- `subagent_done`
+
+这两个事件同样经过现有 `make_sub_emit(paper_id)` 包装,因此 payload 会带 `subagent_paper_id`。smoke 用 subagent 生命周期窗口重叠证明并发,不要用 `mcp__colbert__search` tool_call/tool_result 窗口证明并发,因为 MCP stdio/server 端可能串行化 tool call。
 
 ### `paperpilot/skills/compare-papers.md`(新建)
 
@@ -169,11 +177,12 @@ body 步骤:
 
 | 文件 | 改动 |
 |---|---|
-| `tests/mcp_servers/test_colbert_server.py` | 重写:build 三路径(cold/disk-hit/memory-hit)、search 入参带 paper_id、IndexNotFoundError、多 paper 隔离断言 |
-| `tests/builtin_tools/test_subagent.py` | `THREAD_POOL_SIZE == 4` 替原 `== 1`;新增"SUBAGENT_SYSTEM 含 `paper_id=`"断言 |
+| `tests/mcp_servers/test_index_manager.py` | 新增:build 三路径(cold/disk-hit/memory-hit)、filesystem-safe paper key、search 入参带 paper_id、IndexNotFoundError、多 paper 隔离断言 |
+| `tests/mcp_servers/test_colbert_server.py` | 重写:server schema 透传 search paper_id、build 返回 cached/fresh 字段、IndexNotFoundError |
+| `tests/builtin_tools/test_subagent.py` | `THREAD_POOL_SIZE == 3` 替原 `== 1`;新增"SUBAGENT_SYSTEM 含 `paper_id=`"和 lifecycle event 断言 |
 | `tests/test_main_integration.py` | fast 加 `compare-papers in skill section`;slow 不变 |
 
-`tests/mcp_servers/test_colbert_server.py` 用 `tmp_path` + monkeypatch `INDEX_ROOT`
+`tests/mcp_servers/test_index_manager.py` 用 `tmp_path` + monkeypatch `INDEX_ROOT`
 保证不污染真磁盘。PLAID 部分 mock 掉(返回固定 ids/scores),因为我们不测 PyLate 内部。
 
 ### slow 集成测试
@@ -190,8 +199,8 @@ body 步骤:
 2. 主 agent 调 `paper_deep_read` 一次,`paper_ids` = 预设 3 个
 3. 至少 2 个 subagent 状态 ok
 4. 每个 subagent 的 `mcp__colbert__search` 调用 args 含**自己的** `paper_id`,不混
-5. **真并发证据**:tracer 记录每个 subagent 首次 search 的 wall-clock 时间戳,
-   至少有 2 个 subagent 的 search 时间窗重叠(证明 worker > 1 生效)
+5. **真并发证据**:tracer 记录每个 subagent 的 `subagent_start` / `subagent_done` 生命周期窗口,
+   至少有 2 个 subagent 生命周期窗口重叠(证明 worker > 1 生效);search 调用只用于验证 `args.paper_id == subagent_paper_id`
 6. 最终回答提到 ≥ 2 个 paper id
 
 ### 回归
@@ -204,10 +213,11 @@ body 步骤:
 
 | 风险 | 缓解 |
 |---|---|
-| 4 worker 并发 encode 打爆本地 GPU/CPU | 上限保守 4;smoke 真跑观测;如 OOM 降到 3 |
+| 3 worker 并发 encode 打爆本地 GPU/CPU | Day 12 先用 3 证明并发;smoke 真跑观测;如 OOM 降到 2 |
 | 跨 session 索引格式变化读不动 | `chunks.json` 解析失败 / PLAID 加载失败 → fallback 冷启动重建,不抛 |
 | 老 `deep-read-paper` skill 漏改导致 LLM 不传 paper_id | skill prose + system prompt 双管同步;test_main_integration 断言 system prompt 含"传 paper_id"指令 |
 | PyLate 同进程多次 PLAID 实例化句柄锁(Day 11 加的 `_release_current_index` 是为此)| per-paper 不再 override 同一路径,理论更安全;smoke 跑两轮 build 验证 |
+| paper_id 含 `/` 或其它路径字符 | `_paper_key(paper_id)` 集中处理目录名,`chunks.json` 和返回结果继续保留原始 paper_id |
 | chunks.json 文件命名后续要换 | helper `_chunks_path(paper_id)` 集中,改一处即可 |
 
 ## 预算
@@ -225,6 +235,6 @@ body 步骤:
 
 - fast 套件全绿(基线 86,Day 12 净增至少 1 个 main_integration + N 个 colbert_server 重写后用例;具体数在 plan 阶段定);slow 套件全绿(test_colbert_via_client 加新用例,test_main_integration slow 维持)
 - `day11_smoke` 重跑通过(用新版 per-paper 索引);用时短于 Day 11 那次
-- `day12_smoke` 通过且并发证据(2+ subagent search 时间窗重叠)成立
+- `day12_smoke` 通过且并发证据(2+ subagent 生命周期窗口重叠)成立
 - `git grep "Day 11 conservative\|paperpilot_current; call build_index first\|THREAD_POOL_SIZE = 1"` 无命中
 - 触碰文件无 TODO / FIXME 残留

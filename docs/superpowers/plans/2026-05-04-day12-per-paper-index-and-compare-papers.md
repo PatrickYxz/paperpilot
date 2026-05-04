@@ -4,7 +4,7 @@
 
 **Goal:** 把 ColBERT MCP server 的全局单索引改为 per-paper 隔离索引(命中即跳过 + 跨 session 持久化),撕掉 `paper_deep_read` 的 Day 11 串行限制,并新增 `compare-papers` skill 让 LLM 在多论文对比场景自动触发 `paper_deep_read`。
 
-**Architecture:** `IndexManager` 内部状态从单 PLAID 改成 `dict[paper_id, _IndexState]`,`build` 走"内存命中→磁盘命中→冷启动"三路径,`search` 必填 `paper_id` 入参做隔离。`THREAD_POOL_SIZE` 从 1 提到 `min(4, len(paper_ids))`,与 per-paper 索引配合解锁真并发。
+**Architecture:** `IndexManager` 内部状态从单 PLAID 改成 `dict[paper_id, _IndexState]`,`build` 走"内存命中→磁盘命中→冷启动"三路径,`search` 必填 `paper_id` 入参做隔离。磁盘目录使用 `_paper_key(paper_id)` 做 filesystem-safe 转义,避免旧式 arXiv ID 里的 `/` 变成路径分隔。`THREAD_POOL_SIZE` 从 1 提到 `min(3, len(paper_ids))`,与 per-paper 索引配合解锁真并发。
 
 **Tech Stack:** Python 3.12, PyLate (ColBERT), FastMCP, pytest, ThreadPoolExecutor。
 
@@ -18,16 +18,16 @@
 |---|---|---|
 | `paperpilot/mcp_servers/colbert/index_manager.py` | 重写 | per-paper 索引核心(三路径 build / paper_id search / lazy load / chunks.json 落盘) |
 | `paperpilot/mcp_servers/colbert/server.py` | 改 | `search` schema 加 `paper_id`;`build_index` docstring/return 标注 cached_papers |
-| `paperpilot/builtin_tools/subagent.py` | 改 | `THREAD_POOL_SIZE = 4`;`SUBAGENT_SYSTEM` search 例子加 `paper_id="..."`;删 Day 11 保守注释 |
+| `paperpilot/builtin_tools/subagent.py` | 改 | `THREAD_POOL_SIZE = 3`;`SUBAGENT_SYSTEM` search 例子加 `paper_id="..."`;删 Day 11 保守注释;emit `subagent_start` / `subagent_done` |
 | `paperpilot/skills/compare-papers.md` | 新建 | `compare-papers` skill 触发 `paper_deep_read` |
 | `paperpilot/skills/deep-read-paper.md` | 改 | search 步骤补 `paper_id` 入参 |
 | `paperpilot/main.py` | 改一行 | `SYSTEM_PROMPT_BASE` 加"search 必传 paper_id"规约 |
 | `tests/mcp_servers/test_colbert_server.py` | 重写 | server schema 透传(search 入参 paper_id、build 返回结构) |
 | `tests/mcp_servers/test_index_manager.py` | 新建 | IndexManager 三路径 + paper_id 隔离 + lazy load(PyLate mock) |
-| `tests/builtin_tools/test_subagent.py` | 改 | `THREAD_POOL_SIZE == 4`;`SUBAGENT_SYSTEM` 含 `paper_id=` |
+| `tests/builtin_tools/test_subagent.py` | 改 | `THREAD_POOL_SIZE == 3`;`SUBAGENT_SYSTEM` 含 `paper_id=`;验证 subagent lifecycle events |
 | `tests/test_main_integration.py` | 改 | fast 加 `compare-papers in skill section` |
 | `tests/mcp_servers/test_colbert_via_client.py` | 改(slow) | 加 paper A/B 隔离断言 + 同 paper_id 二次 build 走 disk-hit |
-| `scripts/day12_smoke.py` | 新建 | compare-papers 链路真 LLM 端到端 + 真并发证据(2+ subagent search 时间窗重叠) |
+| `scripts/day12_smoke.py` | 新建 | compare-papers 链路真 LLM 端到端 + 真并发证据(2+ subagent 生命周期窗口重叠) |
 
 ---
 
@@ -105,6 +105,20 @@ def test_cold_build_creates_per_paper_dir_and_chunks_json(
 
     chunks = json.loads((paper_dir / "chunks.json").read_text("utf-8"))
     assert all(cid.startswith("p1::chunk_") for cid in chunks.keys())
+
+
+def test_paper_key_escapes_path_separators(patched_root, patched_pylate):
+    mgr = im_module.IndexManager()
+    out = mgr.build([{"paper_id": "cs/0501001", "text": "legacy arxiv id"}])
+
+    assert out["fresh_papers"] == ["cs/0501001"]
+    paper_dirs = [p for p in patched_root.iterdir() if p.is_dir()]
+    assert len(paper_dirs) == 1
+    assert "/" not in paper_dirs[0].name
+    assert "\\" not in paper_dirs[0].name
+
+    chunks = json.loads((paper_dirs[0] / "chunks.json").read_text("utf-8"))
+    assert all(cid.startswith("cs/0501001::chunk_") for cid in chunks.keys())
 ```
 
 ### Step 1.2: Run test, verify import / interface fails
@@ -112,7 +126,7 @@ def test_cold_build_creates_per_paper_dir_and_chunks_json(
 - [ ] 跑测试,预期 `INDEX_ROOT` 还在但其它 API 没对上。
 
 Run: `pytest tests/mcp_servers/test_index_manager.py::test_cold_build_creates_per_paper_dir_and_chunks_json -v`
-Expected: FAIL(`fresh_papers` / `cached_papers` 字段不存在,或 chunks.json 不写)
+Expected: FAIL(`fresh_papers` / `cached_papers` 字段不存在,或 chunks.json 不写,或旧式 arXiv ID 路径未转义)
 
 ### Step 1.3: Rewrite IndexManager — 删旧、加状态字典、加 path helpers
 
@@ -135,7 +149,9 @@ Windows DLL 顺序仍要求 pyarrow / datasets 在 torch 之前 import。
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -147,6 +163,7 @@ from pylate import indexes, models, retrieve
 INDEX_NAME = "paperpilot_current"
 INDEX_ROOT = Path("data/colbert_index")
 MODEL_NAME = "lightonai/colbertv2.0"
+_SAFE_PAPER_KEY_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 class IndexNotFoundError(RuntimeError):
@@ -270,13 +287,18 @@ class IndexManager:
         return out
 
     def _paper_root(self, paper_id: str) -> Path:
-        return INDEX_ROOT / paper_id
+        return INDEX_ROOT / self._paper_key(paper_id)
 
     def _index_path(self, paper_id: str) -> Path:
         return self._paper_root(paper_id) / INDEX_NAME
 
     def _chunks_path(self, paper_id: str) -> Path:
         return self._paper_root(paper_id) / "chunks.json"
+
+    def _paper_key(self, paper_id: str) -> str:
+        safe = _SAFE_PAPER_KEY_RE.sub("_", paper_id).strip("._")
+        digest = hashlib.sha1(paper_id.encode("utf-8")).hexdigest()[:10]
+        return f"{safe or 'paper'}-{digest}"
 ```
 
 ### Step 1.4: Run cold-build test, verify pass
@@ -608,11 +630,11 @@ git commit -m "Day 12 Task 2: colbert-mcp server schema 加 paper_id"
 - Modify: `paperpilot/builtin_tools/subagent.py`
 - Modify: `tests/builtin_tools/test_subagent.py`
 
-### Step 3.1: Update subagent test for THREAD_POOL_SIZE = 4
+### Step 3.1: Update subagent test for THREAD_POOL_SIZE = 3
 
 - [ ] 改 `tests/builtin_tools/test_subagent.py` 末尾的 `test_tool_metadata_and_conservative_worker_count`:
   - 函数名重命名为 `test_tool_metadata_and_worker_count`
-  - `assert THREAD_POOL_SIZE == 1` → `assert THREAD_POOL_SIZE == 4`
+  - `assert THREAD_POOL_SIZE == 1` → `assert THREAD_POOL_SIZE == 3`
   - 新增断言 `assert "paper_id=" in SUBAGENT_SYSTEM`(workflow 第 3 步必须包含 paper_id 入参示例)
 
 ```python
@@ -628,7 +650,7 @@ def test_tool_metadata_and_worker_count():
     assert tool.input_schema["properties"]["paper_ids"]["maxItems"] == MAX_PAPERS
     assert MAX_PAPERS == 8
     assert SUBAGENT_MAX_ITER == 8
-    assert THREAD_POOL_SIZE == 4
+    assert THREAD_POOL_SIZE == 3
     assert "paper_deep_read" in PAPER_DEEP_READ_NUDGE
     assert "paper_ids" not in SUBAGENT_SYSTEM
     assert "paper_id=" in SUBAGENT_SYSTEM
@@ -638,7 +660,7 @@ def test_tool_metadata_and_worker_count():
 ### Step 3.2: Run, verify it fails
 
 - [ ] Run: `pytest tests/builtin_tools/test_subagent.py::test_tool_metadata_and_worker_count -v`
-Expected: FAIL on `THREAD_POOL_SIZE == 4`
+Expected: FAIL on `THREAD_POOL_SIZE == 3`
 
 ### Step 3.3: Update subagent.py — flip pool size, update prompt, scrub Day 11 wording
 
@@ -656,7 +678,7 @@ index so concurrent build/search do not race.
 - [ ] 改常量:
 
 ```python
-THREAD_POOL_SIZE = 4
+THREAD_POOL_SIZE = 3
 ```
 
 - [ ] 改 `SUBAGENT_SYSTEM` workflow 第 3 步:
@@ -678,6 +700,16 @@ return Tool(
     ),
     ...
 ```
+
+- [ ] 鍦ㄥ瓙 agent worker 生命周期 emit:
+
+```python
+on_event("subagent_start", {})
+...
+on_event("subagent_done", {"status": status})
+```
+
+这些事件会被现有 `make_sub_emit(paper_id)` 包装,所以主 tracer 会看到 `subagent_paper_id`。day12_smoke 用生命周期窗口重叠证明并发,不再用 search tool_call/tool_result 窗口,避免 MCP stdio/server 串行化导致 flaky。
 
 ### Step 3.4: Run subagent tests, verify pass
 
@@ -968,27 +1000,17 @@ Expected: 4 passed, 1 skipped(`test_startup_hard_fail_when_index_root_unwritable
 - [ ] 新建,基于 day11_smoke 复用结构 + 加并发证据:
 
 ```python
-"""Day 12 smoke: compare-papers skill + paper_deep_read 真并发。
+"""Day 12 smoke: compare-papers skill + paper_deep_read true parallelism.
 
-主链路:
-  user prompt -> load_skill(compare-papers) -> paper_deep_read([3 paper ids])
-    -> 3 个 subagent 并发 (download / build_index / search)
-    -> 综合对比
-
-关键断言(对比 day11_smoke 加强):
-  1. 主 agent 调 load_skill("compare-papers")
-  2. 主 agent 调 paper_deep_read 一次,paper_ids 长度 3
-  3. >= 2 个 subagent 状态 ok
-  4. 每个 subagent 的 colbert.search 调用 args.paper_id 必须等于自己的 subagent_paper_id
-  5. 真并发证据: 至少有 2 个 subagent 的首次 search 时间窗 [start, end] 重叠
-  6. 最终回答 mention >= 2 个 paper id
+Use subagent lifecycle events for concurrency evidence. Do not use
+mcp__colbert__search call/result windows for this assertion because the MCP
+stdio/server layer may serialize tool calls even when worker loops overlap.
 """
 from __future__ import annotations
 
 import re
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -1007,12 +1029,19 @@ def main() -> None:
     saw_load_skill_args: list[dict] = []
     paper_deep_read_calls: list[dict[str, Any]] = []
     main_guardrails: list[str] = []
-    sub_search_calls: list[tuple[str, str]] = []  # (sub_pid, args.paper_id)
-    sub_search_windows: dict[str, list[tuple[float, float]]] = defaultdict(list)
-    in_flight: dict[str, float] = {}
+    sub_search_calls: list[tuple[str, str]] = []
+    subagent_windows: dict[str, list[float | None]] = {}
 
     def tracer(kind: str, payload: dict[str, Any]) -> None:
         sub_pid = payload.get("subagent_paper_id")
+        if kind == "subagent_start" and sub_pid:
+            subagent_windows[sub_pid] = [time.time(), None]
+            print(f"  [sub:{sub_pid}] == start")
+            return
+        if kind == "subagent_done" and sub_pid:
+            subagent_windows.setdefault(sub_pid, [time.time(), None])[1] = time.time()
+            print(f"  [sub:{sub_pid}] == done: {payload.get('status')}")
+            return
         if kind == "tool_call":
             name = payload["name"]
             args = payload.get("arguments", {})
@@ -1020,7 +1049,6 @@ def main() -> None:
                 print(f"  [sub:{sub_pid}] -> {name}({_preview(args)})")
                 if name == "mcp__colbert__search":
                     sub_search_calls.append((sub_pid, args.get("paper_id", "")))
-                    in_flight[f"{sub_pid}::{name}::{len(sub_search_calls)}"] = time.time()
             else:
                 saw_main.add(name)
                 if name == "load_skill":
@@ -1034,13 +1062,6 @@ def main() -> None:
             content_text = content if isinstance(content, str) else str(content)
             tag = f"[sub:{sub_pid}] " if sub_pid else ""
             print(f"  {tag}<- {name}: {content_text[:160]}...")
-            if sub_pid and name == "mcp__colbert__search":
-                # 找到对应 in_flight 记录最早的并关闭
-                key_prefix = f"{sub_pid}::{name}::"
-                keys = sorted(k for k in in_flight if k.startswith(key_prefix))
-                if keys:
-                    start = in_flight.pop(keys[0])
-                    sub_search_windows[sub_pid].append((start, time.time()))
         elif kind == "guardrail_stop":
             reason = payload["reason"]
             if sub_pid:
@@ -1059,128 +1080,47 @@ def main() -> None:
     )
     messages = run(prompt, max_iter=12, on_event=tracer)
 
-    print("\n=== FINAL ===")
     final_text = _extract_text(messages[-1].get("content"))
-    print(final_text)
+    deep_read_result = _find_tool_result(messages, "paper_deep_read") or ""
 
-    deep_read_result = _find_tool_result(messages, "paper_deep_read")
-
-    # 1. load_skill compare-papers
     assert any(a.get("name") == "compare-papers" for a in saw_load_skill_args), (
         f"FAIL: did not load compare-papers skill; load_skill args = {saw_load_skill_args}"
     )
-
-    # 2. paper_deep_read called once with 3 ids
     assert "paper_deep_read" in saw_main, "FAIL: paper_deep_read not called"
-    assert len(paper_deep_read_calls) >= 1
-    first = paper_deep_read_calls[0]
-    assert len(first["paper_ids"]) == 3, (
-        f"FAIL: expected 3 paper_ids, got {first['paper_ids']}"
-    )
+    assert paper_deep_read_calls and len(paper_deep_read_calls[0]["paper_ids"]) == 3
 
-    # 3. >=2 subagent ok
-    ok_count = len(re.findall(r"### \S+ \(status: ok\)", deep_read_result or ""))
+    ok_count = len(re.findall(r"### \S+ \(status: ok\)", deep_read_result))
     assert ok_count >= 2, f"FAIL: only {ok_count} subagent(s) ok"
 
-    # 4. each subagent search call's paper_id matches its own subagent_paper_id
     for sub_pid, arg_pid in sub_search_calls:
         assert sub_pid == arg_pid, (
             f"FAIL: subagent {sub_pid} called search with paper_id={arg_pid}"
         )
 
-    # 5. concurrency evidence: 2+ subagent search windows overlap
-    overlapping = _has_overlapping_windows(sub_search_windows)
-    assert overlapping, (
-        f"FAIL: no concurrent subagent search windows; "
-        f"windows = {dict(sub_search_windows)}"
+    assert _has_overlapping_windows(subagent_windows), (
+        f"FAIL: no concurrent subagent lifecycle windows; windows = {subagent_windows}"
     )
 
-    # 6. final answer mentions >= 2 ids
     pid_mentions = sum(1 for pid in PAPER_IDS if pid in final_text)
     assert pid_mentions >= 2, f"FAIL: final answer mentions only {pid_mentions} ids"
-
     assert not main_guardrails, f"FAIL: main guardrail = {main_guardrails}"
 
     print("\nDay 12 smoke PASSED")
 
 
-def _has_overlapping_windows(
-    windows: dict[str, list[tuple[float, float]]]
-) -> bool:
+def _has_overlapping_windows(windows: dict[str, list[float | None]]) -> bool:
     flat: list[tuple[float, float, str]] = []
-    for pid, ws in windows.items():
-        for s, e in ws:
-            flat.append((s, e, pid))
+    for pid, window in windows.items():
+        if len(window) != 2 or window[0] is None or window[1] is None:
+            continue
+        flat.append((float(window[0]), float(window[1]), pid))
     for i, (s1, e1, p1) in enumerate(flat):
-        for s2, e2, p2 in flat[i + 1 :]:
-            if p1 == p2:
-                continue
-            if s1 < e2 and s2 < e1:
+        for s2, e2, p2 in flat[i + 1:]:
+            if p1 != p2 and s1 < e2 and s2 < e1:
                 return True
     return False
 
-
-def _find_tool_result(messages: list[dict], tool_name: str) -> str | None:
-    tool_use_ids: set[str] = set()
-    for message in messages:
-        if message.get("role") != "assistant":
-            continue
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if (
-                getattr(block, "type", None) == "tool_use"
-                and getattr(block, "name", None) == tool_name
-                and getattr(block, "id", None)
-            ):
-                tool_use_ids.add(str(block.id))
-
-    for message in messages:
-        if message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if (
-                block.get("type") == "tool_result"
-                and block.get("tool_use_id") in tool_use_ids
-            ):
-                return str(block.get("content", ""))
-    return None
-
-
-def _extract_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return "" if content is None else str(content)
-    parts: list[str] = []
-    for block in content:
-        if hasattr(block, "text"):
-            parts.append(block.text)
-        elif isinstance(block, dict) and block.get("type") == "text":
-            parts.append(str(block.get("text", "")))
-    return "\n".join(p for p in parts if p)
-
-
-def _preview(args: dict[str, Any]) -> dict[str, Any]:
-    if "paper_ids" in args and "user_query" in args:
-        return {"paper_ids": args["paper_ids"], "user_query": str(args["user_query"])[:80]}
-    if "documents" in args:
-        docs = args.get("documents") or []
-        return {**args, "documents": [
-            {"paper_id": d.get("paper_id"), "text_len": len(d.get("text", ""))}
-            for d in docs if isinstance(d, dict)
-        ]}
-    return args
-
-
-if __name__ == "__main__":
-    main()
+# Reuse _find_tool_result, _extract_text, and _preview helpers from day11_smoke.py.
 ```
 
 ### Step 5.8: Run day12_smoke
@@ -1221,7 +1161,7 @@ git commit -m "Day 12 Task 5: day12_smoke + colbert per-paper 隔离 slow 集成
 - [ ] fast 套件 100% 绿(`pytest tests/ --ignore=tests/mcp_servers/test_graph_via_client.py` 全过)
 - [ ] slow 套件 100% 绿(`pytest -m slow tests/mcp_servers/test_colbert_via_client.py tests/test_main_integration.py` 全过)
 - [ ] `day9_smoke` / `day10_smoke` / `day11_smoke` / `day12_smoke` 4 个真 LLM 端到端全部通过
-- [ ] day12_smoke 输出含"Day 12 smoke PASSED"且并发证据成立(2+ subagent search 时间窗重叠)
+- [ ] day12_smoke 输出含"Day 12 smoke PASSED"且并发证据成立(2+ subagent 生命周期窗口重叠)
 - [ ] `git grep "Day 11 conservative\|THREAD_POOL_SIZE = 1\|runs workers serially"` 无命中
 - [ ] 触碰文件无 `TODO|FIXME` 残留
 - [ ] 5 个 commit 切分干净,message 与本计划 Task 1-5 对应
