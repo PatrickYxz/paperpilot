@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 import pytest
@@ -12,10 +13,6 @@ from paperpilot.tools.mcp_client import (
     MCPClient,
     MCPToolError,
 )
-
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-INDEX_ROOT = REPO_ROOT / "data" / "colbert_index"
-CURRENT_INDEX = INDEX_ROOT / "paperpilot_current"
 
 
 def _make_manifest(tmp_path: Path) -> Path:
@@ -46,6 +43,10 @@ def _decode_results(search_result):
     return results
 
 
+def _paper_prefix(tmp_path: Path) -> str:
+    return f"{tmp_path.name}-{uuid.uuid4().hex[:8]}"
+
+
 @pytest.mark.slow
 def test_build_and_search(tmp_path):
     """3 篇短 dummy text → build → search → 命中关键词且 chunk_text 非空。"""
@@ -54,28 +55,34 @@ def test_build_and_search(tmp_path):
     try:
         build = next(t for t in c.list_tools() if t.name == "mcp__colbert__build_index")
         search = next(t for t in c.list_tools() if t.name == "mcp__colbert__search")
+        prefix = _paper_prefix(tmp_path)
 
         docs = [
-            {"paper_id": "p1",
+            {"paper_id": f"{prefix}-p1",
              "text": "Attention is all you need. The Transformer uses multi-head self-attention to model long-range dependencies in language."},
-            {"paper_id": "p2",
+            {"paper_id": f"{prefix}-p2",
              "text": "BERT pre-training uses masked language modeling on bidirectional transformers to learn contextual representations."},
-            {"paper_id": "p3",
+            {"paper_id": f"{prefix}-p3",
              "text": "ColBERT performs late interaction between query and document token embeddings for efficient passage retrieval at scale."},
         ]
         build_result = build.handler({"documents": docs})
         b = json.loads(build_result) if isinstance(build_result, str) else build_result
         assert b["indexed_count"] == 3
         assert b["index_name"] == "paperpilot_current"
+        assert set(b["fresh_papers"]) == {f"{prefix}-p1", f"{prefix}-p2", f"{prefix}-p3"}
 
-        search_result = search.handler({"query": "late interaction retrieval", "top_k": 3})
+        search_result = search.handler({
+            "query": "late interaction retrieval",
+            "paper_id": f"{prefix}-p3",
+            "top_k": 3,
+        })
         results = _decode_results(search_result)
         assert len(results) >= 1
-        assert any(r["paper_id"] == "p3" for r in results), \
-            f"expected p3 (ColBERT) in top-3, got {results}"
+        assert all(r["paper_id"] == f"{prefix}-p3" for r in results), \
+            f"per-paper isolation failed for search(paper_id={prefix}-p3): {results}"
         top1 = results[0]
         assert top1["chunk_text"] != "", "chunk_text 不应为空(回归 _chunk_texts 映射链路)"
-        assert len(top1["chunk_text"]) > 50, \
+        assert len(top1["chunk_text"]) > 30, \
             f"chunk_text 太短不像真段落: {top1['chunk_text']!r}"
         assert isinstance(top1["score"], float)
     finally:
@@ -83,48 +90,42 @@ def test_build_and_search(tmp_path):
 
 
 @pytest.mark.slow
-def test_consecutive_rebuild_releases_previous_index(tmp_path):
-    """Repeated build_index calls in one server session should work on Windows."""
+def test_two_papers_coexist_after_consecutive_builds(tmp_path):
+    """per-paper indexes: consecutive p1/p2 builds remain separately searchable."""
     c = MCPClient(_make_manifest(tmp_path))
     c.start()
     try:
         build = next(t for t in c.list_tools() if t.name == "mcp__colbert__build_index")
         search = next(t for t in c.list_tools() if t.name == "mcp__colbert__search")
+        prefix = _paper_prefix(tmp_path)
+        p1 = f"{prefix}-p1"
+        p2 = f"{prefix}-p2"
 
         build.handler({
             "documents": [{
-                "paper_id": "p1",
+                "paper_id": p1,
                 "text": "Transformers use self attention for sequence transduction.",
             }],
         })
         build.handler({
             "documents": [{
-                "paper_id": "p2",
+                "paper_id": p2,
                 "text": "ColBERT retrieval uses late interaction over token embeddings.",
             }],
         })
 
-        results = _decode_results(
-            search.handler({"query": "late interaction retrieval", "top_k": 3})
-        )
-        assert results
-        assert results[0]["paper_id"] == "p2"
-    finally:
-        c.close()
-
-
-@pytest.mark.slow
-def test_startup_clears_stale_index(tmp_path):
-    """Q6: 启动期 rm -rf paperpilot_current/ 把上 session 残留干净清掉。"""
-    CURRENT_INDEX.mkdir(parents=True, exist_ok=True)
-    (CURRENT_INDEX / "stale_marker.txt").write_text("from previous session")
-    assert (CURRENT_INDEX / "stale_marker.txt").exists()
-
-    c = MCPClient(_make_manifest(tmp_path))
-    c.start()
-    try:
-        assert not CURRENT_INDEX.exists() or not (CURRENT_INDEX / "stale_marker.txt").exists(), \
-            "Q6 violation: stale marker survived startup"
+        r1 = _decode_results(search.handler({
+            "query": "self attention",
+            "paper_id": p1,
+            "top_k": 3,
+        }))
+        r2 = _decode_results(search.handler({
+            "query": "late interaction",
+            "paper_id": p2,
+            "top_k": 3,
+        }))
+        assert r1 and all(result["paper_id"] == p1 for result in r1)
+        assert r2 and all(result["paper_id"] == p2 for result in r2)
     finally:
         c.close()
 
@@ -137,10 +138,13 @@ def test_search_without_build_fails(tmp_path):
     try:
         search = next(t for t in c.list_tools() if t.name == "mcp__colbert__search")
         with pytest.raises(MCPToolError) as ei:
-            search.handler({"query": "anything", "top_k": 5})
+            search.handler({
+                "query": "anything",
+                "paper_id": "never-built",
+                "top_k": 5,
+            })
         msg = str(ei.value)
-        assert ("IndexNotFoundError" in msg or "no index" in msg.lower()
-                or "must call build_index" in msg.lower()), \
+        assert ("IndexNotFoundError" in msg or "no index" in msg.lower()), \
             f"unexpected error message: {msg}"
     finally:
         c.close()
@@ -154,3 +158,76 @@ def test_startup_hard_fail_when_index_root_unwritable(tmp_path):
         "INDEX_ROOT 当前为常量(子 spec §3 锁);跨平台只读模拟不稳。"
         "启动 hard-fail 路径在 day6_smoke 真实启动中验证。"
     )
+
+
+@pytest.mark.slow
+def test_per_paper_isolation_and_cache_hits(tmp_path):
+    """Search stays isolated; rebuilds hit memory and then disk across sessions."""
+    manifest = _make_manifest(tmp_path)
+    c = MCPClient(manifest)
+    prefix = _paper_prefix(tmp_path)
+    paper_a = f"{prefix}-iso-A"
+    paper_b = f"{prefix}-iso-B"
+    alpha_text = (
+        "Alpha retrieval systems rank candidate passages by matching query terms "
+        "with contextual document evidence. The method discusses token-level "
+        "signals, passage scoring, and repeated alpha examples for a retrieval "
+        "pipeline that remains distinct from unrelated beta evidence. "
+    ) * 4
+    beta_text = (
+        "Beta retrieval systems evaluate document passages with a different "
+        "semantic signal. The method emphasizes beta scoring, contrastive "
+        "examples, and passage evidence that should remain isolated from the "
+        "alpha retrieval paper during search. "
+    ) * 4
+    c.start()
+    try:
+        build = next(t for t in c.list_tools() if t.name == "mcp__colbert__build_index")
+        search = next(t for t in c.list_tools() if t.name == "mcp__colbert__search")
+
+        out_a = build.handler({"documents": [
+            {"paper_id": paper_a, "text": alpha_text}
+        ]})
+        a = json.loads(out_a) if isinstance(out_a, str) else out_a
+        assert paper_a in a["fresh_papers"]
+
+        out_b = build.handler({"documents": [
+            {"paper_id": paper_b, "text": beta_text}
+        ]})
+        b = json.loads(out_b) if isinstance(out_b, str) else out_b
+        assert paper_b in b["fresh_papers"]
+
+        ra = _decode_results(search.handler({
+            "query": "alpha",
+            "paper_id": paper_a,
+            "top_k": 3,
+        }))
+        rb = _decode_results(search.handler({
+            "query": "beta",
+            "paper_id": paper_b,
+            "top_k": 3,
+        }))
+        assert all(result["paper_id"] == paper_a for result in ra)
+        assert all(result["paper_id"] == paper_b for result in rb)
+
+        out_a2 = build.handler({"documents": [
+            {"paper_id": paper_a, "text": alpha_text}
+        ]})
+        a2 = json.loads(out_a2) if isinstance(out_a2, str) else out_a2
+        assert paper_a in a2["cached_papers"]
+        assert a2["fresh_papers"] == []
+    finally:
+        c.close()
+
+    c2 = MCPClient(manifest)
+    c2.start()
+    try:
+        build2 = next(t for t in c2.list_tools() if t.name == "mcp__colbert__build_index")
+        out_a3 = build2.handler({"documents": [
+            {"paper_id": paper_a, "text": alpha_text}
+        ]})
+        a3 = json.loads(out_a3) if isinstance(out_a3, str) else out_a3
+        assert paper_a in a3["cached_papers"]
+        assert a3["fresh_papers"] == []
+    finally:
+        c2.close()

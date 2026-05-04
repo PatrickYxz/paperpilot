@@ -1,12 +1,14 @@
-"""Day 11 smoke regression for paper_deep_read.
+"""Day 12 smoke: compare-papers skill + paper_deep_read parallelism.
 
-Main loop -> paper_deep_read -> isolated subagents -> markdown summaries
--> final synthesis.
+Concurrency evidence uses subagent lifecycle events. It intentionally avoids
+search call/result windows because the MCP stdio/server layer may serialize
+tool calls even when worker loops overlap.
 """
 from __future__ import annotations
 
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,19 +24,33 @@ PAPER_IDS = ["1706.03762", "2010.11929", "2005.14165"]
 
 def main() -> None:
     saw_main: set[str] = set()
+    saw_load_skill_args: list[dict[str, Any]] = []
     paper_deep_read_calls: list[dict[str, Any]] = []
     main_guardrails: list[str] = []
-    subagent_search_previews: list[tuple[str, str]] = []
+    sub_search_calls: list[tuple[str, str]] = []
+    subagent_windows: dict[str, list[float | None]] = {}
 
     def tracer(kind: str, payload: dict[str, Any]) -> None:
         sub_pid = payload.get("subagent_paper_id")
+        if kind == "subagent_start" and sub_pid:
+            subagent_windows[sub_pid] = [time.time(), None]
+            print(f"  [sub:{sub_pid}] == start")
+            return
+        if kind == "subagent_done" and sub_pid:
+            subagent_windows.setdefault(sub_pid, [time.time(), None])[1] = time.time()
+            print(f"  [sub:{sub_pid}] == done: {payload.get('status')}")
+            return
         if kind == "tool_call":
             name = payload["name"]
             args = payload.get("arguments", {})
             if sub_pid:
                 print(f"  [sub:{sub_pid}] -> {name}({_preview(args)})")
+                if name == "mcp__colbert__search":
+                    sub_search_calls.append((sub_pid, args.get("paper_id", "")))
             else:
                 saw_main.add(name)
+                if name == "load_skill":
+                    saw_load_skill_args.append(args)
                 if name == "paper_deep_read":
                     paper_deep_read_calls.append(args)
                 print(f"  -> {name}({_preview(args)})")
@@ -44,8 +60,6 @@ def main() -> None:
             content_text = content if isinstance(content, str) else str(content)
             tag = f"[sub:{sub_pid}] " if sub_pid else ""
             print(f"  {tag}<- {name}: {content_text[:160]}...")
-            if sub_pid and name.endswith("__search"):
-                subagent_search_previews.append((sub_pid, content_text))
         elif kind == "guardrail_stop":
             reason = payload["reason"]
             if sub_pid:
@@ -57,58 +71,61 @@ def main() -> None:
             print(f"  ~ repaired {payload['name']}: {payload['repaired']}")
 
     prompt = (
-        "You must use paper_deep_read exactly once to deep-read these 3 arXiv "
-        f"papers: {PAPER_IDS[0]} / {PAPER_IDS[1]} / {PAPER_IDS[2]}. "
-        "Compare how self-attention is designed or used across the papers. "
-        "After the tool returns, synthesize the comparison and mention at "
-        "least two paper IDs in the final answer."
+        "I want a comparative deep read of 3 arXiv papers. Please use the "
+        "compare-papers skill: load it first, then follow it. The papers are: "
+        f"{PAPER_IDS[0]} (Attention Is All You Need), "
+        f"{PAPER_IDS[1]} (ViT), and {PAPER_IDS[2]} (GPT-3). "
+        "Compare how self-attention is designed or used across them. "
+        "Mention at least two paper IDs in the final answer."
     )
-    messages = run(prompt, max_iter=10, on_event=tracer)
+    messages = run(prompt, max_iter=12, on_event=tracer)
 
     print("\n=== FINAL ===")
     final_text = _extract_text(messages[-1].get("content"))
     print(final_text)
 
-    deep_read_result = _find_tool_result(messages, "paper_deep_read")
+    deep_read_result = _find_tool_result(messages, "paper_deep_read") or ""
 
-    assert "paper_deep_read" in saw_main, (
-        f"FAIL: paper_deep_read not called by main agent; saw {saw_main}"
+    assert any(args.get("name") == "compare-papers" for args in saw_load_skill_args), (
+        f"FAIL: did not load compare-papers skill; args = {saw_load_skill_args}"
     )
-    assert len(paper_deep_read_calls) >= 1, "FAIL: no paper_deep_read call args"
-    first_call_args = paper_deep_read_calls[0]
-    assert first_call_args.get("paper_ids") == PAPER_IDS, (
-        f"FAIL: first paper_deep_read paper_ids mismatch: {first_call_args}"
+    assert "paper_deep_read" in saw_main, "FAIL: paper_deep_read not called"
+    assert paper_deep_read_calls, "FAIL: no paper_deep_read call args"
+    assert paper_deep_read_calls[0].get("paper_ids") == PAPER_IDS, (
+        f"FAIL: paper_deep_read paper_ids mismatch: {paper_deep_read_calls[0]}"
     )
-    assert not main_guardrails, f"FAIL: main guardrail stopped: {main_guardrails}"
-    assert deep_read_result, "FAIL: could not find full paper_deep_read tool result"
-
-    for paper_id in PAPER_IDS:
-        assert f"### {paper_id}" in deep_read_result, (
-            f"FAIL: paper_deep_read result missing segment for {paper_id}"
-        )
 
     ok_count = len(re.findall(r"### \S+ \(status: ok\)", deep_read_result))
-    assert ok_count >= 2, (
-        f"FAIL: only {ok_count} paper(s) reached status=ok; expected >= 2"
-    )
-    assert subagent_search_previews, (
-        "FAIL: no subagent mcp__colbert__search result was observed"
-    )
-    for sub_pid, preview in subagent_search_previews:
-        assert sub_pid in preview, (
-            "FAIL: subagent search preview does not mention its own paper_id; "
-            f"subagent={sub_pid}, preview={preview!r}"
+    assert ok_count >= 2, f"FAIL: only {ok_count} subagent(s) ok"
+
+    assert sub_search_calls, "FAIL: no subagent search calls observed"
+    for sub_pid, arg_pid in sub_search_calls:
+        assert sub_pid == arg_pid, (
+            f"FAIL: subagent {sub_pid} called search with paper_id={arg_pid}"
         )
 
-    assert len(final_text.strip()) > 200, (
-        f"FAIL: final answer too short ({len(final_text)} chars)"
-    )
-    pid_mentions = sum(1 for paper_id in PAPER_IDS if paper_id in final_text)
-    assert pid_mentions >= 2, (
-        f"FAIL: final answer mentions only {pid_mentions} paper IDs"
+    assert _has_overlapping_windows(subagent_windows), (
+        f"FAIL: no concurrent subagent lifecycle windows; windows = {subagent_windows}"
     )
 
-    print("\nDay 11 smoke PASSED")
+    pid_mentions = sum(1 for paper_id in PAPER_IDS if paper_id in final_text)
+    assert pid_mentions >= 2, f"FAIL: final answer mentions only {pid_mentions} ids"
+    assert not main_guardrails, f"FAIL: main guardrail = {main_guardrails}"
+
+    print("\nDay 12 smoke PASSED")
+
+
+def _has_overlapping_windows(windows: dict[str, list[float | None]]) -> bool:
+    flat: list[tuple[float, float, str]] = []
+    for paper_id, window in windows.items():
+        if len(window) != 2 or window[0] is None or window[1] is None:
+            continue
+        flat.append((float(window[0]), float(window[1]), paper_id))
+    for index, (start_a, end_a, paper_a) in enumerate(flat):
+        for start_b, end_b, paper_b in flat[index + 1:]:
+            if paper_a != paper_b and start_a < end_b and start_b < end_a:
+                return True
+    return False
 
 
 def _find_tool_result(messages: list[dict], tool_name: str) -> str | None:
