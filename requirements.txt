@@ -22,3 +22,6 @@ networkx>=3.2
 httpx>=0.27
 
 # ===== Week 4: 评估 / 测试扩展 =====
+
+# ===== Day 14: VLM (Qwen-VL-Max via DashScope) =====
+dashscope>=1.24.6
