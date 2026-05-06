@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 新增 1 个顶层 skill `write-research-report`,把 arxiv→colbert→(可选 graph)→subagent 并发精读→半固定骨架 markdown 综述全链路串起来。纯 prose 零代码,落盘交给 smoke 脚本。
+**Goal:** 新增 1 个顶层 skill `write-research-report`,把 arxiv search/download→colbert→(可选 graph)→subagent 并发精读→半固定骨架 markdown 综述全链路串起来。纯 prose 零代码,落盘交给 smoke 脚本。
 
 **Architecture:** 1 个新 skill md(prose 引导工作流 + 输出骨架 + 质量准则)+ 1 个 smoke 脚本(真 LLM 端到端 + tracer 断言 + 落盘 + 报告内容断言)+ 1 行 main_integration test 回归断言。**红线全守恒**:`main.py / loop.py / adapter.py / builtin_tools/*` zero diff。
 
@@ -73,10 +73,10 @@ when_to_use: 用户给一个主题/方向(不是单篇 paper / 不是对比指�
 
 ## 工作流(推荐,非强制)
 1. **规划**:`research_todo` 写下 plan(搜索关键词 / 候选数 / 精读数)
-2. **粗搜**:`mcp__arxiv__search(query=..., max_results=8)`,标题摘要先筛
-3. **细排**:把候选喂 `mcp__colbert__build_index` → `mcp__colbert__search(query=主题问题, k=5)` 做语义重排
-4. **扩展(可选)**:若主题有明确"奠基 paper",用 `mcp__graph__cited_by / cites` 1 跳找经典或最新工作
-5. **精读**:选 3-5 篇代表作,`paper_deep_read(papers=[...], n_workers=3-5)` 并发精读
+2. **粗搜**:`mcp__arxiv__search_papers(query=..., max_results=8)`,标题摘要先筛
+3. **下载 + 细排**:从候选里选 3-5 篇,逐篇 `mcp__arxiv__download_paper(arxiv_id=...)`;再把 download 返回的 `{paper_id,text}` 喂 `mcp__colbert__build_index(documents=[...])` → `mcp__colbert__search(query=主题问题, paper_id=..., top_k=5)` 做语义重排
+4. **扩展(可选)**:若主题有明确"奠基 paper",用 `mcp__graph__build_graph` + `mcp__graph__get_neighbors(direction="references"/"citations")` 1 跳找经典或最新工作
+5. **精读**:选 3-5 篇代表作,`paper_deep_read(paper_ids=[...], user_query="...")` 并发精读(并发数由工具内部固定线程池控制)
 6. **下笔**:用半固定骨架组织 markdown 输出(见下)
 
 ## 输出骨架(半固定,可按主题适配)
@@ -115,7 +115,7 @@ Expected: 5 passed, 1 deselected(slow 那条)。`test_build_system_prompt_includ
 
 ### Step 1.6: 跑全套 fast suite 确认无回归
 
-Run: `pytest tests -q --ignore=tests/mcp_servers/test_colbert_via_client.py --ignore=tests/mcp_servers/vlm/test_vlm_via_client.py --ignore=tests/test_per_paper_index_slow.py`
+Run: `pytest tests -q`
 Expected: `116 passed`(Day 14 末基线)— 数字不变,因为只加了 1 行 assert,新 skill md 自动被发现。
 
 ### Step 1.7: Commit
@@ -142,15 +142,16 @@ git commit -m "Day 15 Task 1: add write-research-report skill prose"
 Expected tracer path:
 load_skill('write-research-report')
   -> research_todo
-  -> mcp__arxiv__search
+  -> mcp__arxiv__search_papers
+  -> mcp__arxiv__download_paper
   -> mcp__colbert__build_index + mcp__colbert__search
-  -> paper_deep_read (n_workers >= 3)
+  -> paper_deep_read (paper_ids count >= 3)
   -> compose markdown
 
 Final assertions:
 - report >= 800 chars
 - >= 3 distinct arxiv_ids cited
-- >= 4 of 7 section markers hit
+- >= 4 of 7 section marker groups hit(English or Chinese headings)
 - file written to data/reports/<slug>-<timestamp>.md
 """
 from __future__ import annotations
@@ -172,14 +173,14 @@ TOPIC = "long-context retrieval beyond 100k tokens"
 SLUG = "long-context-retrieval"
 
 ARXIV_ID_RE = re.compile(r"arxiv[:/ ]\s*(\d{4}\.\d{4,5})", re.IGNORECASE)
-SECTION_MARKERS = (
-    "TL;DR",
-    "Background",
-    "Key Methods",
-    "Recent Trends",
-    "Open Problems",
-    "Reading List",
-    "Title",
+SECTION_MARKER_GROUPS = (
+    ("TL;DR", "核心结论"),
+    ("Background", "背景", "问题定义"),
+    ("Key Methods", "Methods", "方法", "路线"),
+    ("Recent Trends", "Trends", "趋势", "进展"),
+    ("Open Problems", "问题", "局限", "挑战"),
+    ("Reading List", "阅读", "推荐"),
+    ("Title", "综述"),
 )
 
 
@@ -209,7 +210,7 @@ def main() -> None:
     prompt = (
         f"请为我写一篇综述,主题:{TOPIC}。"
         " 按 write-research-report skill 操作:先 load_skill,然后跟 prose 走"
-        " (research_todo 规划 -> arxiv 搜索 -> colbert 重排 -> 选 3-5 篇 paper_deep_read 并发精读 -> 半固定骨架 markdown)。"
+        " (research_todo 规划 -> arxiv 搜索 -> download_paper 下载候选全文 -> colbert 重排 -> 选 3-5 篇 paper_deep_read 并发精读 -> 半固定骨架 markdown)。"
         " 最后输出完整 markdown 综述,不要分段输出。"
     )
     messages = run(prompt, max_iter=30, on_event=tracer)
@@ -226,8 +227,11 @@ def main() -> None:
     assert "research_todo" in tool_calls, (
         f"FAIL: research_todo never called; tool_calls = {tool_calls}"
     )
-    assert "mcp__arxiv__search" in tool_calls, (
-        f"FAIL: mcp__arxiv__search never called; tool_calls = {tool_calls}"
+    assert "mcp__arxiv__search_papers" in tool_calls, (
+        f"FAIL: mcp__arxiv__search_papers never called; tool_calls = {tool_calls}"
+    )
+    assert "mcp__arxiv__download_paper" in tool_calls, (
+        f"FAIL: mcp__arxiv__download_paper never called; tool_calls = {tool_calls}"
     )
     assert "mcp__colbert__build_index" in tool_calls, (
         f"FAIL: mcp__colbert__build_index never called; tool_calls = {tool_calls}"
@@ -239,9 +243,10 @@ def main() -> None:
         f"FAIL: paper_deep_read never called; tool_calls = {tool_calls}"
     )
     first_dr = deep_read_calls[0]
-    n_workers = first_dr.get("n_workers")
-    assert isinstance(n_workers, int) and n_workers >= 3, (
-        f"FAIL: paper_deep_read first call n_workers must be int >= 3, got {n_workers!r}"
+    paper_ids = first_dr.get("paper_ids")
+    assert isinstance(paper_ids, list) and len(paper_ids) >= 3, (
+        "FAIL: paper_deep_read first call paper_ids must contain >= 3 ids, "
+        f"got {paper_ids!r}"
     )
 
     # ---- final report assertions ----
@@ -253,7 +258,11 @@ def main() -> None:
         f"FAIL: only {len(arxiv_ids)} distinct arxiv_ids in report (need >= 3); "
         f"found = {arxiv_ids}"
     )
-    sections_hit = [m for m in SECTION_MARKERS if m in final_text]
+    sections_hit = [
+        group[0]
+        for group in SECTION_MARKER_GROUPS
+        if any(marker in final_text for marker in group)
+    ]
     assert len(sections_hit) >= 4, (
         f"FAIL: only {len(sections_hit)} of 7 section markers hit (need >= 4); "
         f"hit = {sections_hit}"
@@ -297,14 +306,11 @@ def _preview(args: dict[str, Any]) -> dict[str, Any]:
                 for d in docs if isinstance(d, dict)
             ],
         }
-    if "papers" in args:
-        papers = args.get("papers") or []
+    if "paper_ids" in args:
+        paper_ids = args.get("paper_ids") or []
         return {
             **args,
-            "papers": [
-                p.get("paper_id") if isinstance(p, dict) else p
-                for p in papers
-            ],
+            "paper_ids": paper_ids,
         }
     return args
 
@@ -319,7 +325,7 @@ Run(确保 `.env` 里有 `DEEPSEEK_API_KEY`):
 ```
 python scripts/day15_smoke.py
 ```
-Expected: 终端依次打出 `load_skill(write-research-report)` → `research_todo` → `mcp__arxiv__search` → `mcp__colbert__build_index` → `mcp__colbert__search` → `paper_deep_read` → 最后 `Day 15 smoke PASSED`,并打出报告路径。整体耗时 2-3 分钟。
+Expected: 终端依次打出 `load_skill(write-research-report)` → `research_todo` → `mcp__arxiv__search_papers` → `mcp__arxiv__download_paper` → `mcp__colbert__build_index` → `mcp__colbert__search` → `paper_deep_read` → 最后 `Day 15 smoke PASSED`,并打出报告路径。整体耗时 2-3 分钟。
 
 ### Step 2.3: 人眼验报告
 
@@ -333,7 +339,7 @@ Expected: 终端依次打出 `load_skill(write-research-report)` → `research_t
 | 症状 | 排查 |
 |---|---|
 | 没 load_skill | 检查 Step 1.5 是否真 PASS;手测 `python -c "from paperpilot.main import _build_system_prompt; print('write-research-report' in _build_system_prompt())"` |
-| 没 paper_deep_read 或 n_workers < 3 | prompt 里加重一句"必须用 paper_deep_read 并发精读 ≥ 3 篇,n_workers=3";若仍不行,在 skill prose 第 5 步加重"必须 n_workers=3-5,不要串行" |
+| 没 paper_deep_read 或 paper_ids < 3 | prompt 里加重一句"必须用 paper_deep_read 并发精读 ≥ 3 篇";若仍不行,在 skill prose 第 5 步加重"必须传 paper_ids=[3-5 个 arxiv_id]" |
 | 报告 < 800 字 | max_iter 调到 40;prompt 加"完整 markdown ≥ 800 字" |
 | arxiv_id 数量 < 3 | prompt 加"引用必须包含 arxiv_id,至少 3 篇不同" |
 

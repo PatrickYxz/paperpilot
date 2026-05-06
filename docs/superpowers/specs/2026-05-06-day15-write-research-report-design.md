@@ -1,6 +1,6 @@
 # Day 15: `write-research-report` 主题综述 skill 设计
 
-**目标:** 顶层产出能力。用户给一个研究方向,agent 自主走 arxiv→colbert→(可选 graph)→subagent 并发精读→产出一篇半固定骨架的 markdown 综述。**纯新增 1 个 skill prose,不引入任何代码 / tool / MCP**;落盘交给 caller(smoke 脚本)。
+**目标:** 顶层产出能力。用户给一个研究方向,agent 自主走 arxiv search/download→colbert→(可选 graph)→subagent 并发精读→产出一篇半固定骨架的 markdown 综述。**纯新增 1 个 skill prose,不引入任何代码 / tool / MCP**;落盘交给 caller(smoke 脚本)。
 
 **Why:** Day 14 末已建齐 4 MCP server + 4 内嵌 tool + 5 skill。需要一个"压轴" skill 把所有能力串起来,产出可演示的 markdown,作为后续 Day 16 LLM-as-Judge 评估的输入和 Day 28 投简历的 demo 产物。
 
@@ -55,10 +55,10 @@ when_to_use: 用户给一个主题/方向(不是单篇 paper / 不是对比指�
 
 ## 工作流(推荐,非强制)
 1. **规划**: `research_todo` 写下 plan(搜索关键词 / 候选数 / 精读数)
-2. **粗搜**: `mcp__arxiv__search(query=..., max_results=8)`,标题摘要先筛
-3. **细排**: 把候选喂 `mcp__colbert__build_index` → `mcp__colbert__search(query=主题问题, k=5)` 做语义重排
-4. **扩展(可选)**: 若主题有明确"奠基 paper",用 `mcp__graph__cited_by / cites` 1 跳找经典或最新工作
-5. **精读**: 选 3-5 篇代表作,`paper_deep_read(papers=[...], n_workers=3-5)` 并发精读
+2. **粗搜**: `mcp__arxiv__search_papers(query=..., max_results=8)`,标题摘要先筛
+3. **下载 + 细排**: 从候选里选 3-5 篇,逐篇 `mcp__arxiv__download_paper(arxiv_id=...)`;再把 download 返回的 `{paper_id,text}` 喂 `mcp__colbert__build_index(documents=[...])` → `mcp__colbert__search(query=主题问题, paper_id=..., top_k=5)` 做语义重排
+4. **扩展(可选)**: 若主题有明确"奠基 paper",用 `mcp__graph__build_graph` + `mcp__graph__get_neighbors(direction="references"/"citations")` 1 跳找经典或最新工作
+5. **精读**: 选 3-5 篇代表作,`paper_deep_read(paper_ids=[...], user_query="...")` 并发精读(并发数由工具内部固定线程池控制)
 6. **下笔**: 用半固定骨架组织 markdown 输出(见下)
 
 ## 输出骨架(半固定,可按主题适配)
@@ -96,24 +96,25 @@ from paperpilot.main import run
 prompt = (
     "请为我写一篇综述,主题:long-context retrieval beyond 100k tokens。"
     "按 write-research-report skill 操作: 先 load_skill,然后跟 prose 走"
-    "(arxiv 搜索 → colbert 重排 → 选 3-5 篇 paper_deep_read 并发精读 → 半固定骨架 markdown)。"
+    "(arxiv 搜索 → download_paper 下载候选全文 → colbert 重排 → 选 3-5 篇 paper_deep_read 并发精读 → 半固定骨架 markdown)。"
 )
 messages = run(prompt, max_iter=30, on_event=tracer)
 ```
 
 **追踪断言(tracer 累积 tool_calls)**:
 - `load_skill` 至少 1 次,`name == "write-research-report"`
-- `mcp__arxiv__search` 至少 1 次
+- `mcp__arxiv__search_papers` 至少 1 次
+- `mcp__arxiv__download_paper` 至少 1 次
 - `mcp__colbert__build_index` 至少 1 次
 - `mcp__colbert__search` 至少 1 次
-- `paper_deep_read` 至少 1 次,且 `n_workers >= 3`
+- `paper_deep_read` 至少 1 次,且首个调用的 `paper_ids` 数量 >= 3
 - `research_todo` 至少 1 次(plan 步)
 - **不断言** `mcp__graph__*`(skill 标了"可选",强行断言违反 LLM 自决)
 
 **最终报告断言(final assistant message text)**:
 - 长度 ≥ 800 字符(中英文混排,字符级足够)
 - ≥ 3 个不同 arxiv_id 命中(regex `arxiv[:/ ]\d{4}\.\d{4,5}`,`set()` 去重 ≥ 3)
-- 7 个 section 标题里至少 4 个命中字面量: `TL;DR / Background / Key Methods / Recent Trends / Open Problems / Reading List` 任意 4 个
+- 7 个 section 标题组里至少 4 组命中,英文或中文标题都算: `TL;DR / Background|背景 / Key Methods|方法 / Recent Trends|趋势 / Open Problems|问题|局限 / Reading List|阅读 / Title|综述`
 
 **落盘(脚本视角,非 agent 视角)**:
 ```python
@@ -139,7 +140,7 @@ print(f"Report saved: {out}")
 | 症状 | 排查方向 |
 |---|---|
 | 没 load_skill | 检查 `_build_system_prompt` 是否真把 skill 列进去(已被 main_integration test 覆盖,理论上不会) |
-| 没 paper_deep_read | 调强 prompt,加一句"必须并发精读 3-5 篇" |
+| 没 paper_deep_read | 调强 prompt,加一句"必须用 paper_deep_read 并发精读 3-5 篇,参数是 paper_ids 和 user_query" |
 | 报告 < 800 字 | 提高 max_iter 到 40,或 prompt 强调"≥800 字" |
 | arxiv_id 数量不够 | prose"质量准则"里的"至少 3 篇 deep_read"已强调,若仍不够提高 prompt 权重 |
 
