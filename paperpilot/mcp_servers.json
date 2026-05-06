@@ -11,6 +11,10 @@
     "graph": {
       "command": "python",
       "args": ["-m", "paperpilot.mcp_servers.graph.server"]
+    },
+    "vlm": {
+      "command": "python",
+      "args": ["-m", "paperpilot.mcp_servers.vlm.server"]
     }
   }
 }

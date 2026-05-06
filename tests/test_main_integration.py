@@ -13,6 +13,7 @@ def test_build_system_prompt_includes_skills():
     assert "explore-citations" in prompt
     assert "find-classics" in prompt
     assert "compare-papers" in prompt
+    assert "analyze-figures" in prompt
     assert "PaperPilot" in prompt
     assert "build_index" in prompt
 
