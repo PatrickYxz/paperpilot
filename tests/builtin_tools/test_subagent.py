@@ -285,3 +285,13 @@ def test_tool_metadata_and_worker_count():
     assert "paper_ids" not in SUBAGENT_SYSTEM
     assert "paper_id=" in SUBAGENT_SYSTEM
     assert "mcp__colbert__search(query" in SUBAGENT_SYSTEM
+
+
+def test_subagent_system_requires_three_targeted_searches_and_short_answer():
+    assert "at least 3 times" in SUBAGENT_SYSTEM
+    assert "Search 1: the user's direct question" in SUBAGENT_SYSTEM
+    assert "Search 2: key terms" in SUBAGENT_SYSTEM
+    assert "Search 3: likely evidence locations" in SUBAGENT_SYSTEM
+    assert "## Short Answer" in SUBAGENT_SYSTEM
+    assert "## Evidence" in SUBAGENT_SYSTEM
+    assert "exact atomic fact" in SUBAGENT_SYSTEM

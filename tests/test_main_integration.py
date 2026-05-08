@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from paperpilot.main import _build_system_prompt, _build_tools
+from paperpilot.builtin_tools.skill_loader import SkillRegistry
+from paperpilot.main import SKILLS_DIR, _build_system_prompt, _build_tools
 
 
 def test_build_system_prompt_includes_skills():
@@ -56,3 +57,11 @@ def test_build_system_prompt_mentions_search_paper_id_required():
     prompt = _build_system_prompt()
     assert "mcp__colbert__search" in prompt
     assert "paper_id" in prompt
+
+
+def test_deep_read_skill_mentions_targeted_search_and_short_answer():
+    skill = SkillRegistry(SKILLS_DIR).load("deep-read-paper")
+    assert "默认至少做 3 次差异化 search" in skill
+    assert "Short answer:" in skill
+    assert "Evidence:" in skill
+    assert "原子事实" in skill

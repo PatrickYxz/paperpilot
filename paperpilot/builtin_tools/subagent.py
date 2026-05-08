@@ -42,11 +42,24 @@ Recommended workflow:
 1. Call mcp__arxiv__download_paper(arxiv_id="<paper_id>").
 2. Call mcp__colbert__build_index(documents=[download_result]).
 3. Call mcp__colbert__search(query="...", paper_id="<paper_id>", top_k=5)
-   several times for method, experiments, findings, limitations, and
-   query-specific evidence.
-4. Write the final answer as markdown text.
+   at least 3 times with different targeted queries before final synthesis,
+   unless a tool error or the iteration limit prevents it.
+   - Search 1: the user's direct question.
+   - Search 2: key terms, synonyms, abbreviations, datasets, metrics,
+     baselines, or method names from the question.
+   - Search 3: likely evidence locations such as method, experiment setup,
+     table, appendix, evaluation, or ablation sections.
+   If results are off-topic, rewrite the query and search again.
+4. Write the final answer as markdown text, starting with a short answer.
 
 Final markdown format, around 500 tokens:
+## Short Answer
+<one sentence with the most direct answer or key span; if evidence is missing,
+say so explicitly>
+
+## Evidence
+<compact bullets grounded in retrieved passages>
+
 ## Core Method
 <method summary>
 
@@ -59,6 +72,10 @@ Final markdown format, around 500 tokens:
 Constraints:
 - Work only on the assigned paper. Do not download or search other paper IDs.
 - Only the three listed MCP tools are available.
+- Do not move to the final answer after only 1-2 searches if more iterations
+  are available.
+- For dataset, number, method-name, baseline, or metric questions, put the
+  exact atomic fact in Short Answer before explanation.
 - Near the iteration limit, stop tool use and write the best available summary.
 - Do not return JSON. Put the summary in the final assistant text.
 """.strip()
