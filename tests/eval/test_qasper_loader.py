@@ -24,6 +24,13 @@ def test_extract_arxiv_id_non_arxiv_returns_none() -> None:
     assert extract_arxiv_id("") is None
 
 
+def test_extract_arxiv_id_raw_id() -> None:
+    """Real QASPER uses the bare arxiv id as the dict key."""
+    assert extract_arxiv_id("1909.00694") == "1909.00694"
+    assert extract_arxiv_id("2001.12345") == "2001.12345"
+    assert extract_arxiv_id("paper_aaa") is None
+
+
 def test_load_qasper_filters_papers_with_lt_3_extractive_or_no_arxiv() -> None:
     cases = load_qasper_cases(FIXTURE)
     arxiv_ids = {c.arxiv_id for c in cases}

@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-ARXIV_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5})", re.IGNORECASE)
+ARXIV_URL_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5})", re.IGNORECASE)
+ARXIV_ID_RE = re.compile(r"^(\d{4}\.\d{4,5})$")
 
 
 @dataclass(frozen=True)
@@ -21,11 +22,16 @@ class EvalCase:
     oracle_spans: tuple[str, ...]
 
 
-def extract_arxiv_id(url: str | None) -> str | None:
-    if not url:
+def extract_arxiv_id(s: str | None) -> str | None:
+    """Accept either a raw arxiv id (QASPER paper key, e.g. '1909.00694')
+    or an arxiv URL ('https://arxiv.org/abs/...')."""
+    if not s:
         return None
-    match = ARXIV_RE.search(url)
-    return match.group(1) if match else None
+    m = ARXIV_ID_RE.match(s)
+    if m:
+        return m.group(1)
+    m = ARXIV_URL_RE.search(s)
+    return m.group(1) if m else None
 
 
 def _join_full_text(full_text: list[dict] | None) -> str:
@@ -83,10 +89,14 @@ def load_qasper_cases(qasper_path: Path) -> list[EvalCase]:
     raw = json.loads(qasper_path.read_text(encoding="utf-8"))
     cases: list[EvalCase] = []
 
-    for paper in raw.values():
+    for paper_id, paper in raw.items():
         if not isinstance(paper, dict):
             continue
-        arxiv_id = extract_arxiv_id(paper.get("paper_url"))
+        # Real QASPER uses arxiv id as the dict key; fixtures use paper_url.
+        arxiv_id = (
+            extract_arxiv_id(paper_id)
+            or extract_arxiv_id(paper.get("paper_url"))
+        )
         if arxiv_id is None:
             continue
 
