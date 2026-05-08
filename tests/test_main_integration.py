@@ -62,6 +62,11 @@ def test_build_system_prompt_mentions_search_paper_id_required():
 def test_deep_read_skill_mentions_targeted_search_and_short_answer():
     skill = SkillRegistry(SKILLS_DIR).load("deep-read-paper")
     assert "默认至少做 3 次差异化 search" in skill
+    assert "Answer span candidates" in skill
+    assert "必须先显式输出" in skill
+    assert "不要在 candidate 里扩写括号解释" in skill
     assert "Short answer:" in skill
     assert "Evidence:" in skill
     assert "原子事实" in skill
+    assert "英文原文" in skill
+    assert "数量或范围" in skill

@@ -25,6 +25,9 @@ when_to_use: 用户给定 arxiv id 或论文标题要求详细讲解,或追问�
    - 第 3 次搜答案所在位置的线索,例如 experiment setup、table、appendix、method、evaluation、ablation。
    - 如果前 3 次结果仍不相关,换 query 继续搜,而不是凭印象回答。
 4. 综合回答: 只基于 `colbert.search` 返回的具体段落回答,并引用或转述段落里的证据。
+   - 最终回答必须先显式输出 `Answer span candidates:` 列表。
+   - `Answer span candidates` 里列 1-3 个从检索段落原样复制的短短词组、数字范围、方法名、数据集名或关键结论句;不要在 candidate 里扩写括号解释。
+   - `Short answer:` 必须包含至少一个 candidate 的原文片段;如果问题是英文或评测型问答,优先保留英文原文,不要只翻译或改写成中文。
    - 最终回答先写 `Short answer:` 一句话,直接给出最短答案或关键 span。
    - 然后写 `Evidence:` 说明来自哪些检索段落,不要先写长篇背景。
    - 最后写必要解释;如果没找到证据,明确说未在检索结果中找到,不要泛泛总结。
@@ -33,4 +36,6 @@ when_to_use: 用户给定 arxiv id 或论文标题要求详细讲解,或追问�
 - 不要只看 abstract 回答细节问题。
 - 不要编造段落、标题、作者或结论。
 - 问题问数据集、数值、方法名、baseline、指标时,最终答案必须优先输出这些原子事实。
+- 问题问数量或范围时,如果证据里有多个数字或范围,先列出所有可能相关的数字/范围,再说明哪个最直接回答问题。
+- 问题问 patterns / findings / observations 时,优先复制论文中的总体发现句,再用自己的话解释。
 - 如果 search 返回内容与问题无关,换 query 继续搜,而不是凭印象回答。

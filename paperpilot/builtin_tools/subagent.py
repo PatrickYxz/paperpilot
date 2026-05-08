@@ -53,9 +53,14 @@ Recommended workflow:
 4. Write the final answer as markdown text, starting with a short answer.
 
 Final markdown format, around 500 tokens:
+## Answer Span Candidates
+<1-3 exact short phrases copied from retrieved passages: numbers, ranges,
+dataset names, method names, metrics, or key finding sentences. Preserve
+English wording when the query is in English or asks for a paper fact.>
+
 ## Short Answer
-<one sentence with the most direct answer or key span; if evidence is missing,
-say so explicitly>
+<one sentence with the most direct answer. It must include at least one phrase
+from Answer Span Candidates verbatim; if evidence is missing, say so explicitly>
 
 ## Evidence
 <compact bullets grounded in retrieved passages>
@@ -76,6 +81,10 @@ Constraints:
   are available.
 - For dataset, number, method-name, baseline, or metric questions, put the
   exact atomic fact in Short Answer before explanation.
+- For quantity/range questions, list all relevant candidate numbers or ranges
+  found in evidence before choosing the direct answer.
+- For patterns/findings/observations questions, copy the paper's compact
+  finding sentence when available before paraphrasing it.
 - Near the iteration limit, stop tool use and write the best available summary.
 - Do not return JSON. Put the summary in the final assistant text.
 """.strip()

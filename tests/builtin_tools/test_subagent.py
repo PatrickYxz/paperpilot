@@ -292,6 +292,9 @@ def test_subagent_system_requires_three_targeted_searches_and_short_answer():
     assert "Search 1: the user's direct question" in SUBAGENT_SYSTEM
     assert "Search 2: key terms" in SUBAGENT_SYSTEM
     assert "Search 3: likely evidence locations" in SUBAGENT_SYSTEM
+    assert "## Answer Span Candidates" in SUBAGENT_SYSTEM
     assert "## Short Answer" in SUBAGENT_SYSTEM
     assert "## Evidence" in SUBAGENT_SYSTEM
     assert "exact atomic fact" in SUBAGENT_SYSTEM
+    assert "verbatim" in SUBAGENT_SYSTEM
+    assert "quantity/range" in SUBAGENT_SYSTEM
