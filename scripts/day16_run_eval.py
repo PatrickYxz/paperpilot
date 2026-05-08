@@ -12,6 +12,9 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from paperpilot.eval.baselines import (
     run_abstract_only,
     run_full_text_dump,
