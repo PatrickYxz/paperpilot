@@ -1,114 +1,105 @@
-# Day 17 eval case studies
+# Day 17/18 eval case studies
 
-Day 16 produced a complete 150-case QASPER eval:
+Day 16 produced the first complete 150-case QASPER eval. Day 18 then reran the
+PaperPilot row after tightening the deep-read workflow around multi-query
+retrieval and explicit answer span candidates.
 
 | Baseline | Pass rate | Pass / Total | Error |
 |---|---:|---:|---:|
 | abstract_only | 2.0% | 3 / 150 | 0 |
 | full_text | 40.7% | 61 / 150 | 0 |
-| paperpilot | 45.3% | 68 / 150 | 0 |
+| paperpilot | 66.0% | 99 / 150 | 0 |
 
-The headline is deliberately modest: PaperPilot is better than a raw full-text
-dump by 4.7 points, but the real value of this eval is that every PaperPilot
-case has a trace. That makes wins and failures inspectable instead of anecdotal.
+The headline is stronger than Day 16 but still specific: after the Day 18
+prompt/evidence pass, PaperPilot beats the raw full-text baseline by 25.3
+points under a strict substring scorer. The traces are still the main asset:
+they show where the agent searched, what evidence it saw, and why failures
+remain.
 
 ## Aggregate takeaways
 
-- PaperPilot-only wins: 21 cases.
-- Full-text-only wins: 14 cases.
-- Both pass: 47 cases.
-- Neither pass: 68 cases.
-- PaperPilot failure buckets: `synthesis_miss` 56, `colbert_searched_low` 25,
-  `no_colbert_search` 1.
+- PaperPilot-only wins: 40 cases.
+- Full-text-only wins: 2 cases.
+- Both pass: 59 cases.
+- Neither pass: 49 cases.
+- Compared with the Day 16 PaperPilot run: 37 cases flipped from fail to pass,
+  6 flipped from pass to fail, 62 stayed pass, and 45 stayed fail.
+- Current PaperPilot failure buckets: `synthesis_miss` 50,
+  `colbert_searched_low` 1.
 
 ## Case 1: PaperPilot wins by retrieving a precise definition
 
 - Case: `qasper-1705.09665-q1`
-- Paper: `1705.09665`, "Community Identity and User Engagement in a Multi-Community Landscape"
+- Paper: `1705.09665`, "Community Identity and User Engagement in a
+  Multi-Community Landscape"
 - Question: "How do the authors measure how temporally dynamic a community is?"
 - Oracle span: "the average volatility of all utterances"
 - Result: `paperpilot=pass`, `full_text=fail`
 - Trace: `data/traces/qasper-1705.09665-q1.jsonl`
 
-PaperPilot followed the intended chain:
+Trace shape:
 
 ```text
 load_skill(deep-read-paper)
 -> mcp__arxiv__download_paper(1705.09665)
 -> mcp__colbert__build_index(paper_id=1705.09665)
--> mcp__colbert__search x3
+-> mcp__colbert__search x4
 ```
-
-The final answer explains word-level volatility, extends it to utterances, and
-states that community dynamicity is computed from the average volatility of all
-utterances. The full-text baseline gave a reasonable explanation, but missed the
-exact oracle phrase, so the strict scorer marked it as failed.
 
 Why it matters: this is the intended PaperPilot story. The agent loads the
 workflow, indexes the paper, searches targeted evidence, and returns a grounded
 answer that contains the QASPER evidence span.
 
-## Case 2: PaperPilot wins on a task definition buried in the paper
+## Case 2: PaperPilot wins on a compact factual list
 
-- Case: `qasper-1908.06606-q2`
-- Paper: `1908.06606`
-- Question: "How is the clinical text structuring task defined?"
-- Oracle spans include the CTS definition and the QA-CTS contrast.
+- Case: `qasper-1906.00378-q2`
+- Question: "Which languages are used in the multi-lingual caption model?"
+- Oracle spans include "German-English, French-English, and Japanese-English"
 - Result: `paperpilot=pass`, `full_text=fail`
-- Trace: `data/traces/qasper-1908.06606-q2.jsonl`
+- Trace: `data/traces/qasper-1906.00378-q2.jsonl`
 
 Trace shape:
 
 ```text
 load_skill(deep-read-paper)
--> mcp__arxiv__download_paper(1908.06606)
--> mcp__colbert__build_index(paper_id=1908.06606)
+-> mcp__arxiv__download_paper(1906.00378)
+-> mcp__colbert__build_index(paper_id=1906.00378)
 -> mcp__colbert__search x3
 ```
 
-The PaperPilot answer explicitly cites the clinical text structuring definition
-and contrasts traditional CTS with QA-CTS. This is a good case study because the
-answer is definition-heavy and benefits from targeted retrieval rather than a
-single full-text prompt.
+This case benefits from the Day 18 answer-span rule: the answer must expose the
+short list before explanation, which helps the strict scorer and also makes the
+answer easier to audit.
 
-## Case 3: Full-text wins where PaperPilot under-searches
+## Case 3: Full-text still wins on a short label answer
 
-- Case: `qasper-1909.08402-q1`
-- Question: "What dataset do they use?"
-- Oracle spans: "2019 GermEval shared task on hierarchical text classification",
-  "GermEval 2019 shared task"
+- Case: `qasper-1909.00694-q1`
+- Question: "What are labels available in dataset for supervision?"
+- Oracle spans: "negative", "positive"
 - Result: `full_text=pass`, `paperpilot=fail`
-- Trace: `data/traces/qasper-1909.08402-q1.jsonl`
-- Failure bucket: `colbert_searched_low`
+- Trace: `data/traces/qasper-1909.00694-q1.jsonl`
 
 Trace shape:
 
 ```text
 load_skill(deep-read-paper)
--> mcp__arxiv__download_paper(1909.08402)
--> mcp__colbert__build_index(paper_id=1909.08402)
--> mcp__colbert__search x2
+-> mcp__arxiv__download_paper(1909.00694)
+-> mcp__colbert__build_index(paper_id=1909.00694)
+-> mcp__colbert__search x9
 ```
 
-PaperPilot's answer identified the dataset as the 2019 GermEval shared task, but
-the scorer required an exact English oracle span and counted it as failed. This
-case shows two useful limitations at once:
+This is not an under-search problem. The agent searched heavily, but the final
+answer did not reduce the evidence to the exact two-label form required by the
+oracle. That points to answer extraction and final-span compression, not simply
+more retrieval.
 
-- the agent sometimes stops at only two ColBERT searches, below the intended
-  deep-read threshold;
-- strict substring scoring can undercount semantically correct Chinese answers.
-
-Why it matters: the eval is honest but conservative. It is useful for ranking
-systems, but not every fail is an objectively wrong answer.
-
-## Case 4: Retrieval happened, but synthesis missed the requested number
+## Case 4: Retrieval happened, but synthesis missed the requested range
 
 - Case: `qasper-1809.04960-q2`
 - Question: "How many comments were used?"
 - Oracle span: "from 50K to 4.8M"
 - Result: `paperpilot=fail`, `full_text=fail`
 - Trace: `data/traces/qasper-1809.04960-q2.jsonl`
-- Failure bucket: `synthesis_miss`
 
 Trace shape:
 
@@ -116,25 +107,21 @@ Trace shape:
 load_skill(deep-read-paper)
 -> mcp__arxiv__download_paper(1809.04960)
 -> mcp__colbert__build_index(paper_id=1809.04960)
--> mcp__colbert__search x3
+-> mcp__colbert__search x4
 ```
 
-The agent performed the full retrieval path, but the final answer summarized the
-dataset broadly and did not include the exact requested range. This is the most
-important failure class in Day 16: retrieval can be present while final synthesis
-still misses the answer span.
+The answer surfaced nearby numeric evidence, but missed the exact range. This
+is still the most important remaining failure pattern: retrieval can be present
+while final synthesis fails to preserve the shortest numeric answer span.
 
 ## Recommended next technical work
 
-Do not treat Day 16 as proof that the current RAG workflow is finished. The
-numbers suggest a narrower next step:
+Do not treat the 66.0% result as the end of the RAG work. The next narrow
+improvement should focus on answer extraction after retrieval:
 
-- enforce or strongly nudge at least three targeted ColBERT searches for
-  deep-read questions;
-- carry compact evidence snippets into the final answer and require the final
-  response to include the shortest answer span before explanation;
-- add a semantic/LLM judge audit on failed substring cases, but keep substring
-  scoring as the main reproducible metric.
-
-These are Day 18-style improvements. Day 17's job is to make the existing result
-presentable and auditable.
+- add a stricter final-span selection step for short labels, lists, and numeric
+  ranges;
+- preserve exact table/range wording when the question asks "how many", "which
+  labels", "what methods", or similar atomic facts;
+- keep the strict substring scorer as the reproducible metric, but add a small
+  semantic audit report for false negatives.

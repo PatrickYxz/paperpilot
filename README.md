@@ -5,9 +5,10 @@ academic papers. It uses an Anthropic-compatible ReAct loop with MCP tools for
 arXiv download, per-paper ColBERT retrieval, citation graph lookup, multimodal
 figure understanding, and concurrent paper reading.
 
-**Current status**: evaluation-complete prototype. The core agent loop,
-tool stack, deep-read workflow, report-writing workflow, and a third-party
-QASPER eval harness are implemented and validated locally.
+**Current status**: evaluation-complete prototype with one post-eval
+improvement pass. The core agent loop, tool stack, deep-read workflow,
+report-writing workflow, and a third-party QASPER eval harness are implemented
+and validated locally.
 
 ## What It Does
 
@@ -38,27 +39,31 @@ The top-level loop stays synchronous. `MCPClient` hides the async MCP sessions
 behind synchronous tool handlers, so the agent loop can reason over a simple
 tool list while each MCP server owns its specialized runtime.
 
-## Day 16 Evaluation
+## Day 16/18 Evaluation
 
 PaperPilot was evaluated on a third-party AI2 QASPER extractive-QA subset:
 50 papers x 3 questions = 150 cases. The eval compares three baselines with the
-same DeepSeek model:
+same DeepSeek model. The abstract-only and full-text rows are the original
+Day 16 baselines; the PaperPilot row was rerun after the Day 18 evidence-span
+and multi-search prompt improvements:
 
 | Baseline | Pass | Fail | Error | Pass Rate | Avg latency |
 |---|---:|---:|---:|---:|---:|
 | abstract_only | 3 | 147 | 0 | 2.0% | 0.8s |
 | full_text | 61 | 89 | 0 | 40.7% | 3.5s |
-| paperpilot | 68 | 82 | 0 | 45.3% | 110.9s |
+| paperpilot | 99 | 51 | 0 | 66.0% | 107.9s |
 
 Interpretation:
 
 - Abstract-only answering is not enough for detailed paper QA.
 - Full text gives the largest jump, which is expected for extractive recall.
-- PaperPilot beats full-text dump by 4.7 points, but not by a large margin; the
-  honest takeaway is a small end-to-end RAG/agent advantage plus traceable
-  failure attribution, not a decisive win.
-- PaperPilot failures are mostly synthesis misses after retrieval, followed by
-  too few ColBERT searches.
+- After the Day 18 prompt/evidence-span pass, PaperPilot beats full-text dump by
+  25.3 points under the strict substring scorer.
+- The improvement came from making the deep-read workflow search more
+  consistently and forcing answers to surface compact evidence span candidates
+  before explanation.
+- The remaining failures are now mostly synthesis misses after retrieval, not
+  tool startup, arXiv download, or missing ColBERT calls.
 
 See [the eval summary](data/eval/summary.md) and
 [Day 17 case studies](docs/day17-eval-case-studies.md).
@@ -112,15 +117,15 @@ summary is the portable eval artifact.
   can be counted as false negatives when wording differs.
 - PaperPilot is much slower than full-text dump on this eval because it runs the
   complete agent workflow and writes per-case traces.
-- The main Day 16 failure mode is answer synthesis, not tool startup or arXiv
-  download; this suggests the next technical work should improve retrieval
-  query planning, evidence packing, or answer grounding.
+- The main remaining failure mode is answer synthesis: the trace often contains
+  relevant evidence, but the final answer may miss the exact oracle wording,
+  numeric range, or phrase boundary required by the strict scorer.
 - `data/eval/results_*.jsonl` and `data/traces/*.jsonl` are local artifacts and
   are not committed.
 
 ## Validation
 
-Known local checks for the Day 16/17 state:
+Known local checks for the Day 18 state:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests -q `
@@ -129,7 +134,7 @@ Known local checks for the Day 16/17 state:
   --ignore=tests/test_per_paper_index_slow.py
 ```
 
-Expected result after Day 16: `134 passed, 4 deselected`.
+Current fast-suite result: `137 passed, 4 deselected`.
 
 ## License
 
