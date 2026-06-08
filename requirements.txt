@@ -7,6 +7,8 @@ mcp>=1.0.0
 arxiv>=2.1.0
 requests>=2.32.0
 pytest>=8.0.0
+fastapi>=0.115.0
+uvicorn>=0.30.0
 
 # ===== Day 6: PDF 解析 + ColBERT 检索 =====
 # PyLate (Stanford ColBERT v2 现代 Python 重写) 取代 ragatouille:

@@ -30,6 +30,8 @@ def test_build_tools_contains_load_skill_research_todo_and_mcp_tools():
         assert "research_todo" in names
         assert "paper_deep_read" in names
         assert "compact_context" in names
+        assert "search_user_document" in names
+        assert "ask_user" in names
         assert any(name.startswith("mcp__") for name in names)
     finally:
         mcp.close()
@@ -51,6 +53,20 @@ def test_build_system_prompt_includes_compact_context_nudge():
     prompt = _build_system_prompt()
     assert "## Long conversation" in prompt
     assert "compact_context" in prompt
+
+
+def test_build_system_prompt_includes_ask_user_nudge():
+    prompt = _build_system_prompt()
+    assert "## Ask user" in prompt
+    assert "ask_user" in prompt
+    assert "required information is missing" in prompt
+
+
+def test_build_system_prompt_includes_user_document_nudge():
+    prompt = _build_system_prompt()
+    assert "## User-pasted paper comparison" in prompt
+    assert "search_user_document" in prompt
+    assert "target-paper profile" in prompt
 
 
 def test_build_system_prompt_mentions_search_paper_id_required():

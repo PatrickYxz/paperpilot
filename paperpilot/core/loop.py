@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 from typing import Callable
 
+from paperpilot.builtin_tools.compact import compact_messages
 from paperpilot.core.adapter import LLMClient, Tool, ToolResult
+from paperpilot.core.context_manager import ContextManager
 from paperpilot.core.guardrail import Guardrail, GuardrailStop
 
 EventCallback = Callable[[str, dict], None]
@@ -25,16 +27,45 @@ def agent_loop(
     client: LLMClient,
     guardrail: Guardrail | None = None,
     on_event: EventCallback | None = None,
+    context_manager: ContextManager | None = None,
 ) -> list[dict]:
     """跑 agent loop,就地修改并返回 messages。"""
     guard = guardrail or Guardrail()
     tool_by_name = {t.name: t for t in tools}
     emit = on_event or (lambda _k, _v: None)
     downloaded_documents: list[dict] = []
+    ctx = context_manager or ContextManager.from_env()
 
     while True:
         if guard.should_stop():
             emit("guardrail_stop", {"reason": guard.stop_reason()})
+            break
+
+        context_state = ctx.inspect(system=system, tools=tools, messages=messages)
+        if context_state.needs_compact:
+            emit("context_preflight", {
+                "estimated_tokens": context_state.estimated_tokens,
+                "window_tokens": context_state.window_tokens,
+                "stage": (
+                    "critical" if context_state.over_critical_limit
+                    else "hard" if context_state.over_hard_limit
+                    else "soft"
+                ),
+            })
+            result = compact_messages(
+                messages_ref=messages,
+                client_factory=lambda: client,
+                on_event=emit,
+            )
+            emit("auto_compact", {"result": result})
+            context_state = ctx.inspect(system=system, tools=tools, messages=messages)
+
+        if context_state.over_critical_limit:
+            emit("context_overflow", {
+                "estimated_tokens": context_state.estimated_tokens,
+                "window_tokens": context_state.window_tokens,
+                "critical_limit": context_state.critical_limit,
+            })
             break
 
         response = client.call(messages, tools, system=system)

@@ -2,6 +2,7 @@
 
 CLI:
     python -m paperpilot.main --query "..."
+    python -m paperpilot.main --chat
 
 Library:
     from paperpilot.main import run
@@ -10,152 +11,113 @@ Library:
 from __future__ import annotations
 
 import argparse
-import os
-from pathlib import Path
-from typing import Callable
+from typing import Any
 
-from dotenv import load_dotenv
-
-from paperpilot.builtin_tools.compact import (
-    COMPACT_CONTEXT_NUDGE,
-    compact_context_tool,
+from paperpilot.conversation import (
+    MANIFEST_PATH,
+    SKILLS_DIR,
+    SYSTEM_PROMPT_BASE,
+    ConversationSession,
+    _build_system_prompt,
+    _build_tools,
+    _default_logger,
+    run,
 )
-from paperpilot.builtin_tools.research_todo import (
-    RESEARCH_TODO_NUDGE,
-    TodoStore,
-    research_todo_tool,
-)
-from paperpilot.builtin_tools.subagent import (
-    PAPER_DEEP_READ_NUDGE,
-    paper_deep_read_tool,
-)
-from paperpilot.builtin_tools.skill_loader import (
-    SkillRegistry,
-    load_skill_tool,
-    render_skill_section,
-)
-from paperpilot.core import Guardrail, LLMClient, agent_loop
-from paperpilot.core.adapter import Tool
-from paperpilot.tools.mcp_client import MCPClient
-
-MANIFEST_PATH = Path(__file__).parent / "mcp_servers.json"
-SKILLS_DIR = Path(__file__).parent / "skills"
-
-SYSTEM_PROMPT_BASE = """你是 PaperPilot,一个学术论文研究助手。
-工作原则:
-- 有 tool 可用时优先调 tool;不要自己编造论文标题、作者或 arxiv id
-- 一次只解决用户问的事,不主动扩展任务范围
-- tool 报错时,根据错误信息决定:重试(换参数 / 换工具) / 告诉用户失败原因
-- 调 tool 时必须按 schema 传完整必填参数;如果错误提示缺字段,下一轮必须补齐字段,不要重复同一个空参数
-- 调 mcp__colbert__build_index 时,documents 必须是非空列表,每项包含 paper_id 和 text;通常直接使用 mcp__arxiv__download_paper 返回的对象组成 documents=[download_result]
-- 调 mcp__colbert__search 时,paper_id 必填,值必须是已经 build_index 过的同一个 paper_id
-""".strip()
+from paperpilot.session_store import SessionStore
 
 
-def _build_system_prompt(registry: SkillRegistry | None = None) -> str:
-    registry = registry or SkillRegistry(SKILLS_DIR)
-    return (
-        SYSTEM_PROMPT_BASE
-        + render_skill_section(registry.list_metadata())
-        + "\n\n"
-        + RESEARCH_TODO_NUDGE
-        + "\n\n"
-        + PAPER_DEEP_READ_NUDGE
-        + "\n\n"
-        + COMPACT_CONTEXT_NUDGE
-    )
-
-
-def _build_tools(
-    registry: SkillRegistry | None = None,
-    todo_store: TodoStore | None = None,
-    messages_ref: list[dict] | None = None,
-    on_event: Callable[[str, dict], None] | None = None,
-) -> tuple[list[Tool], MCPClient]:
-    """Return (tools, mcp_client); caller is responsible for close()."""
-    registry = registry or SkillRegistry(SKILLS_DIR)
-    todo_store = todo_store or TodoStore()
-    messages_ref = messages_ref if messages_ref is not None else []
-    emit = on_event or _default_logger
-
-    mcp = MCPClient(MANIFEST_PATH)
-    try:
-        mcp.start()
-        mcp_tools = mcp.list_tools()
-        tools: list[Tool] = [
-            load_skill_tool(registry),
-            research_todo_tool(todo_store),
-            paper_deep_read_tool(
-                client_factory=lambda: LLMClient(),
-                mcp_tools=mcp_tools,
-                on_event=emit,
-            ),
-            compact_context_tool(
-                messages_ref=messages_ref,
-                client_factory=lambda: LLMClient(),
-                on_event=emit,
-            ),
-            *mcp_tools,
-        ]
-        return tools, mcp
-    except Exception:
-        mcp.close()
-        raise
-
-
-def _default_logger(kind: str, payload: dict) -> None:
-    if kind == "tool_call":
-        print(f"  -> {payload['name']}({payload['arguments']})")
-    elif kind == "tool_result":
-        print(f"  <- {payload['name']}: {payload['content'][:120]}...")
-    elif kind == "guardrail_stop":
-        print(f"  !! guardrail: {payload['reason']}")
-
-
-def run(query: str, *, max_iter: int = 8, on_event=None) -> list[dict]:
-    """Run one complete agent conversation and return final messages."""
-    load_dotenv()
-
-    emit = on_event or _default_logger
-    registry = SkillRegistry(SKILLS_DIR)
-    todo_store = TodoStore()
-    messages: list[dict] = [{"role": "user", "content": query}]
-    tools, mcp = _build_tools(
-        registry,
-        todo_store,
-        messages_ref=messages,
-        on_event=emit,
-    )
-    try:
-        return agent_loop(
-            messages,
-            system=_build_system_prompt(registry),
-            tools=tools,
-            client=LLMClient(),
-            guardrail=Guardrail(
-                max_iterations=max_iter,
-                budget_tokens=int(os.environ.get("BUDGET_TOKENS", 50_000)),
-            ),
-            on_event=emit,
-        )
-    finally:
-        mcp.close()
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="paperpilot")
-    parser.add_argument("--query", required=True)
-    parser.add_argument("--max-iter", type=int, default=8)
-    args = parser.parse_args()
-    messages = run(args.query, max_iter=args.max_iter)
+def _print_final(messages: list[dict[str, Any]]) -> None:
     print("\n=== FINAL ===")
     last = messages[-1].get("content")
     if isinstance(last, list):
         for block in last:
             if hasattr(block, "text"):
                 print(block.text)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                print(block.get("text", ""))
     else:
         print(last)
+
+
+def _run_chat(
+    max_iter: int,
+    *,
+    session_name: str | None = None,
+    reset_session: bool = False,
+) -> None:
+    label = f" session={session_name!r}" if session_name else ""
+    print(
+        "PaperPilot chat"
+        f"{label}. 输入 /reset 开始新对话, /compact 压缩上下文, /exit 退出。"
+    )
+    with ConversationSession(
+        max_iter_per_turn=max_iter,
+        session_name=session_name,
+        reset_session=reset_session,
+    ) as session:
+        while True:
+            try:
+                user_text = input("\nPaperPilot> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nbye")
+                break
+
+            if not user_text:
+                continue
+            if user_text in {"/exit", "/quit"}:
+                break
+            if user_text in {"/reset", "/new"}:
+                session.reset()
+                print("已重置当前会话。")
+                continue
+            if user_text == "/compact":
+                print(session.compact())
+                continue
+
+            messages = session.ask(user_text)
+            _print_final(messages)
+
+
+def _print_sessions() -> None:
+    sessions = SessionStore().list_sessions()
+    if not sessions:
+        print("No saved sessions.")
+        return
+    for session in sessions:
+        print(
+            f"{session.name}\tmessages={session.message_count}"
+            f"\tupdated={session.updated_at}"
+        )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="paperpilot")
+    parser.add_argument("--query")
+    parser.add_argument("--chat", action="store_true")
+    session_group = parser.add_mutually_exclusive_group()
+    session_group.add_argument("--session")
+    session_group.add_argument("--new-session")
+    parser.add_argument("--list-sessions", action="store_true")
+    parser.add_argument("--max-iter", type=int, default=8)
+    args = parser.parse_args()
+
+    if args.list_sessions:
+        _print_sessions()
+        return
+    if (args.session or args.new_session) and not args.chat:
+        parser.error("--session and --new-session require --chat")
+    if args.chat:
+        _run_chat(
+            args.max_iter,
+            session_name=args.session or args.new_session,
+            reset_session=bool(args.new_session),
+        )
+        return
+    if not args.query:
+        parser.error("--query is required unless --chat is set")
+
+    messages = run(args.query, max_iter=args.max_iter)
+    _print_final(messages)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,8 @@ from __future__ import annotations
 from typing import Callable
 
 from paperpilot.core.adapter import LLMClient, Tool
-from paperpilot.core.loop import EventCallback
+
+EventCallback = Callable[[str, dict], None]
 
 
 COMPACT_CONTEXT_NUDGE = """
@@ -56,33 +57,11 @@ def compact_context_tool(
     k = keep_recent_turns
 
     def _handler(args: dict) -> str:
-        if len(messages_ref) <= 1 + 2 * k:
-            return "already compact, nothing to summarize"
-
-        head = messages_ref[0]
-        tail_start = _tail_start_preserving_tool_results(messages_ref, 2 * k)
-        tail = messages_ref[tail_start:]
-        middle = messages_ref[1:tail_start]
-        if not middle:
-            return "already compact, nothing to summarize"
-
-        on_event("compact_start", {"middle_count": len(middle)})
-        summary_text = _summarize(middle, client_factory())
-        on_event("compact_done", {"kept_recent": len(tail)})
-
-        messages_ref[:] = [
-            head,
-            {
-                "role": "user",
-                "content": (
-                    f"<context_summary>\n{summary_text}\n</context_summary>"
-                ),
-            },
-            *tail,
-        ]
-        return (
-            f"compacted {len(middle)} messages into summary; "
-            f"kept last {len(tail)} turns"
+        return compact_messages(
+            messages_ref=messages_ref,
+            client_factory=client_factory,
+            on_event=on_event,
+            keep_recent_turns=k,
         )
 
     return Tool(
@@ -99,6 +78,43 @@ def compact_context_tool(
             "additionalProperties": False,
         },
         handler=_handler,
+    )
+
+
+def compact_messages(
+    *,
+    messages_ref: list[dict],
+    client_factory: Callable[[], LLMClient],
+    on_event: EventCallback,
+    keep_recent_turns: int = 3,
+) -> str:
+    """Compact older messages in place while preserving recent protocol turns."""
+    k = keep_recent_turns
+    if len(messages_ref) <= 1 + 2 * k:
+        return "already compact, nothing to summarize"
+
+    head = messages_ref[0]
+    tail_start = _tail_start_preserving_tool_results(messages_ref, 2 * k)
+    tail = messages_ref[tail_start:]
+    middle = messages_ref[1:tail_start]
+    if not middle:
+        return "already compact, nothing to summarize"
+
+    on_event("compact_start", {"middle_count": len(middle)})
+    summary_text = _summarize(middle, client_factory())
+    on_event("compact_done", {"kept_recent": len(tail)})
+
+    messages_ref[:] = [
+        head,
+        {
+            "role": "user",
+            "content": f"<context_summary>\n{summary_text}\n</context_summary>",
+        },
+        *tail,
+    ]
+    return (
+        f"compacted {len(middle)} messages into summary; "
+        f"kept last {len(tail)} turns"
     )
 
 

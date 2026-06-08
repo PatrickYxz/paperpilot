@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PaperPilot Workbench</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>PaperPilot</h1>
+        <p>Local research task workbench</p>
+      </div>
+      <button id="refreshTasks" type="button">Refresh</button>
+    </header>
+
+    <main class="layout">
+      <section class="panel create-panel" aria-labelledby="createTitle">
+        <h2 id="createTitle">New Research Task</h2>
+        <form id="taskForm">
+          <label for="question">Question</label>
+          <textarea
+            id="question"
+            name="question"
+            rows="7"
+            required
+            placeholder="What are the main retrieval strategies for long-context RAG?"
+          ></textarea>
+
+          <label for="depth">Depth</label>
+          <select id="depth" name="depth">
+            <option value="quick">Quick</option>
+            <option value="standard" selected>Standard</option>
+            <option value="deep">Deep</option>
+          </select>
+
+          <label for="executionMode">Execution</label>
+          <select id="executionMode" name="executionMode">
+            <option value="simulated" selected>Simulated</option>
+            <option value="real">Real PaperPilot</option>
+          </select>
+
+          <button type="submit">Create Task</button>
+        </form>
+        <p id="formMessage" class="message" role="status"></p>
+      </section>
+
+      <section class="panel history-panel" aria-labelledby="historyTitle">
+        <div class="section-heading">
+          <h2 id="historyTitle">Tasks</h2>
+          <select id="statusFilter" aria-label="Filter tasks by status">
+            <option value="">All</option>
+            <option value="pending">Pending</option>
+            <option value="running">Running</option>
+            <option value="completed">Completed</option>
+            <option value="failed">Failed</option>
+          </select>
+        </div>
+        <div id="taskList" class="task-list"></div>
+      </section>
+
+      <section class="panel detail-panel" aria-labelledby="detailTitle">
+        <h2 id="detailTitle">Task Detail</h2>
+        <div id="taskDetail" class="task-detail empty">Select a task.</div>
+        <div id="taskArtifacts" class="artifact-list"></div>
+        <div id="taskEvents" class="event-list"></div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
