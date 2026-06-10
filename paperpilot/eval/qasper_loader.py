@@ -22,6 +22,29 @@ class EvalCase:
     oracle_spans: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class QasperAnswer:
+    annotation_id: str
+    extractive_spans: tuple[str, ...]
+    free_form_answer: str
+    yes_no: bool | None
+    unanswerable: bool
+    evidence: tuple[str, ...]
+    highlighted_evidence: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class EnrichedEvalCase:
+    case_id: str
+    arxiv_id: str
+    paper_title: str
+    abstract: str
+    full_text: str
+    question: str
+    oracle_spans: tuple[str, ...]
+    answers: tuple[QasperAnswer, ...]
+
+
 def extract_arxiv_id(s: str | None) -> str | None:
     """Accept either a raw arxiv id (QASPER paper key, e.g. '1909.00694')
     or an arxiv URL ('https://arxiv.org/abs/...')."""
@@ -58,6 +81,33 @@ def _answer_spans(answer_record: dict[str, Any]) -> list[str]:
     if not spans:
         return []
     return [s for s in spans if isinstance(s, str) and s.strip()]
+
+
+def _string_list(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and item.strip())
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _parse_qasper_answer(answer_record: dict[str, Any]) -> QasperAnswer:
+    inner = answer_record.get("answer")
+    if not isinstance(inner, dict):
+        inner = answer_record
+    return QasperAnswer(
+        annotation_id=str(answer_record.get("annotation_id") or ""),
+        extractive_spans=_string_list(inner.get("extractive_spans")),
+        free_form_answer=str(inner.get("free_form_answer") or ""),
+        yes_no=_optional_bool(inner.get("yes_no")),
+        unanswerable=bool(inner.get("unanswerable", False)),
+        evidence=_string_list(inner.get("evidence")),
+        highlighted_evidence=_string_list(inner.get("highlighted_evidence")),
+    )
 
 
 def _collect_extractive_qas(qas: list) -> list[tuple[str, tuple[str, ...]]]:
@@ -114,5 +164,68 @@ def load_qasper_cases(qasper_path: Path) -> list[EvalCase]:
                 full_text=full_text,
                 question=question,
                 oracle_spans=spans,
+            ))
+    return cases
+
+
+def load_qasper_enriched_cases(qasper_path: Path) -> list[EnrichedEvalCase]:
+    """Parse QASPER JSON and preserve answer/evidence metadata.
+
+    This uses the same extractive-only policy as load_qasper_cases(): a paper is
+    included only if it has at least three QAs with extractive spans, and only
+    the first three such QAs are returned.
+    """
+    raw = json.loads(qasper_path.read_text(encoding="utf-8"))
+    cases: list[EnrichedEvalCase] = []
+
+    for paper_id, paper in raw.items():
+        if not isinstance(paper, dict):
+            continue
+        arxiv_id = (
+            extract_arxiv_id(paper_id)
+            or extract_arxiv_id(paper.get("paper_url"))
+        )
+        if arxiv_id is None:
+            continue
+
+        full_text = _join_full_text(paper.get("full_text"))
+        qa_cases: list[tuple[str, tuple[str, ...], tuple[QasperAnswer, ...]]] = []
+        for qa in paper.get("qas") or []:
+            if not isinstance(qa, dict):
+                continue
+            question = qa.get("question") or ""
+            answers = tuple(
+                _parse_qasper_answer(answer)
+                for answer in qa.get("answers") or []
+                if isinstance(answer, dict)
+            )
+            spans: list[str] = []
+            for answer in answers:
+                spans.extend(answer.extractive_spans)
+            if not question or not spans:
+                continue
+
+            seen: set[str] = set()
+            uniq: list[str] = []
+            for span in spans:
+                if span in seen:
+                    continue
+                seen.add(span)
+                uniq.append(span)
+            qa_cases.append((question, tuple(uniq), answers))
+
+        if len(qa_cases) < 3:
+            continue
+
+        for idx, (question, spans, answers) in enumerate(qa_cases[:3]):
+            cases.append(EnrichedEvalCase(
+                case_id=f"qasper-{arxiv_id}-q{idx}",
+                arxiv_id=arxiv_id,
+                paper_title=paper.get("title") or "",
+                abstract=paper.get("abstract") or "",
+                full_text=full_text,
+                question=question,
+                oracle_spans=spans,
+                answers=answers,
             ))
     return cases
