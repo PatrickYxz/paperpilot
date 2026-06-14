@@ -59,6 +59,7 @@ h2 {
   grid-template-columns: minmax(280px, 380px) minmax(320px, 1fr);
   grid-template-areas:
     "create history"
+    "eval history"
     "detail history";
   gap: 16px;
   padding: 16px;
@@ -78,6 +79,10 @@ h2 {
 .history-panel {
   grid-area: history;
   min-height: 520px;
+}
+
+.eval-panel {
+  grid-area: eval;
 }
 
 .detail-panel {
@@ -126,6 +131,20 @@ button {
 
 button:hover {
   background: var(--accent-dark);
+}
+
+.secondary-button {
+  min-height: 32px;
+  border-color: var(--line);
+  color: var(--text);
+  background: #ffffff;
+  font-size: 13px;
+}
+
+.secondary-button:hover {
+  border-color: var(--accent);
+  color: var(--accent-dark);
+  background: #f8fbff;
 }
 
 .section-heading {
@@ -223,6 +242,218 @@ button:hover {
 .task-detail dd {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.eval-snapshot {
+  display: grid;
+  gap: 14px;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metric-card {
+  display: grid;
+  gap: 4px;
+  min-height: 88px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfcfe;
+}
+
+.metric-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.metric-card strong {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.metric-rate {
+  color: var(--accent-dark);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.eval-tables {
+  display: grid;
+  gap: 12px;
+}
+
+.count-table {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #ffffff;
+}
+
+.count-table h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.count-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.count-table th,
+.count-table td {
+  border-top: 1px solid var(--line);
+  padding: 7px 0;
+  font-size: 13px;
+  text-align: left;
+}
+
+.count-table td {
+  color: var(--text);
+  font-weight: 700;
+  text-align: right;
+}
+
+.eval-source {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.candidate-browser {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.candidate-heading {
+  margin-bottom: 0;
+}
+
+.candidate-heading h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.candidate-count {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.candidate-filters {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: center;
+}
+
+.candidate-filters label {
+  font-size: 12px;
+}
+
+.candidate-list {
+  display: grid;
+  gap: 8px;
+  max-height: 720px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.candidate-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.candidate-card summary {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.candidate-main {
+  display: grid;
+  gap: 4px;
+}
+
+.candidate-id {
+  color: var(--accent-dark);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.candidate-question {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.candidate-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mini-tag {
+  display: inline-block;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: #f2f4f7;
+  color: #344054;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.candidate-body {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding: 10px;
+}
+
+.candidate-body h4 {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.candidate-body p {
+  line-height: 1.45;
+}
+
+.candidate-body pre {
+  max-height: 220px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  background: #fbfcfe;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.oracle-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .event-list {
@@ -383,6 +614,7 @@ button:hover {
     grid-template-columns: 1fr;
     grid-template-areas:
       "create"
+      "eval"
       "history"
       "detail";
   }

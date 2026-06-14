@@ -80,13 +80,94 @@ def test_event_ui_static_assets_are_served(tmp_path):
 
     css = client.get("/static/styles.css")
     js = client.get("/static/app.js")
+    html = client.get("/")
 
+    assert "Evaluation Snapshot" in html.text
+    assert "Calibration Candidates" in html.text
     assert css.status_code == 200
     assert ".event-category" in css.text
     assert ".event-payload" in css.text
+    assert ".metric-card" in css.text
+    assert ".candidate-card" in css.text
     assert js.status_code == 200
     assert "function eventCategory" in js.text
     assert "renderEventRow" in js.text
+    assert "loadEvalSnapshot" in js.text
+    assert "loadCalibrationCandidates" in js.text
+
+
+def test_eval_summary_api_returns_snapshot(tmp_path, monkeypatch):
+    client = _client(tmp_path)
+
+    monkeypatch.setattr(
+        "paperpilot.web.app.build_eval_snapshot",
+        lambda: {
+            "available": True,
+            "total_cases": 2,
+            "strict": {"pass_count": 1, "rate": 0.5},
+            "semantic": {
+                "correct_count": 1,
+                "correct_rate": 0.5,
+                "weighted_count": 1.5,
+                "weighted_rate": 0.75,
+                "label_counts": {"correct": 1, "partial": 1},
+            },
+            "calibrated": {
+                "available": True,
+                "candidate_count": 1,
+                "correct_count": 2,
+                "correct_rate": 1.0,
+                "weighted_count": 2,
+                "weighted_rate": 1.0,
+                "label_counts": {"correct": 2},
+                "decision_counts": {"accept_as_correct": 1},
+            },
+        },
+    )
+
+    response = client.get("/api/eval/summary")
+
+    assert response.status_code == 200
+    assert response.json()["total_cases"] == 2
+    assert response.json()["calibrated"]["correct_rate"] == 1.0
+
+
+def test_calibration_candidates_api_returns_filtered_payload(tmp_path, monkeypatch):
+    client = _client(tmp_path)
+    seen: dict[str, str | None] = {}
+
+    def fake_candidates(category=None, review_decision=None):
+        seen["category"] = category
+        seen["review_decision"] = review_decision
+        return {
+            "available": True,
+            "total_candidates": 1,
+            "filtered_count": 1,
+            "candidates": [
+                {
+                    "case_id": "case-1",
+                    "category": category,
+                    "review_decision": review_decision,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "paperpilot.web.app.list_calibration_candidates",
+        fake_candidates,
+    )
+
+    response = client.get(
+        "/api/eval/calibration-candidates"
+        "?category=partial_high&review_decision=accept_as_correct"
+    )
+
+    assert response.status_code == 200
+    assert seen == {
+        "category": "partial_high",
+        "review_decision": "accept_as_correct",
+    }
+    assert response.json()["candidates"][0]["case_id"] == "case-1"
 
 
 def test_create_task_records_simulated_workflow_events(tmp_path):

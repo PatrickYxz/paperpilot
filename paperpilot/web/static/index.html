@@ -60,6 +60,39 @@
         <div id="taskList" class="task-list"></div>
       </section>
 
+      <section class="panel eval-panel" aria-labelledby="evalTitle">
+        <div class="section-heading">
+          <h2 id="evalTitle">Evaluation Snapshot</h2>
+          <button id="refreshEval" type="button" class="secondary-button">Refresh</button>
+        </div>
+        <div id="evalSnapshot" class="eval-snapshot empty">Loading evaluation snapshot.</div>
+        <div class="candidate-browser" aria-labelledby="candidateTitle">
+          <div class="section-heading candidate-heading">
+            <h3 id="candidateTitle">Calibration Candidates</h3>
+            <span id="candidateCount" class="candidate-count">Loading.</span>
+          </div>
+          <div class="candidate-filters">
+            <label for="candidateCategory">Category</label>
+            <select id="candidateCategory">
+              <option value="">All</option>
+              <option value="partial_high">Partial High</option>
+              <option value="partial_medium">Partial Medium</option>
+              <option value="strict_pass_semantic_bad">Strict Pass Bad</option>
+            </select>
+            <label for="candidateDecision">Decision</label>
+            <select id="candidateDecision">
+              <option value="">All</option>
+              <option value="accept_as_correct">Accept Correct</option>
+              <option value="keep_partial">Keep Partial</option>
+              <option value="downgrade_to_incorrect">Downgrade Incorrect</option>
+              <option value="judge_error">Judge Error</option>
+              <option value="TODO">TODO</option>
+            </select>
+          </div>
+          <div id="candidateList" class="candidate-list empty">Loading candidates.</div>
+        </div>
+      </section>
+
       <section class="panel detail-panel" aria-labelledby="detailTitle">
         <h2 id="detailTitle">Task Detail</h2>
         <div id="taskDetail" class="task-detail empty">Select a task.</div>

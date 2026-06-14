@@ -9,6 +9,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from paperpilot.web.eval_summary import (
+    build_eval_snapshot,
+    list_calibration_candidates,
+)
 from paperpilot.web.task_store import TaskStore
 from paperpilot.web.workflow import WorkflowRunner
 
@@ -126,6 +130,20 @@ def create_app(
         if artifacts is None:
             raise HTTPException(status_code=404, detail="task not found")
         return [artifact.to_dict() for artifact in artifacts]
+
+    @app.get("/api/eval/summary")
+    def get_eval_summary() -> dict:
+        return build_eval_snapshot()
+
+    @app.get("/api/eval/calibration-candidates")
+    def get_calibration_candidates(
+        category: str | None = Query(default=None),
+        review_decision: str | None = Query(default=None),
+    ) -> dict:
+        return list_calibration_candidates(
+            category=category,
+            review_decision=review_decision,
+        )
 
     return app
 
