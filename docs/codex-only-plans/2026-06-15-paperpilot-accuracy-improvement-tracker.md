@@ -432,7 +432,7 @@ Run order:
 | failure mode classification | done | 13 diagnostic cases classified | use to choose fixes |
 | web eval dashboard | done | summary and candidate browser added | later add failure-mode filters |
 | B2 answer repair | implemented, uncommitted | cleans format, not semantic errors | commit, then move on |
-| evidence selection diagnosis | not started | likely next bottleneck | inspect 3 representative cases |
+| evidence selection diagnosis | case study done | 3 representative cases inspected; trace capture now preserves full tool results for future eval/debug runs | design Evidence Selection V1 |
 | scope control | partial | prompt tightened | diagnose list questions |
 | multi-part checklist | not implemented | failure mode count 6 | design after case study |
 | numeric/entity verification | partial | simple answer/evidence number check | design stronger relation check |
@@ -456,3 +456,29 @@ Smoke tests:
 Do not continue expanding repair until evidence selection is diagnosed.
 
 Repair can make bad answers cleaner. It cannot choose the correct answer if the raw draft already selected the wrong evidence. The next accuracy work should inspect retrieval and evidence selection before adding more output cleanup.
+
+## 2026-06-15 Evidence Selection Case Study Update
+
+Case-study report:
+
+- `docs/evidence_selection_case_study_20260615.md`
+
+Script:
+
+- `scripts/day23_evidence_selection_case_study.py`
+
+Findings:
+
+1. `qasper-1910.04601-q1` is a retrieval/evidence-selection miss. PaperPilot selected HotpotQA evidence while the calibration gold evidence says WikiHop. Repair cleaned the answer but could not fix the wrong evidence choice.
+2. `qasper-1701.00185-q1` is mainly a scope-control failure. The relevant evidence contains the narrow answer and broader neighboring context; PaperPilot promoted the broader context into the direct answer.
+3. `qasper-1910.07181-q0` is a numeric verification failure. The answer used percentage values that differ from calibration gold, so the next fix needs exact numeric relation verification.
+
+New blocker discovered:
+
+- Current JSONL traces store truncated tool-result content. They are enough to inspect search queries and snippet heads, but not enough to analyze full top-k retrieved evidence. Before a robust Evidence Selection V1, trace capture should preserve full or at least larger retrieved chunks for eval/debug runs.
+
+2026-06-15 follow-up:
+
+- Trace capture was updated so `agent_loop` emits full `tool_result.content` to callbacks.
+- `paperpilot.eval.jsonl_tracer` now receives and persists complete tool results.
+- The Web event mapper still truncates content into bounded previews before storing UI events, so the frontend remains protected from oversized tool results.
