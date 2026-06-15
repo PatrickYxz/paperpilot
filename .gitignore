@@ -78,3 +78,14 @@ daily_logs/
 # ===== 第三方参考源码(仅本地阅读,不提交) =====
 reference/
 repro.stderr
+
+# ===== Local-only planning / personal notes =====
+_personal/
+docs/codex-only-plans/2026-05-14-resume-github-chrome-mcp-workflow.md
+docs/codex-only-plans/2026-05-16-paperpilot-interview-obsidian-knowledge-base-plan.md
+docs/codex-only-plans/2026-05-20-multiturn-conversation-and-ask-user-plan.md
+docs/codex-only-plans/2026-05-20-recoverable-conversation-session-plan.md
+docs/codex-only-plans/2026-05-24-context-preflight-and-bulk-paper-input-plan.md
+docs/codex-only-plans/2026-06-01-paperpilot-ai-application-learning-roadmap-plan.md
+docs/learning/week1-http-basics-for-paperpilot.html
+docs/superpowers/plans/2026-06-02-exam-mate-plan.md
