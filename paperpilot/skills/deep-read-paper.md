@@ -1,41 +1,69 @@
 ---
 name: deep-read-paper
-description: 深读单篇 arxiv 论文:下载全文 -> 建索引 -> 多轮检索 -> 综合回答
-when_to_use: 用户给定 arxiv id 或论文标题要求详细讲解,或追问某篇论文里的概念定义和 method 细节
+description: 深读单篇 arXiv 论文：下载全文 -> 建索引 -> 多轮检索 -> 基于证据回答
+when_to_use: 用户给定 arXiv id 或论文标题，要求回答某篇论文里的定义、方法、实验设置、数据集、指标、结果或结论依据
 ---
 
 # Deep Read Paper
 
 ## 适用场景
-- 用户给定 arxiv id 或论文标题,要求详细讲解。
-- 用户问某篇具体论文里的概念定义、method 细节、实验设置或结论依据。
-- 回答需要基于论文全文里的具体段落,不能只看 abstract。
 
-## 步骤
-1. 拿全文: 调 `mcp__arxiv__download_paper(arxiv_id="...")`。
-2. 建索引: 调 `mcp__colbert__build_index(documents=[download_paper 返回值])`。
+- 用户给定 arXiv id 或论文标题，要求详细理解单篇论文。
+- 用户追问某篇论文里的概念定义、method 细节、实验设置、数据集、指标、baseline 或结论依据。
+- 回答必须基于论文全文里的具体段落，不能只看 abstract。
+
+## Workflow
+
+1. 下载全文：调用 `mcp__arxiv__download_paper(arxiv_id="...")`。
+2. 建索引：调用 `mcp__colbert__build_index(documents=[download_paper_result])`。
    - `documents` 必须是非空 list。
    - 每个元素必须包含 `paper_id` 和 `text`。
    - 通常直接把 `download_paper` 返回对象作为 list 里的唯一元素。
-3. 多轮检索: 针对用户问题里的关键概念调 `mcp__colbert__search(query="...", paper_id="<step 2 build 的 paper_id>", top_k=3)`。
-   - paper_id 必传,值与 step 2 build_index 时的 paper_id 一致。
-   - 默认至少做 3 次差异化 search;除非工具错误或已到迭代上限,不要只搜 1-2 次就进入最终回答。
-   - 第 1 次搜用户原问题或最接近的英文问题。
-   - 第 2 次搜关键术语 / 同义词 / 缩写,例如 dataset、benchmark、corpus、definition、metric、baseline。
-   - 第 3 次搜答案所在位置的线索,例如 experiment setup、table、appendix、method、evaluation、ablation。
-   - 如果前 3 次结果仍不相关,换 query 继续搜,而不是凭印象回答。
-4. 综合回答: 只基于 `colbert.search` 返回的具体段落回答,并引用或转述段落里的证据。
-   - 最终回答必须先显式输出 `Answer span candidates:` 列表。
-   - `Answer span candidates` 里列 1-3 个从检索段落原样复制的短短词组、数字范围、方法名、数据集名或关键结论句;不要在 candidate 里扩写括号解释。
-   - `Short answer:` 必须包含至少一个 candidate 的原文片段;如果问题是英文或评测型问答,优先保留英文原文,不要只翻译或改写成中文。
-   - 最终回答先写 `Short answer:` 一句话,直接给出最短答案或关键 span。
-   - 然后写 `Evidence:` 说明来自哪些检索段落,不要先写长篇背景。
-   - 最后写必要解释;如果没找到证据,明确说未在检索结果中找到,不要泛泛总结。
+3. 多轮检索：围绕用户问题调用 `mcp__colbert__search(query="...", paper_id="<indexed_paper_id>", top_k=3)`。
+   - `paper_id` 必须传，且必须与 build_index 时的 `paper_id` 一致。
+   - 默认至少做 3 次差异化 search；除非工具错误或已到迭代上限，不要只搜 1-2 次就进入最终回答。
+   - Search 1: 用户原问题或最接近的英文问题。
+   - Search 2: 关键术语、同义词或缩写，例如 dataset, benchmark, corpus, definition, metric, baseline。
+   - Search 3: 答案可能出现的位置线索，例如 experiment setup, table, appendix, method, evaluation, ablation。
+   - 如果前三次结果仍不相关，换 query 继续搜，而不是凭印象回答。
+4. 综合回答：只基于 `colbert.search` 返回的具体段落回答。
 
-## 注意
+## Final Answer Contract
+
+最终回答必须只输出面向用户的答案，不要输出执行过程。
+
+Required sections:
+
+```text
+Short answer: <one direct answer to the question>
+
+Evidence: <retrieved evidence that directly supports the short answer>
+
+Notes: <optional caveats only when needed>
+```
+
+Rules:
+
+- `Short answer:` 的第一句必须直接回答问题，不要先写背景。
+- `Evidence:` 只能放直接支持 short answer 的检索证据；不要把 related work、额外 baseline、额外数据集、额外指标混入证据。
+- `Notes:` 可省略；只有在证据不足、问题有歧义或需要限定范围时才写。
+- 不要在最终回答里输出 `Step 4`、tool progress、chain-of-thought style narration、`Answer span candidates`、`Now I have enough evidence` 或类似过程痕迹。
+- 不要把内部候选 span、搜索计划、执行状态写给用户。
+- 问什么答什么。不要因为段落里有相关内容，就把未被问题询问的方法、数据集、指标、baseline 或实验细节加入 direct answer。
+- 如果问题问列表，例如 methods / datasets / metrics / baselines / components，先确认每个列出的 item 都被检索证据直接支持；不要加入只是在同一段落附近出现但不属于问题范围的 item。
+- 如果问题问数值、百分比、分数、数据集名、corpus 名、method 名、metric 名，`Short answer:` 里写出的关键数字或实体必须也出现在 `Evidence:` 中。
+- 如果检索证据不足以回答，`Short answer:` 直接说证据不足，不要泛泛总结或猜测。
+
+## Common Failure Modes To Avoid
+
+- Overbroad scope: 问四个 clustering methods，却把 related-work methods、baseline variants 或 unrelated neural variants 全部列入答案。
+- Missing required part: 问多个 components / methods / datasets，只回答其中一部分。
+- Wrong numeric or entity: 问 improvement / score / dataset，使用相似段落里的错误数字或错误数据集名。
+- Format noise: 最终答案残留 `Step 4`、`Answer span candidates`、搜索过程或长篇解释。
+
+## Notes
+
 - 不要只看 abstract 回答细节问题。
-- 不要编造段落、标题、作者或结论。
-- 问题问数据集、数值、方法名、baseline、指标时,最终答案必须优先输出这些原子事实。
-- 问题问数量或范围时,如果证据里有多个数字或范围,先列出所有可能相关的数字/范围,再说明哪个最直接回答问题。
-- 问题问 patterns / findings / observations 时,优先复制论文中的总体发现句,再用自己的话解释。
-- 如果 search 返回内容与问题无关,换 query 继续搜,而不是凭印象回答。
+- 不要编造段落、标题、作者、数字或结论。
+- 问 patterns / findings / observations 时，优先复制或紧贴论文里的总体发现句，再做必要解释。
+- 如果 search 返回内容与问题无关，换 query 继续搜，而不是凭印象回答。

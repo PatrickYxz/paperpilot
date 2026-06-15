@@ -98,6 +98,15 @@ def run_one_baseline(baseline: str, cases: list[EvalCase], limit: int | None) ->
             "tool_calls": ans.get("tool_calls"),
             "error": ans.get("error"),
         }
+        for extra_key in [
+            "predicted_raw",
+            "answer_quality",
+            "answer_repaired",
+            "repair_answer_quality",
+            "repair_error",
+        ]:
+            if extra_key in ans:
+                record[extra_key] = ans[extra_key]
         with out_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         status = "PASS" if passed else ("ERR" if ans.get("error") else "FAIL")

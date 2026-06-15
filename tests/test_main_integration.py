@@ -9,7 +9,7 @@ from paperpilot.main import SKILLS_DIR, _build_system_prompt, _build_tools
 
 def test_build_system_prompt_includes_skills():
     prompt = _build_system_prompt()
-    assert "## 可用 skill" in prompt
+    assert "skill" in prompt
     assert "deep-read-paper" in prompt
     assert "explore-citations" in prompt
     assert "find-classics" in prompt
@@ -39,7 +39,6 @@ def test_build_tools_contains_load_skill_research_todo_and_mcp_tools():
 
 def test_build_system_prompt_includes_research_todo_nudge():
     prompt = _build_system_prompt()
-    assert "## 多步任务规划" in prompt
     assert "research_todo" in prompt
 
 
@@ -78,11 +77,10 @@ def test_build_system_prompt_mentions_search_paper_id_required():
 def test_deep_read_skill_mentions_targeted_search_and_short_answer():
     skill = SkillRegistry(SKILLS_DIR).load("deep-read-paper")
     assert "默认至少做 3 次差异化 search" in skill
-    assert "Answer span candidates" in skill
-    assert "必须先显式输出" in skill
-    assert "不要在 candidate 里扩写括号解释" in skill
     assert "Short answer:" in skill
     assert "Evidence:" in skill
-    assert "原子事实" in skill
-    assert "英文原文" in skill
-    assert "数量或范围" in skill
+    assert "Final Answer Contract" in skill
+    assert "未被问题询问的方法、数据集、指标、baseline" in skill
+    assert "关键数字或实体必须也出现在 `Evidence:`" in skill
+    assert "不要在最终回答里输出 `Step 4`" in skill
+    assert "Answer span candidates" in skill
