@@ -120,7 +120,7 @@ def agent_loop(
                 except Exception as e:
                     content = f"Error: {type(e).__name__}: {e}"
                     is_error = True
-                emit("tool_result", {"name": tc.name, "content": content[:200]})
+                emit("tool_result", {"name": tc.name, "content": content})
 
             results.append(ToolResult(id=tc.id, content=content, is_error=is_error))
 

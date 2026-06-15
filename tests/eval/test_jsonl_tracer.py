@@ -39,3 +39,13 @@ def test_tracer_handles_non_json_payload(tmp_path: Path) -> None:
     out = tmp_path / "y.jsonl"
     line = json.loads(out.read_text(encoding="utf-8").strip())
     assert "hello world" in str(line["payload"])
+
+
+def test_tracer_preserves_long_tool_result_content(tmp_path: Path) -> None:
+    long_content = "x" * 1200
+    tracer = make_jsonl_tracer("long", tmp_path)
+    tracer("tool_result", {"name": "mcp__colbert__search", "content": long_content})
+
+    out = tmp_path / "long.jsonl"
+    line = json.loads(out.read_text(encoding="utf-8").strip())
+    assert line["payload"]["content"] == long_content

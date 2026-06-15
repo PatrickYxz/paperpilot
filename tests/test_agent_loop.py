@@ -134,6 +134,56 @@ def test_agent_loop_repairs_empty_build_index_args_from_download_result():
     assert any(kind == "tool_arg_repair" for kind, _ in events)
 
 
+def test_agent_loop_emits_full_tool_result_content():
+    class OneToolClient(FakeClient):
+        def __init__(self):
+            self.calls = [
+                ParsedResponse(
+                    text=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="search-1",
+                            name="mcp__colbert__search",
+                            arguments={"query": "q"},
+                        )
+                    ],
+                    usage={"total_tokens": 1},
+                    raw=None,
+                ),
+                ParsedResponse(
+                    text="done",
+                    tool_calls=[],
+                    usage={"total_tokens": 1},
+                    raw=None,
+                ),
+            ]
+
+    long_result = "chunk:" + ("x" * 1000)
+    events = []
+    tools = [
+        Tool(
+            name="mcp__colbert__search",
+            description="search",
+            input_schema={},
+            handler=lambda args: long_result,
+        )
+    ]
+
+    agent_loop(
+        [{"role": "user", "content": "test"}],
+        system="",
+        tools=tools,
+        client=OneToolClient(),
+        guardrail=Guardrail(max_iterations=5),
+        on_event=lambda kind, payload: events.append((kind, payload)),
+    )
+
+    tool_results = [
+        payload for kind, payload in events if kind == "tool_result"
+    ]
+    assert tool_results[0]["content"] == long_result
+
+
 def test_agent_loop_auto_compacts_before_llm_call():
     messages = [{"role": "user", "content": "original"}]
     for i in range(10):
