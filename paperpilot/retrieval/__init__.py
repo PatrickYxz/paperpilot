@@ -6,6 +6,10 @@ from paperpilot.retrieval.evidence_pool import (
     build_evidence_pool,
     format_evidence_summary,
 )
+from paperpilot.retrieval.llm_query_planner import (
+    build_planner_prompt,
+    plan_with_llm,
+)
 from paperpilot.retrieval.query_plan import (
     EvidenceRequirement,
     ExpansionHints,
@@ -28,8 +32,10 @@ __all__ = [
     "QueryPlan",
     "RawSearchHit",
     "build_evidence_pool",
+    "build_planner_prompt",
     "format_evidence_summary",
     "minimal_fallback_plan",
     "parse_query_plan_json",
+    "plan_with_llm",
     "validate_query_plan",
 ]
