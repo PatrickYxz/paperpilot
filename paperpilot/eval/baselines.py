@@ -1,6 +1,7 @@
 """Three baselines for Day 16 deep-read eval."""
 from __future__ import annotations
 
+import json
 import time
 import traceback
 from pathlib import Path
@@ -18,6 +19,7 @@ from paperpilot.eval.evidence_selection import (
     run_evidence_selector,
 )
 from paperpilot.eval.jsonl_tracer import make_jsonl_tracer
+from paperpilot.eval.query_planner import QueryPlan, plan_queries
 from paperpilot.eval.qasper_loader import EvalCase
 
 _TRACE_DIR = Path("data/traces")
@@ -64,26 +66,31 @@ def run_paperpilot(
     max_iter: int = 12,
     repair_client: LLMClient | None = None,
     evidence_client: LLMClient | None = None,
+    use_query_plan: bool = False,
+    trace_id: str | None = None,
 ) -> dict[str, Any]:
     """Run PaperPilot end to end while collecting tool calls and JSONL trace."""
     from paperpilot.main import run as agent_run
 
     tool_calls: list[str] = []
-    file_tracer = make_jsonl_tracer(case.case_id, _TRACE_DIR)
-    trace_path = _TRACE_DIR / f"{case.case_id}.jsonl"
+    run_id = trace_id or case.case_id
+    file_tracer = make_jsonl_tracer(run_id, _TRACE_DIR)
+    trace_path = _TRACE_DIR / f"{run_id}.jsonl"
 
     def composite_tracer(kind: str, payload: dict) -> None:
         if kind == "tool_call":
             tool_calls.append(payload.get("name", ""))
         file_tracer(kind, payload)
 
-    prompt = (
-        f"请精读 arxiv:{case.arxiv_id}(标题《{case.paper_title}》),"
-        "回答下面的问题。使用 deep-read-paper skill 的工作流"
-        "(load_skill -> download_paper -> build_index -> "
-        "多次 colbert.search -> 综合)。\n\n"
-        f"Q: {case.question}\nA:"
-    )
+    query_plan: QueryPlan | None = None
+    if use_query_plan:
+        query_plan = plan_queries(
+            case.question,
+            title=case.paper_title,
+            abstract=case.abstract,
+        )
+
+    prompt = _build_paperpilot_prompt(case, query_plan=query_plan)
 
     t0 = time.time()
     predicted = ""
@@ -126,6 +133,8 @@ def run_paperpilot(
             )
         )
 
+    planned_retrieval_meta = _extract_planned_retrieval_metadata(trace_path)
+
     return {
         "predicted_raw": predicted_raw,
         "predicted": predicted,
@@ -140,6 +149,10 @@ def run_paperpilot(
         "evidence_selection": evidence_selection,
         "evidence_rewritten": evidence_rewritten,
         "evidence_selection_error": evidence_selection_error,
+        **planned_retrieval_meta,
+        "query_plan_used": use_query_plan,
+        "query_plan_version": "deterministic_v1" if query_plan is not None else None,
+        "query_plan": query_plan.to_dict() if query_plan is not None else None,
     }
 
 
@@ -179,6 +192,113 @@ def _extract_final_text(content: Any) -> str:
         elif isinstance(block, dict) and block.get("type") == "text":
             parts.append(str(block.get("text", "")))
     return "\n".join(p for p in parts if p)
+
+
+def _build_paperpilot_prompt(case: EvalCase, *, query_plan: QueryPlan | None = None) -> str:
+    guidance = _format_query_plan_guidance(query_plan) if query_plan is not None else ""
+    return (
+        f"请精读 arxiv:{case.arxiv_id}(标题《{case.paper_title}》),"
+        "回答下面的问题。使用 deep-read-paper skill 的工作流"
+        "(load_skill -> download_paper -> build_index -> "
+        "planned_retrieval -> 必要时补充 colbert.search -> 综合)。\n\n"
+        f"{guidance}"
+        f"Q: {case.question}\nA:"
+    )
+
+
+def _format_query_plan_guidance(query_plan: QueryPlan) -> str:
+    data = query_plan.to_dict()
+    must_find = _bullet_lines(data.get("must_find") or [])
+    avoid = _bullet_lines(data.get("avoid") or [])
+    searches = _numbered_query_lines(data.get("queries") or [])
+
+    avoid_block = f"\nAvoid:\n{avoid}" if avoid else ""
+    return (
+        "Retrieval guidance generated before the run:\n\n"
+        f"Question type: {data['question_type']}\n"
+        f"Expected answer shape: {data['answer_shape']}\n\n"
+        f"Must find:\n{must_find}"
+        f"{avoid_block}\n\n"
+        f"Planned searches:\n{searches}\n\n"
+        "During deep-read:\n"
+        "- First run the literal question search.\n"
+        "- Then run at least two planned searches that target the expected answer shape.\n"
+        "- Prefer evidence that directly expresses the relation asked by the question.\n"
+        "- Do not answer from a related mention unless it directly supports the question.\n\n"
+    )
+
+
+def _extract_planned_retrieval_metadata(trace_path: Path) -> dict[str, Any]:
+    defaults = {
+        "planned_retrieval_used": False,
+        "planned_retrieval_stats": None,
+        "planned_retrieval_missing_requirements": None,
+        "planned_retrieval_query_plan_meta": None,
+        "planned_retrieval_query_errors": None,
+    }
+    if not trace_path.exists():
+        return defaults
+
+    for line in trace_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("kind") != "tool_result":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("name") != "mcp__colbert__planned_retrieval":
+            continue
+        content = _parse_json_content(payload.get("content"))
+        if not isinstance(content, dict):
+            continue
+        pool = content.get("evidence_pool")
+        if not isinstance(pool, dict):
+            pool = {}
+        return {
+            "planned_retrieval_used": True,
+            "planned_retrieval_stats": pool.get("stats"),
+            "planned_retrieval_missing_requirements": pool.get(
+                "missing_requirements"
+            ),
+            "planned_retrieval_query_plan_meta": content.get("query_plan_meta"),
+            "planned_retrieval_query_errors": content.get("query_errors"),
+        }
+    return defaults
+
+
+def _parse_json_content(content: Any) -> Any:
+    if not isinstance(content, str):
+        return content
+    text = content.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    try:
+        parsed, _ = json.JSONDecoder().raw_decode(text)
+        return parsed
+    except json.JSONDecodeError:
+        return None
+
+
+def _bullet_lines(values: list[Any]) -> str:
+    return "\n".join(f"- {value}" for value in values if str(value).strip()) or "- direct evidence"
+
+
+def _numbered_query_lines(queries: list[Any]) -> str:
+    lines: list[str] = []
+    for index, item in enumerate(queries, start=1):
+        query = item.get("query", "") if isinstance(item, dict) else ""
+        if str(query).strip():
+            lines.append(f"{index}. {query}")
+    return "\n".join(lines) or "1. literal question"
 
 
 def _repair_final_answer(

@@ -1,4 +1,5 @@
 """Tests for eval baseline result shaping."""
+import json
 from types import SimpleNamespace
 
 from paperpilot.eval import baselines
@@ -154,6 +155,75 @@ def test_run_paperpilot_keeps_answer_when_selector_fails(monkeypatch, tmp_path) 
     assert result["evidence_selection_error"] == "RuntimeError: selector unavailable"
 
 
+def test_run_paperpilot_can_inject_query_plan_guidance(monkeypatch, tmp_path) -> None:
+    raw = (
+        "Short answer: WikiHop.\n\n"
+        "Evidence: Our study uses WikiHop."
+    )
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(baselines, "_TRACE_DIR", tmp_path)
+    _patch_agent_run_capture_prompt(monkeypatch, raw, captured)
+
+    result = baselines.run_paperpilot(CASE, use_query_plan=True)
+
+    assert result["predicted"] == raw
+    assert result["query_plan_used"] is True
+    assert result["query_plan_version"] == "deterministic_v1"
+    assert result["query_plan"]["question_type"] == "dataset_used"
+    assert "Retrieval guidance generated before the run" in captured["prompt"]
+    assert "Planned searches:" in captured["prompt"]
+    assert "dataset used" in captured["prompt"].lower()
+
+
+def test_run_paperpilot_omits_query_plan_by_default(monkeypatch, tmp_path) -> None:
+    raw = (
+        "Short answer: WikiHop.\n\n"
+        "Evidence: Our study uses WikiHop."
+    )
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(baselines, "_TRACE_DIR", tmp_path)
+    _patch_agent_run_capture_prompt(monkeypatch, raw, captured)
+
+    result = baselines.run_paperpilot(CASE)
+
+    assert result["predicted"] == raw
+    assert result["query_plan_used"] is False
+    assert result["query_plan_version"] is None
+    assert result["query_plan"] is None
+    assert "Retrieval guidance generated before the run" not in captured["prompt"]
+
+
+def test_run_paperpilot_records_planned_retrieval_metadata(
+    monkeypatch, tmp_path
+) -> None:
+    raw = (
+        "Short answer: WikiHop.\n\n"
+        "Evidence: Our study uses WikiHop."
+    )
+
+    monkeypatch.setattr(baselines, "_TRACE_DIR", tmp_path)
+    _patch_agent_run_with_planned_retrieval(monkeypatch, raw)
+
+    result = baselines.run_paperpilot(
+        CASE,
+        trace_id="planned-retrieval-case",
+    )
+
+    assert result["predicted"] == raw
+    assert result["planned_retrieval_used"] is True
+    assert result["planned_retrieval_stats"] == {
+        "raw_result_count": 2,
+        "deduped_count": 1,
+    }
+    assert result["planned_retrieval_missing_requirements"] == []
+    assert result["planned_retrieval_query_plan_meta"] == {
+        "fallback_used": False,
+    }
+    assert result["planned_retrieval_query_errors"] == []
+
+
 def _patch_agent_run(monkeypatch, final_text: str) -> None:
     import paperpilot.main
 
@@ -164,9 +234,52 @@ def _patch_agent_run(monkeypatch, final_text: str) -> None:
     monkeypatch.setattr(paperpilot.main, "run", fake_run)
 
 
-def _patch_agent_run_with_search(monkeypatch, final_text: str) -> None:
-    import json
+def _patch_agent_run_capture_prompt(monkeypatch, final_text: str, captured: dict[str, str]) -> None:
+    import paperpilot.main
 
+    def fake_run(query: str, *, max_iter: int, on_event):
+        captured["prompt"] = query
+        on_event("tool_call", {"name": "load_skill", "arguments": {}})
+        return [{"role": "assistant", "content": final_text}]
+
+    monkeypatch.setattr(paperpilot.main, "run", fake_run)
+
+
+def _patch_agent_run_with_planned_retrieval(monkeypatch, final_text: str) -> None:
+    import paperpilot.main
+
+    def fake_run(query: str, *, max_iter: int, on_event):
+        on_event("tool_call", {
+            "name": "mcp__colbert__planned_retrieval",
+            "arguments": {
+                "question": "What dataset was used?",
+                "paper_id": "1234.5678",
+                "top_k_each": 5,
+            },
+        })
+        on_event("tool_result", {
+            "name": "mcp__colbert__planned_retrieval",
+            "content": json.dumps({
+                "summary_text": "Planned retrieval completed.",
+                "evidence_pool": {
+                    "stats": {
+                        "raw_result_count": 2,
+                        "deduped_count": 1,
+                    },
+                    "missing_requirements": [],
+                },
+                "query_plan_meta": {
+                    "fallback_used": False,
+                },
+                "query_errors": [],
+            }),
+        })
+        return [{"role": "assistant", "content": final_text}]
+
+    monkeypatch.setattr(paperpilot.main, "run", fake_run)
+
+
+def _patch_agent_run_with_search(monkeypatch, final_text: str) -> None:
     import paperpilot.main
 
     def fake_run(query: str, *, max_iter: int, on_event):
