@@ -432,7 +432,7 @@ Run order:
 | failure mode classification | done | 13 diagnostic cases classified | use to choose fixes |
 | web eval dashboard | done | summary and candidate browser added | later add failure-mode filters |
 | B2 answer repair | implemented, uncommitted | cleans format, not semantic errors | commit, then move on |
-| evidence selection diagnosis | case study done | 3 representative cases inspected; trace capture now preserves full tool results for future eval/debug runs | design Evidence Selection V1 |
+| evidence selection diagnosis | case study done | 3 representative cases inspected; trace capture now preserves full tool results for future eval/debug runs | Evidence Selection V1 implemented; evaluate on diagnostic cases |
 | scope control | partial | prompt tightened | diagnose list questions |
 | multi-part checklist | not implemented | failure mode count 6 | design after case study |
 | numeric/entity verification | partial | simple answer/evidence number check | design stronger relation check |
@@ -482,3 +482,172 @@ New blocker discovered:
 - Trace capture was updated so `agent_loop` emits full `tool_result.content` to callbacks.
 - `paperpilot.eval.jsonl_tracer` now receives and persists complete tool results.
 - The Web event mapper still truncates content into bounded previews before storing UI events, so the frontend remains protected from oversized tool results.
+
+## 2026-06-15 Evidence Selection V1 Implementation Update
+
+Implemented files:
+
+- `paperpilot/eval/evidence_selection.py`
+- `paperpilot/eval/baselines.py`
+- `scripts/day16_run_eval.py`
+- `tests/eval/test_evidence_selection.py`
+- `tests/eval/test_baselines.py`
+
+What changed:
+
+1. Added an eval/runtime wrapper that checks whether PaperPilot's current answer is semantically supported by PaperPilot's own retrieved chunks.
+2. The selector does not use QASPER gold answers, oracle spans, calibration labels, or manual review decisions.
+3. The selector can return:
+   - `keep_answer`;
+   - `replace_answer`;
+   - `insufficient_evidence`;
+   - `selector_uncertain`.
+4. `run_paperpilot()` now returns:
+   - `evidence_selection`;
+   - `evidence_rewritten`;
+   - `evidence_selection_error`.
+5. `scripts/day16_run_eval.py` now persists those selector fields into result JSONL files.
+6. Trace extraction now supports the real ColBERT result format, where multiple JSON objects may be concatenated in one tool-result string.
+7. Rewrite behavior is conservative:
+   - invalid selector JSON keeps the current answer;
+   - selector call failure keeps the current answer;
+   - low-confidence `replace_answer` or `insufficient_evidence` keeps the current answer;
+   - rewrite only happens when action is explicit and confidence is at least medium.
+
+Validation:
+
+- `tests/eval`: 85 passed.
+- `tests/test_main_integration.py tests/test_agent_loop.py tests/eval/test_jsonl_tracer.py`: 16 passed, 1 deselected.
+- Real 3-case agent smoke completed and wrote `data/eval/evidence_selector_smoke_20260615_184411.jsonl`.
+- After fixing real trace parsing, selector replay over those smoke traces wrote `data/eval/evidence_selector_replay_20260615_185233.jsonl`.
+
+Smoke/replay findings:
+
+1. `qasper-1701.00185-q1` improved in the intended way: the selector rewrote the overbroad list to the four directly requested clustering methods.
+2. `qasper-1910.07181-q0` was narrowed by removing extra downstream-task material, but it still kept `58%` and `37%` because those numbers are directly supported by retrieved chunks. This wrapper cannot know the QASPER oracle says `50%` and `31%`.
+3. `qasper-1910.04601-q1` was narrowed to `HotpotQA` because retrieved chunks directly state that the study uses HotpotQA. This wrapper cannot force the QASPER oracle `WikiHop` when PaperPilot's retrieved evidence supports another answer.
+
+Important conclusion:
+
+- Evidence Selection V1 is useful for answer narrowing and support checking.
+- It does not solve failures where retrieved evidence directly supports a benchmark-disagreeing answer.
+- The next accuracy lever should inspect retrieval/query strategy and QASPER oracle ambiguity, not add more final-answer repair.
+
+## 2026-06-16 Retrieval Recall Diagnosis Update
+
+Plan:
+
+- `docs/codex-only-plans/2026-06-16-retrieval-recall-diagnosis-plan.md`
+
+Script:
+
+- `scripts/day24_retrieval_recall_diagnosis.py`
+
+Report:
+
+- `docs/retrieval_recall_diagnosis_20260616.md`
+- `docs/retrieval_recall_diagnosis_20260616_13cases.md`
+
+What the diagnostic checks:
+
+1. Whether QASPER oracle/gold evidence appears in `data/eval/qasper_subset_enriched.jsonl` full text.
+2. Whether the current PaperPilot trace retrieved that gold evidence.
+3. Whether a separate ColBERT diagnostic index built from QASPER enriched `full_text` can retrieve gold evidence with gold-oriented probe queries.
+
+Important scoring distinction:
+
+- A bare oracle span mention is not counted as gold-evidence recall.
+- Gold-evidence recall requires the highlighted evidence or evidence-head text, not just a nearby entity/string mention.
+
+Findings on the three representative cases:
+
+1. `qasper-1701.00185-q1`
+   - QASPER full text contains gold evidence.
+   - Current PaperPilot trace recalls the gold evidence.
+   - Failure is therefore not retrieval recall. It is answer synthesis / scope control.
+   - Evidence Selection V1 addresses this by narrowing the answer to the four requested clustering methods.
+
+2. `qasper-1910.07181-q0`
+   - QASPER full text contains the `50%` / `31%` gold evidence.
+   - Current PaperPilot trace does not recall that gold evidence.
+   - A QASPER-full-text diagnostic ColBERT index can retrieve it with gold-oriented queries.
+   - Failure is mainly current query strategy / retrieval targeting, not final synthesis.
+
+3. `qasper-1910.04601-q1`
+   - QASPER full text contains the `WikiHop` gold evidence.
+   - Current trace mentions `WikiHop` only as a bare/background string, but does not retrieve the gold sentence `Our study uses WikiHop ...`.
+   - Diagnostic QASPER-full-text index can retrieve the gold evidence.
+   - The current runtime trace instead centers on `HotpotQA`, suggesting a retrieval/data-source/version mismatch issue rather than a pure final-answer synthesis issue.
+
+Conclusion:
+
+- Retrieval recall is a real blocker for at least the numeric/entity conflict cases.
+- Scope-control failures still exist, but those are better handled by Evidence Selection V1.
+- The next implementation should improve query generation and/or align eval retrieval with QASPER full text before adding more answer repair.
+
+13-case expansion:
+
+- Expanded from 3 representative cases to 13 non-perfect calibrated cases.
+- All 13 cases contain the expected QASPER gold/oracle evidence in `data/eval/qasper_subset_enriched.jsonl` full text.
+- A QASPER-full-text diagnostic ColBERT index can retrieve the gold evidence for 12/13 cases. The remaining case, `qasper-1701.00185-q1`, already has the gold evidence in the current PaperPilot trace.
+- However, only 3/13 current traces have parseable retrieved chunks under the current trace parser:
+  - `qasper-1701.00185-q1`: 15 chunks, gold evidence recalled.
+  - `qasper-1910.07181-q0`: 28 chunks, gold evidence not recalled, diagnostic probe can retrieve it.
+  - `qasper-1910.04601-q1`: 15 chunks, only a bare `WikiHop`/oracle mention appears, gold evidence itself is not recalled, diagnostic probe can retrieve it.
+- The other 10/13 traces are old/truncated search-result traces. They contain ColBERT search calls, but the tool result content is cut off before valid JSON, so `extract_retrieved_chunks()` correctly returns 0 chunks. These cases should be treated as "current trace evidence unavailable", not as definitive current retrieval misses.
+
+Updated conclusion from the larger sample:
+
+- The larger sample strengthens the hypothesis that retrieval/query targeting is a major accuracy bottleneck, because gold evidence is present in the QASPER enriched source and retrievable from a QASPER-full-text diagnostic index.
+- The exact distribution of retrieval failures versus synthesis failures is still not reliable until the 10 truncated-trace cases are rerun with current full trace capture.
+- Next practical step: rerun those 10 cases with full traces, rerun the recall diagnosis, then decide whether to tune query generation, retrieval source alignment, or synthesis/scope control first.
+
+10-case rerun with fresh traces:
+
+- Rerun script:
+  - `scripts/day24_rerun_paperpilot_cases.py`
+- Rerun output:
+  - `data/eval/paperpilot_rerun_10_traces_20260616.jsonl`
+  - `data/eval/paperpilot_rerun_1907_retry_20260616.jsonl`
+  - `data/traces_rerun_20260616/`
+- Final rerun diagnosis report:
+  - `docs/retrieval_recall_diagnosis_20260616_rerun_10.md`
+
+Operational note:
+
+- The first rerun failed before answering because `ALL_PROXY=socks5://127.0.0.1:7890` made `httpx` require the missing `socksio` package when starting the graph MCP server.
+- The successful rerun cleared only `ALL_PROXY` / `all_proxy` for the command while keeping the normal HTTP/HTTPS proxy variables.
+- One case, `qasper-1907.02030-q0`, timed out in the first successful 10-case batch and was rerun separately.
+
+Fresh 10-case diagnosis:
+
+- 10/10 cases contain gold evidence in QASPER enriched `full_text`.
+- 10/10 cases are retrievable by the QASPER-full-text diagnostic probe.
+- 5/10 fresh traces recall full gold evidence:
+  - `qasper-1808.05902-q1`
+  - `qasper-1809.04960-q0`
+  - `qasper-1907.02030-q0`
+  - `qasper-1911.03385-q0`
+  - `qasper-1804.10686-q1`
+- 3/10 fresh traces mention only an oracle/answer span but miss the full gold evidence:
+  - `qasper-1808.05902-q0`
+  - `qasper-1910.03042-q2`
+  - `qasper-2001.09899-q0`
+- 2/10 fresh traces miss gold evidence even though the diagnostic probe can retrieve it:
+  - `qasper-1911.03894-q1`
+  - `qasper-1911.03894-q2`
+
+Combined with the earlier 3 parseable traces:
+
+- 6/13 cases recall full gold evidence in the current/fresh PaperPilot trace.
+- 4/13 cases only mention oracle/answer spans but miss the full supporting evidence.
+- 3/13 cases look like clearer current-query retrieval misses where diagnostic probe can retrieve the gold evidence.
+
+Updated conclusion after rerun:
+
+- The problem is not "all failures are retrieval recall failures".
+- Retrieval is still a major bottleneck: 7/13 inspected cases do not recall the full QASPER gold evidence in the PaperPilot trace.
+- But synthesis/scope control is also a major bottleneck: 6/13 already recall full gold evidence and still can fail or answer too broadly.
+- The next implementation should split retrieval improvements into two subproblems:
+  1. query targeting for cases that completely miss the gold evidence;
+  2. evidence-span targeting for cases that retrieve a nearby oracle string but not the full supporting evidence.

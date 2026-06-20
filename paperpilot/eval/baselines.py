@@ -12,6 +12,11 @@ from paperpilot.eval.answer_quality import (
     evaluate_answer_quality,
     should_repair_answer,
 )
+from paperpilot.eval.evidence_selection import (
+    apply_selector_action,
+    extract_retrieved_chunks,
+    run_evidence_selector,
+)
 from paperpilot.eval.jsonl_tracer import make_jsonl_tracer
 from paperpilot.eval.qasper_loader import EvalCase
 
@@ -58,6 +63,7 @@ def run_paperpilot(
     case: EvalCase,
     max_iter: int = 12,
     repair_client: LLMClient | None = None,
+    evidence_client: LLMClient | None = None,
 ) -> dict[str, Any]:
     """Run PaperPilot end to end while collecting tool calls and JSONL trace."""
     from paperpilot.main import run as agent_run
@@ -95,6 +101,9 @@ def run_paperpilot(
     answer_repaired = False
     repair_answer_quality: dict[str, Any] | None = None
     repair_error: str | None = None
+    evidence_selection: dict[str, Any] | None = None
+    evidence_rewritten = False
+    evidence_selection_error: str | None = None
 
     if error is None and should_repair_answer(answer_quality):
         repaired, repair_answer_quality, repair_error = _repair_final_answer(
@@ -107,6 +116,16 @@ def run_paperpilot(
             predicted = repaired
             answer_repaired = True
 
+    if error is None:
+        predicted, evidence_selection, evidence_rewritten, evidence_selection_error = (
+            _select_evidence_supported_answer(
+                case=case,
+                candidate_answer=predicted,
+                trace_path=trace_path,
+                evidence_client=evidence_client,
+            )
+        )
+
     return {
         "predicted_raw": predicted_raw,
         "predicted": predicted,
@@ -118,6 +137,9 @@ def run_paperpilot(
         "answer_repaired": answer_repaired,
         "repair_answer_quality": repair_answer_quality,
         "repair_error": repair_error,
+        "evidence_selection": evidence_selection,
+        "evidence_rewritten": evidence_rewritten,
+        "evidence_selection_error": evidence_selection_error,
     }
 
 
@@ -186,3 +208,24 @@ def _repair_final_answer(
     if not repaired.strip():
         return "", repaired_quality, "repair returned empty answer"
     return repaired, repaired_quality, None
+
+
+def _select_evidence_supported_answer(
+    *,
+    case: EvalCase,
+    candidate_answer: str,
+    trace_path: Path,
+    evidence_client: LLMClient | None = None,
+) -> tuple[str, dict[str, Any] | None, bool, str | None]:
+    try:
+        retrieved_chunks = extract_retrieved_chunks(trace_path)
+        selection, error = run_evidence_selector(
+            question=case.question,
+            candidate_answer=candidate_answer,
+            retrieved_chunks=retrieved_chunks,
+            client=evidence_client,
+        )
+        selected_answer, rewritten = apply_selector_action(candidate_answer, selection)
+        return selected_answer, selection, rewritten, error
+    except Exception as e:  # noqa: BLE001
+        return candidate_answer, None, False, f"{type(e).__name__}: {e}"

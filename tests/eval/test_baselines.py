@@ -92,11 +92,107 @@ def test_run_paperpilot_keeps_raw_answer_when_repair_fails(monkeypatch, tmp_path
     assert result["repair_error"] == "RuntimeError: repair unavailable"
 
 
+def test_run_paperpilot_rewrites_with_supported_selector_answer(monkeypatch, tmp_path) -> None:
+    raw = (
+        "Short answer: HotpotQA.\n\n"
+        "Evidence: The paper mentions HotpotQA as a dataset."
+    )
+    selector_client = FakeRepairClient(
+        """
+        {
+          "question_type": "entity",
+          "answer_supported": false,
+          "selected_answer": "WikiHop",
+          "supporting_evidence": "Our study uses WikiHop.",
+          "rejected_candidates": [
+            {
+              "candidate": "HotpotQA",
+              "reason": "Mentioned nearby, but not as the direct dataset used."
+            }
+          ],
+          "action": "replace_answer",
+          "confidence": "high",
+          "reason": "WikiHop has direct relation support."
+        }
+        """
+    )
+
+    monkeypatch.setattr(baselines, "_TRACE_DIR", tmp_path)
+    _patch_agent_run_with_search(monkeypatch, raw)
+
+    result = baselines.run_paperpilot(CASE, evidence_client=selector_client)
+
+    assert result["predicted_raw"] == raw
+    assert result["predicted"] == (
+        "Short answer: WikiHop\n\nEvidence: Our study uses WikiHop."
+    )
+    assert result["evidence_rewritten"] is True
+    assert result["evidence_selection"]["action"] == "replace_answer"
+    assert result["evidence_selection_error"] is None
+    assert len(selector_client.calls) == 1
+    assert selector_client.calls[0]["tools"] == []
+
+
+def test_run_paperpilot_keeps_answer_when_selector_fails(monkeypatch, tmp_path) -> None:
+    raw = (
+        "Short answer: HotpotQA.\n\n"
+        "Evidence: The paper mentions HotpotQA as a dataset."
+    )
+
+    class FailingSelectorClient:
+        def call(self, messages: list[dict], tools: list, *, system: str):
+            raise RuntimeError("selector unavailable")
+
+    monkeypatch.setattr(baselines, "_TRACE_DIR", tmp_path)
+    _patch_agent_run_with_search(monkeypatch, raw)
+
+    result = baselines.run_paperpilot(CASE, evidence_client=FailingSelectorClient())
+
+    assert result["predicted"] == raw
+    assert result["evidence_rewritten"] is False
+    assert result["evidence_selection"]["action"] == "selector_uncertain"
+    assert result["evidence_selection_error"] == "RuntimeError: selector unavailable"
+
+
 def _patch_agent_run(monkeypatch, final_text: str) -> None:
     import paperpilot.main
 
     def fake_run(query: str, *, max_iter: int, on_event):
         on_event("tool_call", {"name": "load_skill", "arguments": {}})
+        return [{"role": "assistant", "content": final_text}]
+
+    monkeypatch.setattr(paperpilot.main, "run", fake_run)
+
+
+def _patch_agent_run_with_search(monkeypatch, final_text: str) -> None:
+    import json
+
+    import paperpilot.main
+
+    def fake_run(query: str, *, max_iter: int, on_event):
+        on_event("tool_call", {
+            "name": "mcp__colbert__search",
+            "arguments": {
+                "query": "dataset used in experiment",
+                "paper_id": "1234.5678",
+                "top_k": 2,
+            },
+        })
+        on_event("tool_result", {
+            "name": "mcp__colbert__search",
+            "content": json.dumps([
+                {
+                    "paper_id": "1234.5678",
+                    "chunk_text": "Our study uses WikiHop.",
+                    "score": 0.9,
+                },
+                {
+                    "paper_id": "1234.5678",
+                    "chunk_text": "HotpotQA is mentioned as a related dataset.",
+                    "score": 0.8,
+                },
+            ]),
+        })
         return [{"role": "assistant", "content": final_text}]
 
     monkeypatch.setattr(paperpilot.main, "run", fake_run)

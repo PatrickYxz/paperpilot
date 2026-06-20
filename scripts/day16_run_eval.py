@@ -104,6 +104,9 @@ def run_one_baseline(baseline: str, cases: list[EvalCase], limit: int | None) ->
             "answer_repaired",
             "repair_answer_quality",
             "repair_error",
+            "evidence_selection",
+            "evidence_rewritten",
+            "evidence_selection_error",
         ]:
             if extra_key in ans:
                 record[extra_key] = ans[extra_key]
