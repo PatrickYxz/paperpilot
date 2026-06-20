@@ -90,6 +90,51 @@ def test_build_and_search(tmp_path):
 
 
 @pytest.mark.slow
+def test_planned_retrieval_tool_runs(tmp_path):
+    """build_index 后 planned_retrieval 能返回 evidence_pool 结构。"""
+    c = MCPClient(_make_manifest(tmp_path))
+    c.start()
+    try:
+        tools = c.list_tools()
+        build = next(t for t in tools if t.name == "mcp__colbert__build_index")
+        planned = next(
+            t for t in tools if t.name == "mcp__colbert__planned_retrieval"
+        )
+        prefix = _paper_prefix(tmp_path)
+        paper_id = f"{prefix}-planned"
+
+        build_result = build.handler({
+            "documents": [{
+                "paper_id": paper_id,
+                "text": (
+                    "The experiments use WikiHop as the main dataset. "
+                    "The baseline comparison includes BiDAF and a graph model. "
+                    "Results are reported in the evaluation section. "
+                ) * 4,
+            }]
+        })
+        b = json.loads(build_result) if isinstance(build_result, str) else build_result
+        assert paper_id in b["fresh_papers"]
+
+        raw = planned.handler({
+            "question": "What dataset was used?",
+            "paper_id": paper_id,
+            "paper_title": "A WikiHop Paper",
+            "abstract": "The paper evaluates on WikiHop.",
+            "top_k_each": 2,
+            "summary_k": 3,
+        })
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        assert "fallback_used" in payload["query_plan_meta"]
+        assert payload["evidence_pool"]["stats"]["query_count"] >= 1
+        assert payload["evidence_pool"]["stats"]["raw_result_count"] >= 1
+        assert payload["evidence_pool"]["summary_items"]
+        assert "Planned retrieval completed." in payload["summary_text"]
+    finally:
+        c.close()
+
+
+@pytest.mark.slow
 def test_two_papers_coexist_after_consecutive_builds(tmp_path):
     """per-paper indexes: consecutive p1/p2 builds remain separately searchable."""
     c = MCPClient(_make_manifest(tmp_path))
