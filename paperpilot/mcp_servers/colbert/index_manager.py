@@ -87,14 +87,17 @@ class IndexManager:
         retr = retrieve.ColBERT(index=state.index)
         scores = retr.retrieve(queries_embeddings=q_emb, k=top_k)
 
-        return [
-            {
-                "paper_id": result["id"].split("::", 1)[0],
-                "chunk_text": state.chunk_texts[result["id"]],
+        out: list[dict] = []
+        for result in scores[0]:
+            full_id = result["id"]
+            result_paper_id, chunk_id = full_id.split("::", 1)
+            out.append({
+                "paper_id": result_paper_id,
+                "chunk_id": chunk_id,
+                "chunk_text": state.chunk_texts[full_id],
                 "score": float(result["score"]),
-            }
-            for result in scores[0]
-        ]
+            })
+        return out
 
     def _cold_build(self, paper_id: str, text: str) -> None:
         paper_root = self._paper_root(paper_id)

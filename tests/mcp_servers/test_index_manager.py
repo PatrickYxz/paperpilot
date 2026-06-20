@@ -141,6 +141,7 @@ def test_search_returns_only_matching_paper_chunks(patched_root, patched_pylate)
     out = mgr.search("alpha", paper_id="pA", top_k=1)
     assert len(out) == 1
     assert out[0]["paper_id"] == "pA"
+    assert out[0]["chunk_id"] == chunk_id_a.split("::", 1)[1]
     assert out[0]["chunk_text"] == state_a.chunk_texts[chunk_id_a]
 
 
