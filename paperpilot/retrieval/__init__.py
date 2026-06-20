@@ -10,6 +10,10 @@ from paperpilot.retrieval.llm_query_planner import (
     build_planner_prompt,
     plan_with_llm,
 )
+from paperpilot.retrieval.planned_retrieval import (
+    PlannedRetrievalResult,
+    run_planned_retrieval,
+)
 from paperpilot.retrieval.query_plan import (
     EvidenceRequirement,
     ExpansionHints,
@@ -28,6 +32,7 @@ __all__ = [
     "EvidenceRequirement",
     "ExpansionHints",
     "PlannedQuery",
+    "PlannedRetrievalResult",
     "QueryConstraints",
     "QueryPlan",
     "RawSearchHit",
@@ -37,5 +42,6 @@ __all__ = [
     "minimal_fallback_plan",
     "parse_query_plan_json",
     "plan_with_llm",
+    "run_planned_retrieval",
     "validate_query_plan",
 ]
