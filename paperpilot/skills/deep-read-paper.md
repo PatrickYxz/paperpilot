@@ -1,6 +1,6 @@
 ---
 name: deep-read-paper
-description: 深读单篇 arXiv 论文：下载全文 -> 建索引 -> 多轮检索 -> 基于证据回答
+description: 深读单篇 arXiv 论文：下载全文 -> 建索引 -> 计划检索 -> 基于证据回答
 when_to_use: 用户给定 arXiv id 或论文标题，要求回答某篇论文里的定义、方法、实验设置、数据集、指标、结果或结论依据
 ---
 
@@ -19,14 +19,15 @@ when_to_use: 用户给定 arXiv id 或论文标题，要求回答某篇论文里
    - `documents` 必须是非空 list。
    - 每个元素必须包含 `paper_id` 和 `text`。
    - 通常直接把 `download_paper` 返回对象作为 list 里的唯一元素。
-3. 多轮检索：围绕用户问题调用 `mcp__colbert__search(query="...", paper_id="<indexed_paper_id>", top_k=3)`。
+3. 计划检索：优先调用 `mcp__colbert__planned_retrieval(question="<用户问题>", paper_id="<indexed_paper_id>", paper_title="<title if known>", abstract="<abstract if known>", top_k_each=5, summary_k=8)`。
    - `paper_id` 必须传，且必须与 build_index 时的 `paper_id` 一致。
-   - 默认至少做 3 次差异化 search；除非工具错误或已到迭代上限，不要只搜 1-2 次就进入最终回答。
-   - Search 1: 用户原问题或最接近的英文问题。
-   - Search 2: 关键术语、同义词或缩写，例如 dataset, benchmark, corpus, definition, metric, baseline。
-   - Search 3: 答案可能出现的位置线索，例如 experiment setup, table, appendix, method, evaluation, ablation。
-   - 如果前三次结果仍不相关，换 query 继续搜，而不是凭印象回答。
-4. 综合回答：只基于 `colbert.search` 返回的具体段落回答。
+   - planned_retrieval 会先生成 query plan，再强制执行多条计划 query，并返回 `summary_text`、`evidence_pool`、`missing_requirements` 和 `query_plan_meta`。
+   - 优先使用 `summary_text` 和 `evidence_pool.summary_items` 中的证据回答。
+   - 如果 `missing_requirements` 非空，不能把缺失部分编成答案；在最终回答的 `Notes:` 里说明证据不足或范围限制。
+4. 可选补充检索：只有当 planned retrieval 的证据不足、`missing_requirements` 未覆盖，或用户问题需要进一步澄清时，才调用 `mcp__colbert__search(query="...", paper_id="<indexed_paper_id>", top_k=3)`。
+   - 补充 search 必须针对具体缺口，例如缺少 dataset、metric、baseline、table/figure evidence、negative/contrastive evidence。
+   - 如果补充 search 仍不相关，继续换 query 搜索缺口；不要凭印象回答。
+5. 综合回答：只基于 `planned_retrieval` 或补充 `colbert.search` 返回的具体段落回答。
 
 ## Final Answer Contract
 

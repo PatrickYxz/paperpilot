@@ -74,9 +74,10 @@ def test_build_system_prompt_mentions_search_paper_id_required():
     assert "paper_id" in prompt
 
 
-def test_deep_read_skill_mentions_targeted_search_and_short_answer():
+def test_deep_read_skill_mentions_planned_retrieval_and_short_answer():
     skill = SkillRegistry(SKILLS_DIR).load("deep-read-paper")
-    assert "默认至少做 3 次差异化 search" in skill
+    assert "mcp__colbert__planned_retrieval" in skill
+    assert "可选补充检索" in skill
     assert "Short answer:" in skill
     assert "Evidence:" in skill
     assert "Final Answer Contract" in skill
