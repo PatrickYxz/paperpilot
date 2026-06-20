@@ -23,6 +23,9 @@ def _make_manifest(tmp_path: Path) -> Path:
             "colbert": {
                 "command": "python",
                 "args": ["-m", "paperpilot.mcp_servers.colbert.server"],
+                "env": {
+                    "HF_HUB_OFFLINE": "1",
+                },
             }
         }
     }))

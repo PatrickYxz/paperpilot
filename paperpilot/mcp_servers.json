@@ -6,7 +6,10 @@
     },
     "colbert": {
       "command": "python",
-      "args": ["-m", "paperpilot.mcp_servers.colbert.server"]
+      "args": ["-m", "paperpilot.mcp_servers.colbert.server"],
+      "env": {
+        "HF_HUB_OFFLINE": "1"
+      }
     },
     "graph": {
       "command": "python",
