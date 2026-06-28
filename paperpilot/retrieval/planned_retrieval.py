@@ -10,6 +10,7 @@ from paperpilot.retrieval.evidence_pool import (
     build_evidence_pool,
     format_evidence_summary,
 )
+from paperpilot.retrieval.evidence_verifier import run_evidence_verification
 from paperpilot.retrieval.query_plan import QueryPlan
 
 SearchFn = Callable[[str, str, int], list[dict[str, Any]]]
@@ -37,6 +38,9 @@ def run_planned_retrieval(
     search: SearchFn,
     top_k_each: int = 5,
     summary_k: int = 8,
+    verify_evidence: bool = False,
+    verifier_candidate_k: int = 6,
+    verifier_client: Any | None = None,
 ) -> PlannedRetrievalResult:
     hits: list[RawSearchHit] = []
     query_errors: list[dict[str, str]] = []
@@ -69,9 +73,17 @@ def run_planned_retrieval(
         hits,
         summary_k=summary_k,
     )
+    if verify_evidence:
+        pool.verification = run_evidence_verification(
+            plan=plan,
+            pool=pool,
+            client=verifier_client,
+            summary_k=summary_k,
+            verifier_candidate_k=verifier_candidate_k,
+        )
     return PlannedRetrievalResult(
         evidence_pool=pool,
-        summary_text=format_evidence_summary(pool),
+        summary_text=format_evidence_summary(pool, use_verified=verify_evidence),
         query_errors=query_errors,
     )
 

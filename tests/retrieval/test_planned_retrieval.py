@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from paperpilot.retrieval.planned_retrieval import run_planned_retrieval
 from paperpilot.retrieval.query_plan import (
     EvidenceRequirement,
@@ -100,3 +102,79 @@ def test_run_planned_retrieval_records_query_errors_and_continues() -> None:
     assert result.evidence_pool.missing_requirements[0].requirement_id == (
         "req_dataset"
     )
+
+
+class FakeVerifierClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def call(self, messages: list[dict], tools: list, *, system: str):
+        self.calls.append({"messages": messages, "tools": tools, "system": system})
+        return SimpleNamespace(text="""
+        {"decisions": [{
+          "requirement_id": "req_dataset",
+          "evidence_id": "ev_1",
+          "support": "direct",
+          "confidence": "high",
+          "answer_atoms": ["dataset"],
+          "risks": [],
+          "reason": "Direct evidence."
+        }]}
+        """)
+
+
+def test_run_planned_retrieval_does_not_verify_by_default() -> None:
+    verifier = FakeVerifierClient()
+
+    def search(query: str, paper_id: str, top_k: int) -> list[dict]:
+        return [
+            {
+                "paper_id": paper_id,
+                "chunk_id": "chunk-1",
+                "chunk_text": "Evidence for dataset used.",
+                "score": 9.0,
+            }
+        ]
+
+    result = run_planned_retrieval(
+        plan_id="plan-1",
+        plan=_plan(),
+        paper_id="paper-1",
+        search=search,
+        verifier_client=verifier,
+    )
+
+    assert verifier.calls == []
+    payload = result.to_dict()
+    assert "verification" not in payload["evidence_pool"]
+    assert "verified_summary_items" not in payload["evidence_pool"]
+
+
+def test_run_planned_retrieval_can_verify_evidence() -> None:
+    verifier = FakeVerifierClient()
+
+    def search(query: str, paper_id: str, top_k: int) -> list[dict]:
+        return [
+            {
+                "paper_id": paper_id,
+                "chunk_id": "chunk-dataset",
+                "chunk_text": "Evidence for dataset used.",
+                "score": 9.0,
+            }
+        ]
+
+    result = run_planned_retrieval(
+        plan_id="plan-1",
+        plan=_plan(),
+        paper_id="paper-1",
+        search=search,
+        verify_evidence=True,
+        verifier_client=verifier,
+        verifier_candidate_k=3,
+    )
+
+    assert verifier.calls
+    payload = result.to_dict()
+    assert payload["evidence_pool"]["verification"]["enabled"] is True
+    assert payload["evidence_pool"]["verified_summary_items"]
+    assert "Verified top evidence:" in payload["summary_text"]
