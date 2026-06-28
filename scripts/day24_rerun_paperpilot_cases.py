@@ -31,6 +31,7 @@ def main() -> None:
     parser.add_argument("--out-path", type=Path, default=DEFAULT_OUT_PATH)
     parser.add_argument("--trace-dir", type=Path, default=DEFAULT_TRACE_DIR)
     parser.add_argument("--case-id", action="append", dest="case_ids", required=True)
+    parser.add_argument("--use-query-plan", action="store_true")
     args = parser.parse_args()
 
     rows = _load_rows(args.subset_path)
@@ -47,8 +48,12 @@ def main() -> None:
     for idx, case_id in enumerate(args.case_ids, start=1):
         case = _to_eval_case(rows[case_id])
         print(f"[{idx}/{len(args.case_ids)}] {case.case_id} :: {case.question[:90]}", flush=True)
-        ans = baselines.run_paperpilot(case)
-        record = _record(case, ans)
+        ans = baselines.run_paperpilot(
+            case,
+            use_query_plan=args.use_query_plan,
+            trace_id=f"{case.case_id}__query_plan_v1" if args.use_query_plan else None,
+        )
+        record = _record(case, ans, use_query_plan=args.use_query_plan)
         with args.out_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         status = "PASS" if record["passed"] else ("ERR" if record["error"] else "FAIL")
@@ -84,10 +89,10 @@ def _to_eval_case(row: dict) -> EvalCase:
     )
 
 
-def _record(case: EvalCase, ans: dict) -> dict:
+def _record(case: EvalCase, ans: dict, *, use_query_plan: bool) -> dict:
     record = {
         "case_id": case.case_id,
-        "baseline": "paperpilot_rerun_cases",
+        "baseline": "paperpilot_query_plan_v1_rerun_cases" if use_query_plan else "paperpilot_rerun_cases",
         "question": case.question,
         "oracle_spans": list(case.oracle_spans),
         "predicted": ans.get("predicted", ""),
@@ -106,6 +111,14 @@ def _record(case: EvalCase, ans: dict) -> dict:
         "evidence_selection",
         "evidence_rewritten",
         "evidence_selection_error",
+        "planned_retrieval_used",
+        "planned_retrieval_stats",
+        "planned_retrieval_missing_requirements",
+        "planned_retrieval_query_plan_meta",
+        "planned_retrieval_query_errors",
+        "query_plan_used",
+        "query_plan_version",
+        "query_plan",
     ]:
         if extra_key in ans:
             record[extra_key] = ans[extra_key]

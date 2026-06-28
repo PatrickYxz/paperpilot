@@ -71,6 +71,10 @@ def extract_retrieved_chunks(trace_path: str | Path) -> list[dict[str, Any]]:
                     "score": normalized.get("score"),
                 })
             pending_search_call = None
+            continue
+
+        if kind == "tool_result" and _is_colbert_planned_retrieval(name):
+            chunks.extend(_extract_planned_retrieval_chunks(payload.get("content")))
 
     return chunks
 
@@ -253,6 +257,50 @@ def _is_colbert_search(tool_name: str) -> bool:
     return "colbert" in tool_name and tool_name.endswith("__search")
 
 
+def _is_colbert_planned_retrieval(tool_name: str) -> bool:
+    return "colbert" in tool_name and tool_name.endswith("__planned_retrieval")
+
+
+def _extract_planned_retrieval_chunks(content: Any) -> list[dict[str, Any]]:
+    payload = _parse_json_dict_content(content)
+    pool = payload.get("evidence_pool") if isinstance(payload, dict) else {}
+    if not isinstance(pool, dict):
+        return []
+
+    items = pool.get("items")
+    if not isinstance(items, list):
+        return []
+
+    item_by_id = {
+        str(item.get("id")): item
+        for item in items
+        if isinstance(item, dict) and item.get("id") is not None
+    }
+    summary_ids = pool.get("summary_items")
+    if isinstance(summary_ids, list) and summary_ids:
+        ordered_items = [
+            item_by_id[str(item_id)]
+            for item_id in summary_ids
+            if str(item_id) in item_by_id
+        ]
+    else:
+        ordered_items = [item for item in items if isinstance(item, dict)]
+
+    chunks: list[dict[str, Any]] = []
+    for rank, item in enumerate(ordered_items, start=1):
+        normalized = _normalize_evidence_item(item)
+        if not normalized.get("chunk_text"):
+            continue
+        chunks.append({
+            "query": normalized["query"],
+            "rank": rank,
+            "paper_id": normalized["paper_id"],
+            "chunk_text": normalized["chunk_text"],
+            "score": normalized["score"],
+        })
+    return chunks
+
+
 def _parse_search_result_content(content: Any) -> list[Any]:
     if isinstance(content, (list, dict)):
         parsed = content
@@ -269,6 +317,18 @@ def _parse_search_result_content(content: Any) -> list[Any]:
     if isinstance(parsed, dict):
         return [parsed]
     return []
+
+
+def _parse_json_dict_content(content: Any) -> dict[str, Any]:
+    if isinstance(content, dict):
+        return content
+    if not isinstance(content, str):
+        return {}
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _parse_json_object_stream(text: str) -> list[Any]:
@@ -298,6 +358,26 @@ def _normalize_chunk(chunk: Any) -> dict[str, Any]:
         "chunk_text": str(chunk.get("chunk_text", "")),
         "score": chunk.get("score"),
     }
+
+
+def _normalize_evidence_item(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    return {
+        "paper_id": str(item.get("paper_id", "")),
+        "chunk_text": str(item.get("chunk_text", "")),
+        "score": item.get("best_score"),
+        "query": _first_matched_query(item.get("matched_queries")),
+    }
+
+
+def _first_matched_query(matched_queries: Any) -> str:
+    if not isinstance(matched_queries, list):
+        return ""
+    for match in matched_queries:
+        if isinstance(match, dict) and str(match.get("query", "")).strip():
+            return str(match["query"])
+    return ""
 
 
 def _extract_json_object(text: str) -> str | None:

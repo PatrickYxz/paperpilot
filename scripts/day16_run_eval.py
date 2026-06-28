@@ -30,6 +30,11 @@ BASELINE_FNS: dict[str, Callable[[EvalCase], dict]] = {
     "abstract_only": run_abstract_only,
     "full_text": run_full_text_dump,
     "paperpilot": run_paperpilot,
+    "paperpilot_query_plan_v1": lambda case: run_paperpilot(
+        case,
+        use_query_plan=True,
+        trace_id=f"{case.case_id}__query_plan_v1",
+    ),
 }
 
 
@@ -107,6 +112,9 @@ def run_one_baseline(baseline: str, cases: list[EvalCase], limit: int | None) ->
             "evidence_selection",
             "evidence_rewritten",
             "evidence_selection_error",
+            "query_plan_used",
+            "query_plan_version",
+            "query_plan",
         ]:
             if extra_key in ans:
                 record[extra_key] = ans[extra_key]
@@ -120,7 +128,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--baseline",
-        choices=["abstract_only", "full_text", "paperpilot", "all"],
+        choices=["abstract_only", "full_text", "paperpilot", "paperpilot_query_plan_v1", "all"],
         required=True,
     )
     parser.add_argument("--limit", type=int, default=None)

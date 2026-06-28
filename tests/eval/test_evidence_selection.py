@@ -92,6 +92,73 @@ def test_extract_retrieved_chunks_accepts_concatenated_json_objects(tmp_path: Pa
     ]
 
 
+def test_extract_retrieved_chunks_reads_planned_retrieval_summary_items(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "case.jsonl"
+    _write_jsonl(
+        trace,
+        [
+            {
+                "kind": "tool_result",
+                "payload": {
+                    "name": "mcp__colbert__planned_retrieval",
+                    "content": json.dumps({
+                        "evidence_pool": {
+                            "items": [
+                                {
+                                    "id": "ev_1",
+                                    "paper_id": "1910.04601",
+                                    "chunk_id": "chunk_1",
+                                    "chunk_text": "HotpotQA is nearby.",
+                                    "best_score": 0.8,
+                                    "matched_queries": [
+                                        {
+                                            "query_id": "q_1",
+                                            "query": "dataset used",
+                                            "role": "focused_rewrite",
+                                            "rank": 2,
+                                            "score": 0.8,
+                                            "targets": ["req_dataset"],
+                                        }
+                                    ],
+                                },
+                                {
+                                    "id": "ev_2",
+                                    "paper_id": "1910.04601",
+                                    "chunk_id": "chunk_2",
+                                    "chunk_text": "Our study uses WikiHop.",
+                                    "best_score": 0.95,
+                                    "matched_queries": [
+                                        {
+                                            "query_id": "q_lit",
+                                            "query": "What dataset was used?",
+                                            "role": "literal",
+                                            "rank": 1,
+                                            "score": 0.95,
+                                            "targets": ["req_dataset"],
+                                        }
+                                    ],
+                                },
+                            ],
+                            "summary_items": ["ev_2"],
+                        }
+                    }),
+                },
+            },
+        ],
+    )
+
+    chunks = extract_retrieved_chunks(trace)
+
+    assert len(chunks) == 1
+    assert chunks[0]["query"] == "What dataset was used?"
+    assert chunks[0]["rank"] == 1
+    assert chunks[0]["paper_id"] == "1910.04601"
+    assert chunks[0]["chunk_text"] == "Our study uses WikiHop."
+    assert chunks[0]["score"] == 0.95
+
+
 def test_build_selector_prompt_contains_core_inputs() -> None:
     prompt = build_selector_prompt(
         question="What dataset was used?",

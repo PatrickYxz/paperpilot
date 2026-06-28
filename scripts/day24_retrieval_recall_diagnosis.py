@@ -7,6 +7,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +44,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--enriched-path", type=Path, default=DEFAULT_ENRICHED_PATH)
     parser.add_argument("--trace-dir", type=Path, default=DEFAULT_TRACE_DIR)
+    parser.add_argument("--trace-suffix", default="")
     parser.add_argument("--out-path", type=Path, default=DEFAULT_REPORT_PATH)
+    parser.add_argument("--report-date", default=date.today().isoformat())
     parser.add_argument("--case-id", action="append", dest="case_ids")
     parser.add_argument("--skip-probe", action="store_true")
     parser.add_argument("--top-k", type=int, default=8)
@@ -54,13 +57,13 @@ def main() -> None:
     probe_runner = None if args.skip_probe else _ProbeRunner(top_k=args.top_k)
 
     diagnostics = [
-        _diagnose_case(row, args.trace_dir, probe_runner)
+        _diagnose_case(row, args.trace_dir, args.trace_suffix, probe_runner)
         for row in rows
     ]
 
     args.out_path.parent.mkdir(parents=True, exist_ok=True)
     args.out_path.write_text(
-        "\n".join(_render_report(diagnostics, args.enriched_path)).rstrip() + "\n",
+        "\n".join(_render_report(diagnostics, args.enriched_path, args.report_date)).rstrip() + "\n",
         encoding="utf-8",
     )
     print(f"Wrote {args.out_path}")
@@ -84,11 +87,12 @@ def _load_enriched_rows(path: Path, case_ids: list[str]) -> list[dict[str, Any]]
 def _diagnose_case(
     row: dict[str, Any],
     trace_dir: Path,
+    trace_suffix: str,
     probe_runner: "_ProbeRunner | None",
 ) -> dict[str, Any]:
     targets = _target_texts(row)
     full_text = str(row.get("full_text") or "")
-    trace_path = trace_dir / f"{row['case_id']}.jsonl"
+    trace_path = trace_dir / f"{row['case_id']}{trace_suffix}.jsonl"
     trace_chunks = extract_retrieved_chunks(trace_path)
 
     full_text_hits = _match_targets(full_text, targets)
@@ -326,11 +330,15 @@ class _ProbeRunner:
         return out
 
 
-def _render_report(diagnostics: list[dict[str, Any]], enriched_path: Path) -> list[str]:
+def _render_report(
+    diagnostics: list[dict[str, Any]],
+    enriched_path: Path,
+    report_date: str,
+) -> list[str]:
     lines = [
         "# Retrieval Recall Diagnosis",
         "",
-        "Date: 2026-06-16",
+        f"Date: {report_date}",
         "",
         f"Enriched source: `{enriched_path}`",
         "",
