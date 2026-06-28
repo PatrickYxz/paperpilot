@@ -80,3 +80,62 @@ def test_planned_retrieval_impl_returns_evidence_pool(monkeypatch) -> None:
     assert payload["evidence_pool"]["stats"]["raw_result_count"] == 2
     assert payload["evidence_pool"]["summary_items"]
     assert "Planned retrieval completed." in payload["summary_text"]
+
+
+def test_planned_retrieval_impl_passes_verification_options(monkeypatch) -> None:
+    manager = FakeManager()
+    monkeypatch.setattr(server, "_manager", manager)
+
+    def fake_plan_with_llm(**kwargs):
+        return _plan(kwargs["question"]), {"fallback_used": False}
+
+    captured: dict = {}
+
+    def fake_run_planned_retrieval(**kwargs):
+        captured.update(kwargs)
+
+        class Result:
+            def to_dict(self):
+                return {
+                    "summary_text": "Verified planned retrieval completed.",
+                    "evidence_pool": {
+                        "stats": {},
+                        "summary_items": [],
+                        "verified_summary_items": ["ev_1"],
+                        "verification": {
+                            "enabled": True,
+                            "method": "llm_requirement_verifier_v1",
+                            "decisions": [],
+                            "missing_verified_requirements": [],
+                            "conflicts": [],
+                            "stats": {
+                                "decision_count": 1,
+                                "direct_count": 1,
+                                "partial_count": 0,
+                                "no_count": 0,
+                            },
+                        },
+                    },
+                    "query_errors": [],
+                }
+
+        return Result()
+
+    monkeypatch.setattr(server, "plan_with_llm", fake_plan_with_llm)
+    monkeypatch.setattr(server, "run_planned_retrieval", fake_run_planned_retrieval)
+
+    payload = server._planned_retrieval_impl(
+        question="What dataset was used?",
+        paper_id="paper-1",
+        paper_title="Title",
+        abstract="Abstract",
+        top_k_each=3,
+        summary_k=2,
+        verify_evidence=True,
+        verifier_candidate_k=4,
+    )
+
+    assert captured["verify_evidence"] is True
+    assert captured["verifier_candidate_k"] == 4
+    assert payload["query_plan_meta"] == {"fallback_used": False}
+    assert payload["evidence_pool"]["verification"]["enabled"] is True

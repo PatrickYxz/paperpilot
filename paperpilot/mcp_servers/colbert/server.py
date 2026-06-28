@@ -85,6 +85,8 @@ def planned_retrieval(
     abstract: str = "",
     top_k_each: int = 5,
     summary_k: int = 8,
+    verify_evidence: bool = False,
+    verifier_candidate_k: int = 6,
 ) -> dict:
     """Plan and execute multiple retrieval queries for one paper.
 
@@ -95,6 +97,8 @@ def planned_retrieval(
         abstract: Optional abstract for query planning context.
         top_k_each: Number of chunks to retrieve for each planned query.
         summary_k: Number of deduped evidence chunks to include in summary.
+        verify_evidence: Whether to verify evidence against each requirement.
+        verifier_candidate_k: Candidate chunks to verify per requirement.
 
     Returns:
         dict with query_plan_meta, summary_text, evidence_pool, and query_errors.
@@ -106,6 +110,8 @@ def planned_retrieval(
         abstract,
         top_k_each,
         summary_k,
+        verify_evidence,
+        verifier_candidate_k,
     )
 
 
@@ -116,6 +122,8 @@ def _planned_retrieval_impl(
     abstract: str,
     top_k_each: int,
     summary_k: int,
+    verify_evidence: bool = False,
+    verifier_candidate_k: int = 6,
 ) -> dict:
     assert _manager is not None, "IndexManager not initialized"
     plan, meta = plan_with_llm(
@@ -130,6 +138,8 @@ def _planned_retrieval_impl(
         search=lambda query, pid, top_k: _manager.search(query, pid, top_k),
         top_k_each=top_k_each,
         summary_k=summary_k,
+        verify_evidence=verify_evidence,
+        verifier_candidate_k=verifier_candidate_k,
     )
     payload = result.to_dict()
     payload["query_plan_meta"] = meta
