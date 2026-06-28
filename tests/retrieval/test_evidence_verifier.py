@@ -1,6 +1,16 @@
+from paperpilot.retrieval.evidence_pool import EvidenceItem, EvidencePool, MatchedQuery
 from paperpilot.retrieval.evidence_verifier import (
     EvidenceVerificationDecision,
+    build_verifier_prompt,
+    candidate_items_for_requirement,
     parse_verifier_output,
+    select_verified_summary,
+)
+from paperpilot.retrieval.query_plan import (
+    EvidenceRequirement,
+    PlannedQuery,
+    QueryConstraints,
+    QueryPlan,
 )
 
 
@@ -102,3 +112,262 @@ def test_parse_verifier_output_drops_invalid_decisions() -> None:
     assert error is None
     assert [item.evidence_id for item in decisions] == ["ev_2"]
     assert decisions[0].score == 0.0
+
+
+def _plan() -> QueryPlan:
+    return QueryPlan(
+        version="query_plan_v1",
+        question="What dataset was used?",
+        question_type="dataset_used",
+        answer_shape="entity",
+        intent_summary="Find the dataset used by the paper.",
+        focus_terms=["dataset"],
+        constraints=QueryConstraints(),
+        evidence_requirements=[
+            EvidenceRequirement("req_dataset", "dataset used by the paper", True),
+            EvidenceRequirement("req_metric", "reported metric", True),
+        ],
+        queries=[
+            PlannedQuery(
+                "q_dataset",
+                "focused_rewrite",
+                "dataset used",
+                ["req_dataset"],
+                1,
+            ),
+            PlannedQuery(
+                "q_metric",
+                "focused_rewrite",
+                "reported metric",
+                ["req_metric"],
+                2,
+            ),
+        ],
+    )
+
+
+def _item(
+    item_id: str,
+    text: str,
+    score: float,
+    targets: list[str],
+) -> EvidenceItem:
+    return EvidenceItem(
+        id=item_id,
+        paper_id="paper-1",
+        chunk_id=item_id,
+        chunk_text=text,
+        best_score=score,
+        matched_queries=[
+            MatchedQuery(
+                query_id=f"q_{item_id}",
+                query="dataset used",
+                role="focused_rewrite",
+                rank=1,
+                score=score,
+                targets=targets,
+            )
+        ],
+    )
+
+
+def _pool(items: list[EvidenceItem]) -> EvidencePool:
+    return EvidencePool(
+        plan_id="plan-1",
+        question="What dataset was used?",
+        query_plan=_plan().to_dict(),
+        items=items,
+        summary_items=items[:2],
+        missing_requirements=[],
+        stats={
+            "query_count": 2,
+            "raw_result_count": len(items),
+            "deduped_count": len(items),
+        },
+    )
+
+
+def test_candidate_items_for_requirement_uses_targets_and_score_cap() -> None:
+    items = [
+        _item("ev_1", "low score target", 0.1, ["req_dataset"]),
+        _item("ev_2", "high score target", 0.9, ["req_dataset"]),
+        _item("ev_3", "other requirement", 1.0, ["req_metric"]),
+    ]
+
+    candidates = candidate_items_for_requirement(
+        _pool(items),
+        "req_dataset",
+        candidate_k=1,
+    )
+
+    assert [item.id for item in candidates] == ["ev_2"]
+
+
+def test_build_verifier_prompt_contains_requirement_and_candidate_text() -> None:
+    plan = _plan()
+    requirement = plan.evidence_requirements[0]
+    item = _item("ev_1", "The experiments use WikiHop.", 0.9, ["req_dataset"])
+
+    prompt = build_verifier_prompt(
+        plan=plan,
+        requirement=requirement,
+        candidates=[item],
+    )
+
+    assert "Return JSON only" in prompt
+    assert "dataset used by the paper" in prompt
+    assert "ev_1" in prompt
+    assert "The experiments use WikiHop." in prompt
+    assert "direct|partial|no" in prompt
+
+
+def test_select_verified_summary_groups_by_requirement() -> None:
+    plan = _plan()
+    items = [
+        _item("ev_1", "WikiHop is related work.", 0.99, ["req_dataset"]),
+        _item("ev_2", "The experiments use WikiHop.", 0.50, ["req_dataset"]),
+        _item("ev_3", "The result is 58%.", 0.80, ["req_metric"]),
+    ]
+    decisions, _ = parse_verifier_output("""
+    {
+      "decisions": [
+        {
+          "requirement_id": "req_dataset",
+          "evidence_id": "ev_1",
+          "support": "no",
+          "confidence": "high",
+          "answer_atoms": ["WikiHop"],
+          "risks": ["related_work"],
+          "reason": "Related work only."
+        },
+        {
+          "requirement_id": "req_dataset",
+          "evidence_id": "ev_2",
+          "support": "direct",
+          "confidence": "medium",
+          "answer_atoms": ["WikiHop"],
+          "risks": [],
+          "reason": "Direct dataset relation."
+        },
+        {
+          "requirement_id": "req_metric",
+          "evidence_id": "ev_3",
+          "support": "partial",
+          "confidence": "high",
+          "answer_atoms": ["58%"],
+          "risks": ["metric_unclear"],
+          "reason": "Value appears but metric is unclear."
+        }
+      ]
+    }
+    """)
+
+    result = select_verified_summary(
+        plan=plan,
+        pool=_pool(items),
+        decisions=decisions,
+        summary_k=4,
+    )
+
+    assert result.verified_summary_items == ["ev_2", "ev_3"]
+    assert result.stats == {
+        "decision_count": 3,
+        "direct_count": 1,
+        "partial_count": 1,
+        "no_count": 1,
+    }
+
+
+def test_select_verified_summary_marks_missing_requirement() -> None:
+    plan = _plan()
+    item = _item(
+        "ev_1",
+        "Only related work mentions WikiHop.",
+        0.9,
+        ["req_dataset"],
+    )
+    decisions, _ = parse_verifier_output("""
+    {
+      "decisions": [
+        {
+          "requirement_id": "req_dataset",
+          "evidence_id": "ev_1",
+          "support": "no",
+          "confidence": "high",
+          "answer_atoms": ["WikiHop"],
+          "risks": ["related_work"],
+          "reason": "Related only."
+        }
+      ]
+    }
+    """)
+
+    result = select_verified_summary(
+        plan=plan,
+        pool=_pool([item]),
+        decisions=decisions,
+        summary_k=4,
+    )
+
+    assert result.verified_summary_items == []
+    assert result.missing_verified_requirements == [
+        {
+            "requirement_id": "req_dataset",
+            "description": "dataset used by the paper",
+            "reason": "no_verified_direct_or_partial_evidence",
+        },
+        {
+            "requirement_id": "req_metric",
+            "description": "reported metric",
+            "reason": "no_verifier_decisions",
+        },
+    ]
+
+
+def test_select_verified_summary_records_conflicting_direct_atoms() -> None:
+    plan = _plan()
+    items = [
+        _item("ev_1", "The paper uses HotpotQA.", 0.9, ["req_dataset"]),
+        _item("ev_2", "The paper uses WikiHop.", 0.8, ["req_dataset"]),
+    ]
+    decisions, _ = parse_verifier_output("""
+    {
+      "decisions": [
+        {
+          "requirement_id": "req_dataset",
+          "evidence_id": "ev_1",
+          "support": "direct",
+          "confidence": "high",
+          "answer_atoms": ["HotpotQA"],
+          "risks": [],
+          "reason": "Direct."
+        },
+        {
+          "requirement_id": "req_dataset",
+          "evidence_id": "ev_2",
+          "support": "direct",
+          "confidence": "high",
+          "answer_atoms": ["WikiHop"],
+          "risks": [],
+          "reason": "Direct."
+        }
+      ]
+    }
+    """)
+
+    result = select_verified_summary(
+        plan=plan,
+        pool=_pool(items),
+        decisions=decisions,
+        summary_k=4,
+    )
+
+    assert result.verified_summary_items[:2] == ["ev_1", "ev_2"]
+    assert result.conflicts == [
+        {
+            "requirement_id": "req_dataset",
+            "evidence_ids": ["ev_1", "ev_2"],
+            "answer_atoms": ["HotpotQA", "WikiHop"],
+            "reason": "multiple_high_confidence_direct_answer_atoms",
+        }
+    ]
