@@ -3,6 +3,7 @@ from paperpilot.retrieval.evidence_pool import (
     build_evidence_pool,
     format_evidence_summary,
 )
+from paperpilot.retrieval.evidence_verifier import EvidenceVerificationResult
 from paperpilot.retrieval.query_plan import (
     EvidenceRequirement,
     PlannedQuery,
@@ -116,3 +117,81 @@ def test_format_evidence_summary_includes_missing_requirements() -> None:
     assert "Missing requirements:" in text
     assert "req_dataset" in text
     assert "req_baseline" in text
+
+
+def test_evidence_pool_serializes_verification_metadata() -> None:
+    plan = _plan()
+    pool = build_evidence_pool(
+        "plan-1",
+        plan,
+        [
+            RawSearchHit(
+                paper_id="paper-1",
+                chunk_id="chunk-1",
+                chunk_text="The experiments use WikiHop.",
+                score=9.0,
+                query=plan.queries[0],
+                rank=1,
+            )
+        ],
+    )
+    pool.verification = EvidenceVerificationResult(
+        enabled=True,
+        method="llm_requirement_verifier_v1",
+        verified_summary_items=["ev_1"],
+        stats={
+            "decision_count": 1,
+            "direct_count": 1,
+            "partial_count": 0,
+            "no_count": 0,
+        },
+    )
+
+    data = pool.to_dict()
+
+    assert data["verified_summary_items"] == ["ev_1"]
+    assert data["verification"]["enabled"] is True
+    assert data["verification"]["stats"]["direct_count"] == 1
+
+
+def test_format_evidence_summary_can_use_verified_items() -> None:
+    plan = _plan()
+    pool = build_evidence_pool(
+        "plan-1",
+        plan,
+        [
+            RawSearchHit(
+                paper_id="paper-1",
+                chunk_id="chunk-1",
+                chunk_text="Noisy related work chunk.",
+                score=10.0,
+                query=plan.queries[0],
+                rank=1,
+            ),
+            RawSearchHit(
+                paper_id="paper-1",
+                chunk_id="chunk-2",
+                chunk_text="The experiments use WikiHop.",
+                score=8.0,
+                query=plan.queries[0],
+                rank=2,
+            ),
+        ],
+    )
+    pool.verification = EvidenceVerificationResult(
+        enabled=True,
+        method="llm_requirement_verifier_v1",
+        verified_summary_items=["ev_2"],
+        stats={
+            "decision_count": 2,
+            "direct_count": 1,
+            "partial_count": 0,
+            "no_count": 1,
+        },
+    )
+
+    summary = format_evidence_summary(pool, use_verified=True)
+
+    assert "Verified top evidence:" in summary
+    assert "The experiments use WikiHop." in summary
+    assert "Noisy related work chunk." not in summary

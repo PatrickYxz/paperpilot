@@ -61,9 +61,10 @@ class EvidencePool:
     summary_items: list[EvidenceItem]
     missing_requirements: list[MissingRequirement]
     stats: dict[str, int]
+    verification: Any | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "plan_id": self.plan_id,
             "question": self.question,
             "query_plan": self.query_plan,
@@ -74,6 +75,17 @@ class EvidencePool:
             ],
             "stats": dict(self.stats),
         }
+        if self.verification is not None:
+            verification = (
+                self.verification.to_dict()
+                if hasattr(self.verification, "to_dict")
+                else dict(self.verification)
+            )
+            data["verification"] = verification
+            data["verified_summary_items"] = list(
+                verification.get("verified_summary_items") or []
+            )
+        return data
 
 
 def build_evidence_pool(
@@ -106,7 +118,30 @@ def build_evidence_pool(
     )
 
 
-def format_evidence_summary(pool: EvidencePool) -> str:
+def format_evidence_summary(
+    pool: EvidencePool,
+    *,
+    use_verified: bool = False,
+) -> str:
+    display_items = pool.summary_items
+    heading = "Top evidence:"
+    if use_verified and pool.verification is not None:
+        verification = (
+            pool.verification.to_dict()
+            if hasattr(pool.verification, "to_dict")
+            else dict(pool.verification)
+        )
+        verified_ids = [
+            str(item) for item in verification.get("verified_summary_items") or []
+        ]
+        by_id = {item.id: item for item in pool.items}
+        verified_items = [
+            by_id[item_id] for item_id in verified_ids if item_id in by_id
+        ]
+        if verified_items:
+            display_items = verified_items
+            heading = "Verified top evidence:"
+
     missing = (
         "none"
         if not pool.missing_requirements
@@ -125,15 +160,15 @@ def format_evidence_summary(pool: EvidencePool) -> str:
         ),
         f"Missing requirements: {missing}",
         "",
-        "Top evidence:",
+        heading,
     ]
-    for item in pool.summary_items:
+    for item in display_items:
         query_ids = ", ".join(match.query_id for match in item.matched_queries)
         blocks.append(
             f"[{item.id}] Found by {query_ids}. Score {item.best_score:.2f}.\n"
             f"{item.chunk_text}"
         )
-    if not pool.summary_items:
+    if not display_items:
         blocks.append("No retrieved evidence.")
     return "\n\n".join(blocks)
 
