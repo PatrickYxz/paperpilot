@@ -149,6 +149,30 @@ def _plan() -> QueryPlan:
     )
 
 
+def _list_plan() -> QueryPlan:
+    return QueryPlan(
+        version="query_plan_v1",
+        question="Which methods did they compare with?",
+        question_type="method_list",
+        answer_shape="list",
+        intent_summary="Find compared methods.",
+        focus_terms=["methods"],
+        constraints=QueryConstraints(),
+        evidence_requirements=[
+            EvidenceRequirement("req_methods", "methods compared by the paper", True),
+        ],
+        queries=[
+            PlannedQuery(
+                "q_methods",
+                "focused_rewrite",
+                "methods compared",
+                ["req_methods"],
+                1,
+            ),
+        ],
+    )
+
+
 def _item(
     item_id: str,
     text: str,
@@ -432,6 +456,48 @@ def test_select_verified_summary_does_not_conflict_on_single_list_evidence() -> 
     )
 
     assert result.verified_summary_items == ["ev_1"]
+    assert result.conflicts == []
+
+
+def test_select_verified_summary_treats_multiple_list_directs_as_coverage() -> None:
+    plan = _list_plan()
+    items = [
+        _item("ev_1", "Compared methods include K-means and AE.", 0.9, ["req_methods"]),
+        _item("ev_2", "Other baselines include LSA and BOW.", 0.8, ["req_methods"]),
+    ]
+    decisions, _ = parse_verifier_output("""
+    {
+      "decisions": [
+        {
+          "requirement_id": "req_methods",
+          "evidence_id": "ev_1",
+          "support": "direct",
+          "confidence": "high",
+          "answer_atoms": ["K-means", "AE"],
+          "risks": [],
+          "reason": "The chunk directly lists compared methods."
+        },
+        {
+          "requirement_id": "req_methods",
+          "evidence_id": "ev_2",
+          "support": "direct",
+          "confidence": "high",
+          "answer_atoms": ["LSA", "BOW"],
+          "risks": [],
+          "reason": "The chunk directly lists additional compared methods."
+        }
+      ]
+    }
+    """)
+
+    result = select_verified_summary(
+        plan=plan,
+        pool=_pool(items),
+        decisions=decisions,
+        summary_k=4,
+    )
+
+    assert result.verified_summary_items == ["ev_1", "ev_2"]
     assert result.conflicts == []
 
 

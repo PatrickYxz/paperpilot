@@ -218,7 +218,12 @@ def select_verified_summary(
                 "description": requirement.description,
                 "reason": "no_verified_direct_or_partial_evidence",
             })
-        conflict = _conflict_for_requirement(requirement.id, direct)
+        conflict = _conflict_for_requirement(
+            requirement.id,
+            direct,
+            answer_shape=plan.answer_shape,
+            question_type=plan.question_type,
+        )
         if conflict is not None:
             conflicts.append(conflict)
 
@@ -379,7 +384,12 @@ def _decision_stats(
 def _conflict_for_requirement(
     requirement_id: str,
     direct: list[EvidenceVerificationDecision],
+    *,
+    answer_shape: str = "",
+    question_type: str = "",
 ) -> dict[str, Any] | None:
+    if _is_list_like_answer(answer_shape, question_type):
+        return None
     high_confidence = [item for item in direct if item.confidence == "high"]
     if len(high_confidence) <= 1:
         return None
@@ -399,6 +409,10 @@ def _conflict_for_requirement(
         "answer_atoms": atoms,
         "reason": "multiple_high_confidence_direct_answer_atoms",
     }
+
+
+def _is_list_like_answer(answer_shape: str, question_type: str) -> bool:
+    return "list" in answer_shape.lower() or "list" in question_type.lower()
 
 
 def _string_list(value: Any) -> list[str]:
