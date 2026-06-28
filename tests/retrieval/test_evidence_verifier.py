@@ -197,13 +197,35 @@ def test_candidate_items_for_requirement_uses_targets_and_score_cap() -> None:
         _item("ev_3", "other requirement", 1.0, ["req_metric"]),
     ]
 
+    pool = _pool(items)
+    pool.summary_items = []
+
     candidates = candidate_items_for_requirement(
-        _pool(items),
+        pool,
         "req_dataset",
         candidate_k=1,
     )
 
     assert [item.id for item in candidates] == ["ev_2"]
+
+
+def test_candidate_items_include_summary_items_beyond_score_cap() -> None:
+    items = [
+        _item("ev_1", "generic baseline mention", 10.0, ["req_dataset"]),
+        _item("ev_2", "generic baseline mention", 9.0, ["req_dataset"]),
+        _item("ev_3", "generic baseline mention", 8.0, ["req_dataset"]),
+        _item("ev_4", "specific baselines are QANet and BERT-Base", 1.0, ["req_dataset"]),
+    ]
+    pool = _pool(items)
+    pool.summary_items = [items[0], items[3]]
+
+    candidates = candidate_items_for_requirement(
+        pool,
+        "req_dataset",
+        candidate_k=2,
+    )
+
+    assert [item.id for item in candidates] == ["ev_1", "ev_2", "ev_4"]
 
 
 def test_build_verifier_prompt_contains_requirement_and_candidate_text() -> None:
@@ -374,6 +396,43 @@ def test_select_verified_summary_records_conflicting_direct_atoms() -> None:
             "reason": "multiple_high_confidence_direct_answer_atoms",
         }
     ]
+
+
+def test_select_verified_summary_does_not_conflict_on_single_list_evidence() -> None:
+    plan = _plan()
+    items = [
+        _item(
+            "ev_1",
+            "The baselines are QANet and BERT-Base.",
+            0.9,
+            ["req_dataset"],
+        ),
+    ]
+    decisions, _ = parse_verifier_output("""
+    {
+      "decisions": [
+        {
+          "requirement_id": "req_dataset",
+          "evidence_id": "ev_1",
+          "support": "direct",
+          "confidence": "high",
+          "answer_atoms": ["QANet", "BERT-Base"],
+          "risks": [],
+          "reason": "The chunk directly lists both baselines."
+        }
+      ]
+    }
+    """)
+
+    result = select_verified_summary(
+        plan=plan,
+        pool=_pool(items),
+        decisions=decisions,
+        summary_k=4,
+    )
+
+    assert result.verified_summary_items == ["ev_1"]
+    assert result.conflicts == []
 
 
 class FakeVerifierClient:

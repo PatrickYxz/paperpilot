@@ -101,9 +101,13 @@ def candidate_items_for_requirement(
     candidate_k: int,
 ) -> list[EvidenceItem]:
     candidates = [item for item in pool.items if requirement_id in item.targets()]
-    return sorted(candidates, key=lambda item: item.best_score, reverse=True)[
+    selected = sorted(candidates, key=lambda item: item.best_score, reverse=True)[
         :candidate_k
     ]
+    for item in pool.summary_items:
+        if requirement_id in item.targets() and item not in selected:
+            selected.append(item)
+    return selected
 
 
 def build_verifier_prompt(
@@ -377,6 +381,8 @@ def _conflict_for_requirement(
     direct: list[EvidenceVerificationDecision],
 ) -> dict[str, Any] | None:
     high_confidence = [item for item in direct if item.confidence == "high"]
+    if len(high_confidence) <= 1:
+        return None
     atoms: list[str] = []
     evidence_ids: list[str] = []
     for decision in high_confidence:
