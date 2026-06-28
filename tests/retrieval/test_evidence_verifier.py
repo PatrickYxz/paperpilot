@@ -1,9 +1,12 @@
+from types import SimpleNamespace
+
 from paperpilot.retrieval.evidence_pool import EvidenceItem, EvidencePool, MatchedQuery
 from paperpilot.retrieval.evidence_verifier import (
     EvidenceVerificationDecision,
     build_verifier_prompt,
     candidate_items_for_requirement,
     parse_verifier_output,
+    run_evidence_verification,
     select_verified_summary,
 )
 from paperpilot.retrieval.query_plan import (
@@ -371,3 +374,86 @@ def test_select_verified_summary_records_conflicting_direct_atoms() -> None:
             "reason": "multiple_high_confidence_direct_answer_atoms",
         }
     ]
+
+
+class FakeVerifierClient:
+    def __init__(
+        self,
+        responses: list[str] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.responses = responses or []
+        self.error = error
+        self.calls: list[dict] = []
+
+    def call(self, messages: list[dict], tools: list, *, system: str):
+        self.calls.append({"messages": messages, "tools": tools, "system": system})
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(text=self.responses.pop(0))
+
+
+def test_run_evidence_verification_calls_once_per_required_requirement() -> None:
+    plan = _plan()
+    pool = _pool([
+        _item("ev_1", "The experiments use WikiHop.", 0.9, ["req_dataset"]),
+        _item("ev_2", "The reported accuracy is 58%.", 0.8, ["req_metric"]),
+    ])
+    client = FakeVerifierClient([
+        """
+        {"decisions": [{
+          "requirement_id": "req_dataset",
+          "evidence_id": "ev_1",
+          "support": "direct",
+          "confidence": "high",
+          "answer_atoms": ["WikiHop"],
+          "risks": [],
+          "reason": "Direct."
+        }]}
+        """,
+        """
+        {"decisions": [{
+          "requirement_id": "req_metric",
+          "evidence_id": "ev_2",
+          "support": "partial",
+          "confidence": "medium",
+          "answer_atoms": ["58%"],
+          "risks": ["metric_unclear"],
+          "reason": "Metric unclear."
+        }]}
+        """,
+    ])
+
+    result = run_evidence_verification(
+        plan=plan,
+        pool=pool,
+        client=client,
+        summary_k=4,
+        verifier_candidate_k=6,
+    )
+
+    assert len(client.calls) == 2
+    assert all(call["tools"] == [] for call in client.calls)
+    assert result.verified_summary_items == ["ev_1", "ev_2"]
+    assert result.verification_error is None
+
+
+def test_run_evidence_verification_returns_error_result_on_client_failure() -> None:
+    plan = _plan()
+    pool = _pool([
+        _item("ev_1", "The experiments use WikiHop.", 0.9, ["req_dataset"])
+    ])
+    client = FakeVerifierClient(error=RuntimeError("verifier unavailable"))
+
+    result = run_evidence_verification(
+        plan=plan,
+        pool=pool,
+        client=client,
+        summary_k=4,
+        verifier_candidate_k=6,
+    )
+
+    assert result.enabled is True
+    assert result.verified_summary_items == []
+    assert result.decisions == []
+    assert result.verification_error == "RuntimeError: verifier unavailable"

@@ -6,6 +6,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from paperpilot.core import LLMClient
 from paperpilot.retrieval.evidence_pool import EvidenceItem, EvidencePool
 from paperpilot.retrieval.query_plan import EvidenceRequirement, QueryPlan
 
@@ -244,6 +245,77 @@ def select_verified_summary(
         conflicts=conflicts,
         stats=_decision_stats(valid_decisions),
     )
+
+
+def run_evidence_verification(
+    *,
+    plan: QueryPlan,
+    pool: EvidencePool,
+    client: Any | None = None,
+    summary_k: int,
+    verifier_candidate_k: int = 6,
+) -> EvidenceVerificationResult:
+    verifier_client = client or LLMClient()
+    decisions: list[EvidenceVerificationDecision] = []
+    parse_errors: list[str] = []
+
+    try:
+        for requirement in plan.evidence_requirements:
+            if not requirement.required:
+                continue
+            candidates = candidate_items_for_requirement(
+                pool,
+                requirement.id,
+                candidate_k=verifier_candidate_k,
+            )
+            if not candidates:
+                continue
+            prompt = build_verifier_prompt(
+                plan=plan,
+                requirement=requirement,
+                candidates=candidates,
+            )
+            response = verifier_client.call(
+                messages=[{"role": "user", "content": prompt}],
+                tools=[],
+                system="",
+            )
+            parsed, error = parse_verifier_output(response.text or "")
+            if error is not None:
+                parse_errors.append(f"{requirement.id}: {error}")
+                continue
+            decisions.extend(parsed)
+    except Exception as exc:  # noqa: BLE001
+        return EvidenceVerificationResult(
+            enabled=True,
+            method="llm_requirement_verifier_v1",
+            verification_error=f"{type(exc).__name__}: {exc}",
+            stats={
+                "decision_count": 0,
+                "direct_count": 0,
+                "partial_count": 0,
+                "no_count": 0,
+            },
+        )
+
+    result = select_verified_summary(
+        plan=plan,
+        pool=pool,
+        decisions=decisions,
+        summary_k=summary_k,
+    )
+    if parse_errors:
+        return EvidenceVerificationResult(
+            enabled=result.enabled,
+            method=result.method,
+            decisions=result.decisions,
+            verified_summary_items=result.verified_summary_items,
+            missing_verified_requirements=result.missing_verified_requirements,
+            conflicts=result.conflicts,
+            stats=result.stats,
+            verification_error="; ".join(parse_errors),
+        )
+    return result
 
 
 def _normalize_decision(raw: Any) -> EvidenceVerificationDecision | None:
