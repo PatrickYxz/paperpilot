@@ -159,6 +159,51 @@ def test_extract_retrieved_chunks_reads_planned_retrieval_summary_items(
     assert chunks[0]["score"] == 0.95
 
 
+def test_extract_retrieved_chunks_prefers_verified_summary_items(
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    trace_path.write_text(
+        "\n".join([
+            json.dumps({
+                "kind": "tool_result",
+                "payload": {
+                    "name": "mcp__colbert__planned_retrieval",
+                    "content": json.dumps({
+                        "evidence_pool": {
+                            "items": [
+                                {
+                                    "id": "ev_1",
+                                    "paper_id": "paper-1",
+                                    "chunk_text": "Noisy related chunk.",
+                                    "best_score": 9.0,
+                                    "matched_queries": [{"query": "dataset"}],
+                                },
+                                {
+                                    "id": "ev_2",
+                                    "paper_id": "paper-1",
+                                    "chunk_text": "The experiments use WikiHop.",
+                                    "best_score": 8.0,
+                                    "matched_queries": [{"query": "dataset"}],
+                                },
+                            ],
+                            "summary_items": ["ev_1"],
+                            "verified_summary_items": ["ev_2"],
+                        }
+                    }),
+                },
+            })
+        ]),
+        encoding="utf-8",
+    )
+
+    chunks = extract_retrieved_chunks(trace_path)
+
+    assert [chunk["chunk_text"] for chunk in chunks] == [
+        "The experiments use WikiHop."
+    ]
+
+
 def test_build_selector_prompt_contains_core_inputs() -> None:
     prompt = build_selector_prompt(
         question="What dataset was used?",

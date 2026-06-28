@@ -276,7 +276,9 @@ def _extract_planned_retrieval_chunks(content: Any) -> list[dict[str, Any]]:
         for item in items
         if isinstance(item, dict) and item.get("id") is not None
     }
-    summary_ids = pool.get("summary_items")
+    summary_ids = pool.get("verified_summary_items")
+    if not isinstance(summary_ids, list) or not summary_ids:
+        summary_ids = pool.get("summary_items")
     if isinstance(summary_ids, list) and summary_ids:
         ordered_items = [
             item_by_id[str(item_id)]
