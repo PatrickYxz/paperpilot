@@ -32,6 +32,7 @@ def main() -> None:
     parser.add_argument("--trace-dir", type=Path, default=DEFAULT_TRACE_DIR)
     parser.add_argument("--case-id", action="append", dest="case_ids", required=True)
     parser.add_argument("--use-query-plan", action="store_true")
+    parser.add_argument("--verify-evidence", action="store_true")
     args = parser.parse_args()
 
     rows = _load_rows(args.subset_path)
@@ -51,9 +52,19 @@ def main() -> None:
         ans = baselines.run_paperpilot(
             case,
             use_query_plan=args.use_query_plan,
-            trace_id=f"{case.case_id}__query_plan_v1" if args.use_query_plan else None,
+            verify_evidence=args.verify_evidence,
+            trace_id=_trace_id(
+                case.case_id,
+                args.use_query_plan,
+                args.verify_evidence,
+            ),
         )
-        record = _record(case, ans, use_query_plan=args.use_query_plan)
+        record = _record(
+            case,
+            ans,
+            use_query_plan=args.use_query_plan,
+            verify_evidence=args.verify_evidence,
+        )
         with args.out_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         status = "PASS" if record["passed"] else ("ERR" if record["error"] else "FAIL")
@@ -89,10 +100,34 @@ def _to_eval_case(row: dict) -> EvalCase:
     )
 
 
-def _record(case: EvalCase, ans: dict, *, use_query_plan: bool) -> dict:
+def _trace_id(
+    case_id: str,
+    use_query_plan: bool,
+    verify_evidence: bool,
+) -> str | None:
+    if verify_evidence:
+        return f"{case_id}__query_plan_v1_verified"
+    if use_query_plan:
+        return f"{case_id}__query_plan_v1"
+    return None
+
+
+def _record(
+    case: EvalCase,
+    ans: dict,
+    *,
+    use_query_plan: bool,
+    verify_evidence: bool = False,
+) -> dict:
+    if verify_evidence:
+        baseline = "paperpilot_query_plan_v1_verified_rerun_cases"
+    elif use_query_plan:
+        baseline = "paperpilot_query_plan_v1_rerun_cases"
+    else:
+        baseline = "paperpilot_rerun_cases"
     record = {
         "case_id": case.case_id,
-        "baseline": "paperpilot_query_plan_v1_rerun_cases" if use_query_plan else "paperpilot_rerun_cases",
+        "baseline": baseline,
         "question": case.question,
         "oracle_spans": list(case.oracle_spans),
         "predicted": ans.get("predicted", ""),
@@ -119,6 +154,14 @@ def _record(case: EvalCase, ans: dict, *, use_query_plan: bool) -> dict:
         "query_plan_used",
         "query_plan_version",
         "query_plan",
+        "evidence_verification_requested",
+        "evidence_verification_used",
+        "verified_summary_count",
+        "direct_support_count",
+        "partial_support_count",
+        "unsupported_count",
+        "missing_verified_requirements",
+        "verification_conflicts",
     ]:
         if extra_key in ans:
             record[extra_key] = ans[extra_key]

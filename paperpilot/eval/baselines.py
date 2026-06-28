@@ -67,6 +67,7 @@ def run_paperpilot(
     repair_client: LLMClient | None = None,
     evidence_client: LLMClient | None = None,
     use_query_plan: bool = False,
+    verify_evidence: bool = False,
     trace_id: str | None = None,
 ) -> dict[str, Any]:
     """Run PaperPilot end to end while collecting tool calls and JSONL trace."""
@@ -90,7 +91,11 @@ def run_paperpilot(
             abstract=case.abstract,
         )
 
-    prompt = _build_paperpilot_prompt(case, query_plan=query_plan)
+    prompt = _build_paperpilot_prompt(
+        case,
+        query_plan=query_plan,
+        verify_evidence=verify_evidence,
+    )
 
     t0 = time.time()
     predicted = ""
@@ -153,6 +158,7 @@ def run_paperpilot(
         "query_plan_used": use_query_plan,
         "query_plan_version": "deterministic_v1" if query_plan is not None else None,
         "query_plan": query_plan.to_dict() if query_plan is not None else None,
+        "evidence_verification_requested": verify_evidence,
     }
 
 
@@ -194,14 +200,28 @@ def _extract_final_text(content: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def _build_paperpilot_prompt(case: EvalCase, *, query_plan: QueryPlan | None = None) -> str:
+def _build_paperpilot_prompt(
+    case: EvalCase,
+    *,
+    query_plan: QueryPlan | None = None,
+    verify_evidence: bool = False,
+) -> str:
     guidance = _format_query_plan_guidance(query_plan) if query_plan is not None else ""
+    verification_guidance = (
+        "Eval verification mode:\n"
+        "- When calling mcp__colbert__planned_retrieval, set verify_evidence=true.\n"
+        "- Prefer verified_summary_items when present, but still report "
+        "insufficient evidence when requirements are missing.\n\n"
+        if verify_evidence
+        else ""
+    )
     return (
         f"请精读 arxiv:{case.arxiv_id}(标题《{case.paper_title}》),"
         "回答下面的问题。使用 deep-read-paper skill 的工作流"
         "(load_skill -> download_paper -> build_index -> "
         "planned_retrieval -> 必要时补充 colbert.search -> 综合)。\n\n"
         f"{guidance}"
+        f"{verification_guidance}"
         f"Q: {case.question}\nA:"
     )
 
@@ -235,6 +255,13 @@ def _extract_planned_retrieval_metadata(trace_path: Path) -> dict[str, Any]:
         "planned_retrieval_missing_requirements": None,
         "planned_retrieval_query_plan_meta": None,
         "planned_retrieval_query_errors": None,
+        "evidence_verification_used": False,
+        "verified_summary_count": 0,
+        "direct_support_count": 0,
+        "partial_support_count": 0,
+        "unsupported_count": 0,
+        "missing_verified_requirements": None,
+        "verification_conflicts": None,
     }
     if not trace_path.exists():
         return defaults
@@ -259,6 +286,15 @@ def _extract_planned_retrieval_metadata(trace_path: Path) -> dict[str, Any]:
         pool = content.get("evidence_pool")
         if not isinstance(pool, dict):
             pool = {}
+        verification = pool.get("verification")
+        if not isinstance(verification, dict):
+            verification = {}
+        verification_stats = verification.get("stats")
+        if not isinstance(verification_stats, dict):
+            verification_stats = {}
+        verified_summary_items = pool.get("verified_summary_items")
+        if not isinstance(verified_summary_items, list):
+            verified_summary_items = []
         return {
             "planned_retrieval_used": True,
             "planned_retrieval_stats": pool.get("stats"),
@@ -267,6 +303,17 @@ def _extract_planned_retrieval_metadata(trace_path: Path) -> dict[str, Any]:
             ),
             "planned_retrieval_query_plan_meta": content.get("query_plan_meta"),
             "planned_retrieval_query_errors": content.get("query_errors"),
+            "evidence_verification_used": bool(verification.get("enabled")),
+            "verified_summary_count": len(verified_summary_items),
+            "direct_support_count": int(verification_stats.get("direct_count") or 0),
+            "partial_support_count": int(
+                verification_stats.get("partial_count") or 0
+            ),
+            "unsupported_count": int(verification_stats.get("no_count") or 0),
+            "missing_verified_requirements": verification.get(
+                "missing_verified_requirements"
+            ),
+            "verification_conflicts": verification.get("conflicts"),
         }
     return defaults
 

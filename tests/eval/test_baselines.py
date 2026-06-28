@@ -224,6 +224,49 @@ def test_run_paperpilot_records_planned_retrieval_metadata(
     assert result["planned_retrieval_query_errors"] == []
 
 
+def test_run_paperpilot_can_request_verified_planned_retrieval(
+    monkeypatch, tmp_path
+) -> None:
+    raw = "Short answer: WikiHop.\n\nEvidence: Verified evidence."
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(baselines, "_TRACE_DIR", tmp_path)
+    _patch_agent_run_capture_prompt(monkeypatch, raw, captured)
+
+    result = baselines.run_paperpilot(
+        CASE,
+        use_query_plan=True,
+        verify_evidence=True,
+    )
+
+    assert result["evidence_verification_requested"] is True
+    assert "set verify_evidence=true" in captured["prompt"]
+
+
+def test_run_paperpilot_records_planned_retrieval_verification_metadata(
+    monkeypatch, tmp_path
+) -> None:
+    raw = "Short answer: WikiHop.\n\nEvidence: Verified evidence."
+
+    monkeypatch.setattr(baselines, "_TRACE_DIR", tmp_path)
+    _patch_agent_run_with_verified_planned_retrieval(monkeypatch, raw)
+
+    result = baselines.run_paperpilot(
+        CASE,
+        trace_id="verified-planned-retrieval-case",
+        verify_evidence=True,
+    )
+
+    assert result["evidence_verification_requested"] is True
+    assert result["evidence_verification_used"] is True
+    assert result["verified_summary_count"] == 1
+    assert result["direct_support_count"] == 1
+    assert result["partial_support_count"] == 0
+    assert result["unsupported_count"] == 0
+    assert result["missing_verified_requirements"] == []
+    assert result["verification_conflicts"] == []
+
+
 def _patch_agent_run(monkeypatch, final_text: str) -> None:
     import paperpilot.main
 
@@ -267,6 +310,59 @@ def _patch_agent_run_with_planned_retrieval(monkeypatch, final_text: str) -> Non
                         "deduped_count": 1,
                     },
                     "missing_requirements": [],
+                },
+                "query_plan_meta": {
+                    "fallback_used": False,
+                },
+                "query_errors": [],
+            }),
+        })
+        return [{"role": "assistant", "content": final_text}]
+
+    monkeypatch.setattr(paperpilot.main, "run", fake_run)
+
+
+def _patch_agent_run_with_verified_planned_retrieval(
+    monkeypatch,
+    final_text: str,
+) -> None:
+    import paperpilot.main
+
+    def fake_run(query: str, *, max_iter: int, on_event):
+        on_event("tool_call", {
+            "name": "mcp__colbert__planned_retrieval",
+            "arguments": {
+                "question": "What dataset was used?",
+                "paper_id": "1234.5678",
+                "top_k_each": 5,
+                "verify_evidence": True,
+            },
+        })
+        on_event("tool_result", {
+            "name": "mcp__colbert__planned_retrieval",
+            "content": json.dumps({
+                "summary_text": "Verified planned retrieval completed.",
+                "evidence_pool": {
+                    "stats": {
+                        "raw_result_count": 2,
+                        "deduped_count": 1,
+                    },
+                    "summary_items": ["ev_1"],
+                    "verified_summary_items": ["ev_1"],
+                    "missing_requirements": [],
+                    "verification": {
+                        "enabled": True,
+                        "method": "llm_requirement_verifier_v1",
+                        "decisions": [],
+                        "missing_verified_requirements": [],
+                        "conflicts": [],
+                        "stats": {
+                            "decision_count": 1,
+                            "direct_count": 1,
+                            "partial_count": 0,
+                            "no_count": 0,
+                        },
+                    },
                 },
                 "query_plan_meta": {
                     "fallback_used": False,
