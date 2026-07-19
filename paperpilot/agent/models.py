@@ -104,13 +104,13 @@ class AgentStep:
     sequence: int
     kind: StepKind
     status: StepStatus
-    input_payload: dict[str, Any] | None
-    output_payload: dict[str, Any] | None
-    failure_class: FailureClass | None
-    failure_message: str | None
+    attempt: int
+    input: dict[str, Any]
+    output: dict[str, Any] | None
+    error: dict[str, Any] | None
+    schema_version: int
     started_at: str | None
     finished_at: str | None
-    created_at: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -119,28 +119,34 @@ class AgentStep:
             "sequence": self.sequence,
             "kind": self.kind,
             "status": self.status,
-            "input_payload": self.input_payload,
-            "output_payload": self.output_payload,
-            "failure_class": self.failure_class,
-            "failure_message": self.failure_message,
+            "attempt": self.attempt,
+            "input": self.input,
+            "output": self.output,
+            "error": self.error,
+            "schema_version": self.schema_version,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
-            "created_at": self.created_at,
         }
 
 
 @dataclass(frozen=True)
 class RunCheckpoint:
+    id: str
     run_id: str
-    sequence: int
-    state: dict[str, Any]
+    step_sequence: int
+    messages: list[dict[str, Any]]
+    runtime_state: dict[str, Any]
+    schema_version: int
     created_at: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "id": self.id,
             "run_id": self.run_id,
-            "sequence": self.sequence,
-            "state": self.state,
+            "step_sequence": self.step_sequence,
+            "messages": self.messages,
+            "runtime_state": self.runtime_state,
+            "schema_version": self.schema_version,
             "created_at": self.created_at,
         }
 
@@ -151,14 +157,16 @@ class ToolExecution:
     run_id: str
     step_id: str
     tool_name: str
+    arguments: dict[str, Any]
     classification: ToolClassification
-    arguments_hash: str
-    result_payload: dict[str, Any] | None
+    status: str
+    result_preview: str | None
     failure_class: FailureClass | None
     failure_message: str | None
+    duration_ms: int | None
+    schema_version: int
     started_at: str | None
     finished_at: str | None
-    created_at: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -166,14 +174,16 @@ class ToolExecution:
             "run_id": self.run_id,
             "step_id": self.step_id,
             "tool_name": self.tool_name,
+            "arguments": self.arguments,
             "classification": self.classification,
-            "arguments_hash": self.arguments_hash,
-            "result_payload": self.result_payload,
+            "status": self.status,
+            "result_preview": self.result_preview,
             "failure_class": self.failure_class,
             "failure_message": self.failure_message,
+            "duration_ms": self.duration_ms,
+            "schema_version": self.schema_version,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
-            "created_at": self.created_at,
         }
 
 
