@@ -24,6 +24,7 @@ FailureClass = Literal[
     "internal",
 ]
 ToolClassification = Literal["read_only", "idempotent_write", "non_retryable"]
+ToolExecutionStatus = Literal["started", "completed", "failed"]
 
 RUN_ACTIVE_STATUSES = frozenset({"pending", "running", "waiting_retry", "cancelling"})
 RUN_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -42,6 +43,7 @@ FAILURE_CLASSES = frozenset(
     }
 )
 TOOL_CLASSIFICATIONS = frozenset({"read_only", "idempotent_write", "non_retryable"})
+TOOL_EXECUTION_STATUSES = frozenset({"started", "completed", "failed"})
 SCHEMA_VERSION = 1
 
 
@@ -109,7 +111,7 @@ class AgentStep:
     output: dict[str, Any] | None
     error: dict[str, Any] | None
     schema_version: int
-    started_at: str | None
+    started_at: str
     finished_at: str | None
 
     def to_dict(self) -> dict[str, Any]:
@@ -159,13 +161,13 @@ class ToolExecution:
     tool_name: str
     arguments: dict[str, Any]
     classification: ToolClassification
-    status: str
+    status: ToolExecutionStatus
     result_preview: str | None
     failure_class: FailureClass | None
     failure_message: str | None
     duration_ms: int | None
     schema_version: int
-    started_at: str | None
+    started_at: str
     finished_at: str | None
 
     def to_dict(self) -> dict[str, Any]:

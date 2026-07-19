@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError
+from typing import get_args, get_type_hints
 
 import pytest
 
@@ -9,6 +10,7 @@ from paperpilot.agent.models import (
     RunCheckpoint,
     RunOutcome,
     StepPage,
+    TOOL_EXECUTION_STATUSES,
     ToolExecution,
 )
 from paperpilot.agent.policy import RunPolicy
@@ -92,6 +94,23 @@ def test_agent_step_exactly_matches_persisted_step_shape_and_is_frozen():
     )
     with pytest.raises(FrozenInstanceError):
         first_attempt.attempt = 2
+
+
+def test_persisted_step_and_tool_start_times_are_required_but_finish_times_are_optional():
+    step_hints = get_type_hints(AgentStep)
+    execution_hints = get_type_hints(ToolExecution)
+
+    assert step_hints["started_at"] is str
+    assert execution_hints["started_at"] is str
+    assert get_args(step_hints["finished_at"]) == (str, type(None))
+    assert get_args(execution_hints["finished_at"]) == (str, type(None))
+
+
+def test_tool_execution_status_has_the_exact_persisted_lifecycle_values():
+    status_hint = get_type_hints(ToolExecution)["status"]
+
+    assert TOOL_EXECUTION_STATUSES == frozenset({"started", "completed", "failed"})
+    assert set(get_args(status_hint)) == {"started", "completed", "failed"}
 
 
 def test_checkpoint_exactly_matches_recovery_schema_and_is_frozen():
@@ -183,9 +202,30 @@ def test_run_outcome_constructors_and_step_page_serialize_stable_values():
         "failure_class": None,
         "failure_message": None,
     }
-    assert waiting_retry.failure_class == "transport"
-    assert failed.failure_message == "bad input"
-    assert cancelled.to_dict()["failure_class"] == "cancelled"
+    assert waiting_retry.to_dict() == {
+        "run_id": "run-1",
+        "status": "waiting_retry",
+        "final_step_id": None,
+        "final_text": None,
+        "failure_class": "transport",
+        "failure_message": "closed",
+    }
+    assert failed.to_dict() == {
+        "run_id": "run-1",
+        "status": "failed",
+        "final_step_id": None,
+        "final_text": None,
+        "failure_class": "validation",
+        "failure_message": "bad input",
+    }
+    assert cancelled.to_dict() == {
+        "run_id": "run-1",
+        "status": "cancelled",
+        "final_step_id": None,
+        "final_text": None,
+        "failure_class": "cancelled",
+        "failure_message": "cancelled by user",
+    }
     assert page.to_dict() == {
         "items": [_agent_step().to_dict()],
         "next_after_sequence": 1,
@@ -193,6 +233,8 @@ def test_run_outcome_constructors_and_step_page_serialize_stable_values():
     }
     with pytest.raises(FrozenInstanceError):
         page.has_more = False
+    with pytest.raises(FrozenInstanceError):
+        completed.status = "failed"
 
 
 def _agent_run() -> AgentRun:
