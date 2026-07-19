@@ -37,6 +37,7 @@ from paperpilot.core.loop import EventCallback
 from paperpilot.document_store import DocumentStore
 from paperpilot.session_store import SessionStore
 from paperpilot.tools.mcp_client import MCPClient
+from paperpilot.tools.mcp_runtime import MCPRuntime
 
 MANIFEST_PATH = Path(__file__).parent / "mcp_servers.json"
 SKILLS_DIR = Path(__file__).parent / "skills"
@@ -54,6 +55,11 @@ SYSTEM_PROMPT_BASE = """你是 PaperPilot,一个学术论文研究助手。
 
 class Closable(Protocol):
     def close(self) -> None: ...
+
+
+class _BorrowedMCPResources:
+    def close(self) -> None:
+        return None
 
 
 ToolBuilder = Callable[
@@ -107,40 +113,76 @@ def _build_tools(
     on_event: EventCallback | None = None,
 ) -> tuple[list[Tool], MCPClient]:
     """Return (tools, mcp_client); caller is responsible for close()."""
+    mcp = MCPClient(MANIFEST_PATH)
+    try:
+        mcp.start()
+        return _compose_tools(
+            registry,
+            todo_store,
+            messages_ref,
+            input_provider,
+            on_event,
+            mcp.list_tools(),
+        ), mcp
+    except Exception:
+        mcp.close()
+        raise
+
+
+def _compose_tools(
+    registry: SkillRegistry | None,
+    todo_store: TodoStore | None,
+    messages_ref: list[dict] | None,
+    input_provider: Callable[[str], str] | None,
+    on_event: EventCallback | None,
+    mcp_tools: list[Tool],
+) -> list[Tool]:
     registry = registry or SkillRegistry(SKILLS_DIR)
     todo_store = todo_store or TodoStore()
     messages_ref = messages_ref if messages_ref is not None else []
     ask_input = input_provider or _default_input_provider
     emit = on_event or _default_logger
+    return [
+        load_skill_tool(registry),
+        research_todo_tool(todo_store),
+        paper_deep_read_tool(
+            client_factory=lambda: LLMClient(),
+            mcp_tools=mcp_tools,
+            on_event=emit,
+        ),
+        compact_context_tool(
+            messages_ref=messages_ref,
+            client_factory=lambda: LLMClient(),
+            on_event=emit,
+        ),
+        search_user_document_tool(),
+        ask_user_tool(
+            input_provider=ask_input,
+            on_event=emit,
+        ),
+        *mcp_tools,
+    ]
 
-    mcp = MCPClient(MANIFEST_PATH)
-    try:
-        mcp.start()
-        mcp_tools = mcp.list_tools()
-        tools: list[Tool] = [
-            load_skill_tool(registry),
-            research_todo_tool(todo_store),
-            paper_deep_read_tool(
-                client_factory=lambda: LLMClient(),
-                mcp_tools=mcp_tools,
-                on_event=emit,
-            ),
-            compact_context_tool(
-                messages_ref=messages_ref,
-                client_factory=lambda: LLMClient(),
-                on_event=emit,
-            ),
-            search_user_document_tool(),
-            ask_user_tool(
-                input_provider=ask_input,
-                on_event=emit,
-            ),
-            *mcp_tools,
-        ]
-        return tools, mcp
-    except Exception:
-        mcp.close()
-        raise
+
+def _borrowed_tool_builder(mcp_tools: list[Tool]) -> ToolBuilder:
+    def build_tools(
+        registry: SkillRegistry | None,
+        todo_store: TodoStore | None,
+        messages_ref: list[dict] | None,
+        input_provider: Callable[[str], str] | None,
+        on_event: EventCallback | None,
+    ) -> tuple[list[Tool], Closable]:
+        tools = _compose_tools(
+            registry,
+            todo_store,
+            messages_ref,
+            input_provider,
+            on_event,
+            mcp_tools,
+        )
+        return tools, _BorrowedMCPResources()
+
+    return build_tools
 
 
 class ConversationSession:
@@ -305,7 +347,25 @@ class ConversationSession:
         )
 
 
-def run(query: str, *, max_iter: int = 8, on_event=None) -> list[dict]:
+def run(
+    query: str,
+    *,
+    max_iter: int = 8,
+    on_event=None,
+    mcp_runtime: MCPRuntime | None = None,
+) -> list[dict]:
     """Run one complete agent conversation and return final messages."""
-    with ConversationSession(max_iter_per_turn=max_iter, on_event=on_event) as session:
-        return session.ask(query)
+    if mcp_runtime is None:
+        with ConversationSession(
+            max_iter_per_turn=max_iter,
+            on_event=on_event,
+        ) as session:
+            return session.ask(query)
+
+    with mcp_runtime.lease_tools() as mcp_tools:
+        with ConversationSession(
+            max_iter_per_turn=max_iter,
+            on_event=on_event,
+            tool_builder=_borrowed_tool_builder(mcp_tools),
+        ) as session:
+            return session.ask(query)

@@ -1,4 +1,13 @@
 const taskForm = document.querySelector("#taskForm");
+const authForm = document.querySelector("#authForm");
+const usernameInput = document.querySelector("#username");
+const passwordInput = document.querySelector("#password");
+const registerButton = document.querySelector("#registerButton");
+const logoutButton = document.querySelector("#logoutButton");
+const currentUser = document.querySelector("#currentUser");
+const currentUsername = document.querySelector("#currentUsername");
+const authMessage = document.querySelector("#authMessage");
+const workbench = document.querySelector("#workbench");
 const questionInput = document.querySelector("#question");
 const depthInput = document.querySelector("#depth");
 const executionModeInput = document.querySelector("#executionMode");
@@ -17,7 +26,38 @@ const candidateCount = document.querySelector("#candidateCount");
 const candidateList = document.querySelector("#candidateList");
 
 let selectedTaskId = null;
+let selectedTask = null;
+let selectedEvents = [];
+let selectedArtifacts = [];
+let eventAfterId = 0;
+let artifactAfterId = 0;
+let selectionVersion = 0;
+let taskListVersion = 0;
 let pollTimer = null;
+
+function invalidateTaskListRequests() {
+  taskListVersion += 1;
+}
+
+function resetSelectedTask(taskId) {
+  selectionVersion += 1;
+  selectedTaskId = taskId;
+  selectedTask = null;
+  selectedEvents = [];
+  selectedArtifacts = [];
+  eventAfterId = 0;
+  artifactAfterId = 0;
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+  return selectionVersion;
+}
+
+function setAuthMessage(text, kind = "") {
+  authMessage.textContent = text;
+  authMessage.className = kind ? `message ${kind}` : "message";
+}
 
 function setMessage(text, kind = "") {
   formMessage.textContent = text;
@@ -27,6 +67,7 @@ function setMessage(text, kind = "") {
 async function requestJson(url, options = {}) {
   const response = await fetch(url, {
     headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
     ...options,
   });
   const text = await response.text();
@@ -36,6 +77,30 @@ async function requestJson(url, options = {}) {
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
   return payload;
+}
+
+function showAuthenticated(user) {
+  invalidateTaskListRequests();
+  authForm.hidden = true;
+  currentUser.hidden = false;
+  workbench.hidden = false;
+  currentUsername.textContent = user.username;
+  setAuthMessage("");
+}
+
+function showUnauthenticated(message = "") {
+  invalidateTaskListRequests();
+  authForm.hidden = false;
+  currentUser.hidden = true;
+  workbench.hidden = true;
+  currentUsername.textContent = "";
+  resetSelectedTask(null);
+  taskList.innerHTML = "";
+  taskDetail.className = "task-detail empty";
+  taskDetail.textContent = "Select a task.";
+  taskArtifacts.innerHTML = "";
+  taskEvents.innerHTML = "";
+  setAuthMessage(message);
 }
 
 function formatDate(value) {
@@ -307,10 +372,24 @@ function eventCategory(event) {
 }
 
 async function loadTasks() {
-  const status = statusFilter.value;
-  const url = status ? `/api/tasks?status=${encodeURIComponent(status)}` : "/api/tasks";
-  const tasks = await requestJson(url);
-  renderTasks(tasks);
+  if (workbench.hidden) {
+    return;
+  }
+  const requestVersion = ++taskListVersion;
+  const requestedStatus = statusFilter.value;
+  const params = new URLSearchParams({ limit: "50" });
+  if (requestedStatus) {
+    params.set("status", requestedStatus);
+  }
+  const payload = await requestJson("/api/tasks?" + params.toString());
+  if (
+    requestVersion !== taskListVersion
+    || workbench.hidden
+    || requestedStatus !== statusFilter.value
+  ) {
+    return;
+  }
+  renderTasks(payload.items);
 }
 
 async function loadEvalSnapshot() {
@@ -332,17 +411,120 @@ async function loadCalibrationCandidates() {
 }
 
 async function loadTask(taskId) {
-  selectedTaskId = taskId;
-  const encodedTaskId = encodeURIComponent(taskId);
-  const [task, events, artifacts] = await Promise.all([
-    requestJson(`/api/tasks/${encodedTaskId}`),
-    requestJson(`/api/tasks/${encodedTaskId}/events`),
-    requestJson(`/api/tasks/${encodedTaskId}/artifacts`),
-  ]);
-  renderTaskDetail(task, events, artifacts);
-  await loadTasks();
-  schedulePolling(task);
+  if (workbench.hidden) {
+    return;
+  }
+  const version = resetSelectedTask(taskId);
+  await drainTaskUpdates(taskId, version);
+  if (version === selectionVersion) {
+    await loadTasks();
+  }
 }
+
+function mergeById(existing, incoming) {
+  const byId = new Map(existing.map((item) => [item.id, item]));
+  for (const item of incoming) {
+    byId.set(item.id, item);
+  }
+  return [...byId.values()].sort((left, right) => left.id - right.id);
+}
+
+async function requestTaskUpdates(taskId, version) {
+  const encodedTaskId = encodeURIComponent(taskId);
+  const params = new URLSearchParams({
+    after_event_id: String(eventAfterId),
+    after_artifact_id: String(artifactAfterId),
+    limit: "100",
+  });
+  const payload = await requestJson(
+    "/api/tasks/" + encodedTaskId + "/updates?" + params.toString(),
+  );
+  if (version !== selectionVersion || taskId !== selectedTaskId) {
+    return null;
+  }
+  selectedTask = payload.task;
+  selectedEvents = mergeById(selectedEvents, payload.events.items);
+  selectedArtifacts = mergeById(selectedArtifacts, payload.artifacts.items);
+  eventAfterId = payload.events.next_after_id;
+  artifactAfterId = payload.artifacts.next_after_id;
+  renderTaskDetail(selectedTask, selectedEvents, selectedArtifacts);
+  return payload;
+}
+
+async function drainTaskUpdates(taskId, version) {
+  const previousStatus = selectedTask ? selectedTask.status : null;
+  let payload = await requestTaskUpdates(taskId, version);
+  if (!payload) {
+    return;
+  }
+  while (payload.events.has_more || payload.artifacts.has_more) {
+    payload = await requestTaskUpdates(taskId, version);
+    if (!payload) {
+      return;
+    }
+  }
+  const currentStatus = payload.task.status;
+  if (
+    previousStatus
+    && previousStatus !== currentStatus
+    && currentStatus !== "pending"
+    && currentStatus !== "running"
+  ) {
+    await loadTasks();
+  }
+  if (version !== selectionVersion || taskId !== selectedTaskId) {
+    return;
+  }
+  schedulePolling(taskId, version, currentStatus);
+}
+
+async function loadCurrentUser() {
+  try {
+    const user = await requestJson("/api/auth/me");
+    showAuthenticated(user);
+    await loadTasks();
+  } catch (error) {
+    showUnauthenticated("Log in or register to use the workbench.");
+  }
+}
+
+async function submitAuth(mode) {
+  setAuthMessage("");
+  const username = usernameInput.value.trim();
+  const password = passwordInput.value;
+  if (!username || !password) {
+    setAuthMessage("Username and password are required.", "error");
+    return;
+  }
+  try {
+    const user = await requestJson(`/api/auth/${mode}`, {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    passwordInput.value = "";
+    showAuthenticated(user);
+    await loadTasks();
+  } catch (error) {
+    setAuthMessage(error.message, "error");
+  }
+}
+
+authForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await submitAuth("login");
+});
+
+registerButton.addEventListener("click", () => {
+  submitAuth("register");
+});
+
+logoutButton.addEventListener("click", async () => {
+  try {
+    await requestJson("/api/auth/logout", { method: "POST" });
+  } finally {
+    showUnauthenticated("Logged out.");
+  }
+});
 
 taskForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -399,18 +581,21 @@ statusFilter.addEventListener("change", () => {
   loadTasks().catch((error) => setMessage(error.message, "error"));
 });
 
-function schedulePolling(task) {
+function schedulePolling(taskId, version, status) {
+  if (version !== selectionVersion || taskId !== selectedTaskId) {
+    return;
+  }
   if (pollTimer) {
     clearTimeout(pollTimer);
     pollTimer = null;
   }
-  if (task.status !== "pending" && task.status !== "running") {
+  if (status !== "pending" && status !== "running") {
     return;
   }
   pollTimer = setTimeout(() => {
-    if (selectedTaskId) {
-      loadTask(selectedTaskId).catch((error) => setMessage(error.message, "error"));
-    }
+    drainTaskUpdates(taskId, version).catch((error) => {
+      setMessage(error.message, "error");
+    });
   }, 1000);
 }
 
@@ -423,7 +608,7 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-loadTasks().catch((error) => setMessage(error.message, "error"));
+loadCurrentUser();
 loadEvalSnapshot().catch((error) => {
   evalSnapshot.className = "eval-snapshot empty";
   evalSnapshot.textContent = error.message;

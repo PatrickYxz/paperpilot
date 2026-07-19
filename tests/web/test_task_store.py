@@ -2,10 +2,19 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from paperpilot.web.task_store import TaskStore
+
+
+def _create_test_user(store, username):
+    return store.create_user(
+        username=username,
+        password_hash="hash",
+        password_salt="salt",
+    )
 
 
 def test_create_and_get_task_persists_to_sqlite(tmp_path):
@@ -23,21 +32,170 @@ def test_create_and_get_task_persists_to_sqlite(tmp_path):
     assert created.id.startswith("task_")
 
 
-def test_list_tasks_returns_newest_first(tmp_path):
+def test_store_enables_wal_and_connection_pragmas(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+
+    with store._connect() as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30_000
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
+
+
+def test_store_creates_query_indexes(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+
+    with store._connect() as conn:
+        names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+
+    assert {
+        "idx_tasks_user_created_id",
+        "idx_tasks_user_status_created_id",
+        "idx_events_task_id_id",
+        "idx_artifacts_task_id_id",
+    } <= names
+
+
+def test_task_store_uses_environment_default_path(tmp_path, monkeypatch):
+    db_path = tmp_path / "shared" / "tasks.sqlite3"
+    monkeypatch.setenv("PAPERPILOT_TASK_DB_PATH", str(db_path))
+
+    store = TaskStore()
+    task = store.create_task(question="shared worker task")
+
+    assert db_path.exists()
+    assert TaskStore().get_task(task.id) == task
+
+
+def test_list_tasks_page_returns_newest_first(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
 
     first = store.create_task(question="first", depth="quick")
     second = store.create_task(question="second", depth="deep")
 
-    assert [task.id for task in store.list_tasks()] == [second.id, first.id]
+    page = store.list_tasks_page(user_id=None, limit=100)
+    expected = sorted(
+        [first, second],
+        key=lambda task: (task.created_at, task.id),
+        reverse=True,
+    )
+
+    assert page.items == expected
 
 
-def test_list_tasks_filters_by_status(tmp_path):
+def test_list_tasks_page_filters_by_status(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
     store.create_task(question="pending task", depth="quick")
 
-    assert len(store.list_tasks(status="pending")) == 1
-    assert store.list_tasks(status="failed") == []
+    pending = store.list_tasks_page(user_id=None, status="pending", limit=100)
+    failed = store.list_tasks_page(user_id=None, status="failed", limit=100)
+
+    assert len(pending.items) == 1
+    assert failed.items == []
+
+
+def test_list_tasks_page_uses_stable_keyset_with_equal_timestamps(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    user = _create_test_user(store, "alice")
+    created = [
+        store.create_task(question=f"task {index}", user_id=user.id)
+        for index in range(5)
+    ]
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE research_tasks SET created_at = ? WHERE user_id = ?",
+            ("2026-07-14T08:00:00+00:00", user.id),
+        )
+
+    first = store.list_tasks_page(user_id=user.id, limit=2)
+    second = store.list_tasks_page(
+        user_id=user.id,
+        limit=2,
+        before_created_at=first.items[-1].created_at,
+        before_id=first.items[-1].id,
+    )
+    third = store.list_tasks_page(
+        user_id=user.id,
+        limit=2,
+        before_created_at=second.items[-1].created_at,
+        before_id=second.items[-1].id,
+    )
+
+    actual = [task.id for task in first.items + second.items + third.items]
+    assert actual == sorted((task.id for task in created), reverse=True)
+    assert len(set(actual)) == 5
+    assert [first.has_more, second.has_more, third.has_more] == [True, True, False]
+
+
+def test_list_tasks_page_filters_status_with_user_isolation(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    alice = _create_test_user(store, "alice")
+    bob = _create_test_user(store, "bob")
+    alice_pending = store.create_task(question="alice pending", user_id=alice.id)
+    alice_failed = store.create_task(question="alice failed", user_id=alice.id)
+    bob_pending = store.create_task(question="bob pending", user_id=bob.id)
+    store.update_status(alice_failed.id, "failed")
+
+    page = store.list_tasks_page(
+        user_id=alice.id,
+        status="pending",
+        limit=10,
+    )
+
+    assert [task.id for task in page.items] == [alice_pending.id]
+    assert bob_pending.id not in [task.id for task in page.items]
+    assert page.has_more is False
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_index"),
+    [
+        (None, "idx_tasks_user_created_id"),
+        ("pending", "idx_tasks_user_status_created_id"),
+    ],
+)
+def test_list_tasks_page_query_plans_use_business_indexes(
+    tmp_path,
+    status,
+    expected_index,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    user = _create_test_user(store, "alice")
+    for index in range(200):
+        store.create_task(question=f"task {index}", user_id=user.id)
+
+    if status is None:
+        query = """
+            EXPLAIN QUERY PLAN
+            SELECT *
+            FROM research_tasks
+            WHERE user_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+        """
+        params = (user.id, 11)
+    else:
+        query = """
+            EXPLAIN QUERY PLAN
+            SELECT *
+            FROM research_tasks
+            WHERE user_id = ? AND status = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+        """
+        params = (user.id, status, 11)
+
+    with store._connect() as conn:
+        plan = conn.execute(query, params).fetchall()
+
+    details = " ".join(str(row[3]) for row in plan)
+    assert expected_index in details
+    assert "USE TEMP B-TREE" not in details
 
 
 def test_create_task_rejects_empty_question(tmp_path):
@@ -54,6 +212,128 @@ def test_create_task_rejects_invalid_depth(tmp_path):
         store.create_task(question="test", depth="huge")
 
 
+def test_create_queued_task_writes_task_and_event_together(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    user = _create_test_user(store, "atomic-user")
+
+    task = store.create_queued_task(
+        question="Atomic queue",
+        depth="quick",
+        user_id=user.id,
+        execution_mode="real",
+    )
+
+    events = store.list_events_page(
+        task.id,
+        user_id=user.id,
+        after_id=0,
+        limit=100,
+    )
+    assert task.status == "pending"
+    assert events is not None
+    assert [event.type for event in events.items] == ["queued"]
+    assert events.items[0].stage == "queue"
+    assert events.items[0].message == "Task queued for real workflow."
+    assert events.items[0].payload == {
+        "depth": "quick",
+        "execution_mode": "real",
+        "simulated": False,
+    }
+
+
+def test_create_queued_task_rolls_back_task_when_event_insert_fails(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    user = _create_test_user(store, "rollback-user")
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER reject_queued_event
+            BEFORE INSERT ON task_events
+            BEGIN
+                SELECT RAISE(ABORT, 'event insert rejected');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="event insert rejected"):
+        store.create_queued_task(
+            question="Must roll back",
+            depth="standard",
+            user_id=user.id,
+            execution_mode="simulated",
+        )
+
+    page = store.list_tasks_page(user_id=user.id, limit=100)
+    assert page.items == []
+
+
+def test_create_queued_task_rejects_invalid_execution_mode(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    user = _create_test_user(store, "mode-user")
+
+    with pytest.raises(ValueError, match="invalid execution mode"):
+        store.create_queued_task(
+            question="Invalid mode",
+            depth="standard",
+            user_id=user.id,
+            execution_mode="later",
+        )
+
+
+def test_check_health_executes_a_lightweight_select(tmp_path, monkeypatch):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    statements = []
+    original_connect = store._connect
+
+    def traced_connect():
+        connection = original_connect()
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(store, "_connect", traced_connect)
+
+    assert store.check_health() is None
+    assert [statement.strip().upper() for statement in statements] == ["SELECT 1"]
+
+
+def test_check_health_propagates_connection_error(tmp_path, monkeypatch):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    connection_error = sqlite3.OperationalError("connection failed")
+
+    def failing_connect():
+        raise connection_error
+
+    monkeypatch.setattr(store, "_connect", failing_connect)
+
+    with pytest.raises(sqlite3.Error) as exc_info:
+        store.check_health()
+
+    assert exc_info.value is connection_error
+
+
+def test_check_health_propagates_select_error(tmp_path, monkeypatch):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    select_error = sqlite3.DatabaseError("select failed")
+
+    class FailingConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def execute(self, statement):
+            assert statement == "SELECT 1"
+            raise select_error
+
+    monkeypatch.setattr(store, "_connect", FailingConnection)
+
+    with pytest.raises(sqlite3.Error) as exc_info:
+        store.check_health()
+
+    assert exc_info.value is select_error
+
+
 def test_add_and_list_task_events(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
     task = store.create_task(question="track progress", depth="standard")
@@ -66,8 +346,14 @@ def test_add_and_list_task_events(tmp_path):
         payload={"depth": "standard", "simulated": True},
     )
 
-    events = store.list_events(task.id)
-    assert events == [event]
+    event_page = store.list_events_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    )
+    assert event_page is not None
+    assert event_page.items == [event]
     assert event.id == 1
     assert event.task_id == task.id
     assert event.stage == "queue"
@@ -85,10 +371,241 @@ def test_update_status_changes_updated_task(tmp_path):
     assert updated.updated_at >= task.updated_at
 
 
+def test_claim_task_allows_only_one_fresh_worker(tmp_path):
+    db_path = tmp_path / "tasks.sqlite3"
+    task = TaskStore(db_path).create_task(question="claim once")
+
+    def claim():
+        return TaskStore(db_path).claim_task(task.id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claimed = list(pool.map(lambda _: claim(), range(2)))
+
+    assert sum(result is not None for result in claimed) == 1
+    assert TaskStore(db_path).get_task(task.id).status == "running"
+
+
+def test_claim_task_allows_redelivered_worker_to_recover_running_task(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    task = store.create_task(question="recover worker loss")
+    store.update_status(task.id, "running")
+
+    assert store.claim_task(task.id) is None
+    recovered = store.claim_task(task.id, allow_running=True)
+
+    assert recovered is not None
+    assert recovered.status == "running"
+
+
+def test_claim_task_never_reopens_failed_or_completed_task(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    failed = store.create_task(question="failed")
+    completed = store.create_task(question="completed")
+    store.update_status(failed.id, "failed")
+    store.update_status(completed.id, "completed")
+
+    assert store.claim_task(failed.id, allow_running=True) is None
+    assert store.claim_task(completed.id, allow_running=True) is None
+
+
+def test_fail_pending_task_does_not_overwrite_claimed_work(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    pending = store.create_task(question="pending")
+    claimed = store.create_task(question="claimed")
+    store.claim_task(claimed.id)
+
+    failed = store.fail_pending_task(pending.id)
+    not_failed = store.fail_pending_task(claimed.id)
+
+    assert failed is not None
+    assert failed.status == "failed"
+    assert not_failed is None
+    assert store.get_task(claimed.id).status == "running"
+
+
 def test_events_for_missing_task_return_none(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
 
-    assert store.list_events("task_missing") is None
+    assert store.list_events_page(
+        "task_missing",
+        user_id=None,
+        after_id=0,
+        limit=100,
+    ) is None
+
+
+def test_event_and_artifact_pages_advance_watermarks(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    task = store.create_task(question="updates")
+    events = [
+        store.add_event(task_id=task.id, type="progress", message=f"event {index}")
+        for index in range(3)
+    ]
+    artifacts = [
+        store.add_artifact(
+            task_id=task.id,
+            kind="result",
+            title=f"artifact {index}",
+            content=f"content {index}",
+        )
+        for index in range(2)
+    ]
+
+    event_page = store.list_events_page(
+        task.id,
+        user_id=None,
+        after_id=events[0].id,
+        limit=1,
+    )
+    artifact_page = store.list_artifacts_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=1,
+    )
+
+    assert event_page is not None
+    assert event_page.items == [events[1]]
+    assert event_page.next_after_id == events[1].id
+    assert event_page.has_more is True
+    assert artifact_page is not None
+    assert artifact_page.items == [artifacts[0]]
+    assert artifact_page.next_after_id == artifacts[0].id
+    assert artifact_page.has_more is True
+
+
+def test_task_updates_returns_one_owned_snapshot(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    alice = _create_test_user(store, "alice")
+    bob = _create_test_user(store, "bob")
+    task = store.create_task(question="alice updates", user_id=alice.id)
+    event = store.add_event(task_id=task.id, type="queued", message="queued")
+    artifact = store.add_artifact(
+        task_id=task.id,
+        kind="result",
+        title="result",
+        content="answer",
+    )
+
+    updates = store.get_task_updates(
+        task.id,
+        user_id=alice.id,
+        after_event_id=0,
+        after_artifact_id=0,
+        limit=50,
+    )
+
+    assert updates is not None
+    assert updates.task == task
+    assert updates.events.items == [event]
+    assert updates.artifacts.items == [artifact]
+    assert store.get_task_updates(
+        task.id,
+        user_id=bob.id,
+        after_event_id=0,
+        after_artifact_id=0,
+        limit=50,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("after_id", "limit", "message"),
+    [
+        (-1, 1, "after_id must be non-negative"),
+        (0, 0, "limit must be between 1 and 100"),
+        (0, 101, "limit must be between 1 and 100"),
+    ],
+)
+def test_incremental_pages_reject_invalid_watermarks_and_limits(
+    tmp_path,
+    after_id,
+    limit,
+    message,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    task = store.create_task(question="bounded updates")
+
+    with pytest.raises(ValueError, match=message):
+        store.list_events_page(
+            task.id,
+            user_id=None,
+            after_id=after_id,
+            limit=limit,
+        )
+
+
+def test_task_updates_starts_explicit_transaction_before_selects(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    task = store.create_task(question="snapshot transaction")
+    statements: list[str] = []
+
+    with store._connect() as conn:
+        conn.set_trace_callback(statements.append)
+        original_connect = store._connect
+        store._connect = lambda: conn
+        try:
+            updates = store.get_task_updates(
+                task.id,
+                user_id=None,
+                after_event_id=0,
+                after_artifact_id=0,
+                limit=1,
+            )
+        finally:
+            store._connect = original_connect
+
+    assert updates is not None
+    begin_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.strip().upper() == "BEGIN"
+    )
+    first_select_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.lstrip().upper().startswith("SELECT")
+    )
+    assert begin_index < first_select_index
+
+
+@pytest.mark.parametrize(
+    ("query", "index_name"),
+    [
+        (
+            """
+            SELECT id, task_id, type, stage, message, payload_json, created_at
+            FROM task_events
+            WHERE task_id = ? AND id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            "idx_events_task_id_id",
+        ),
+        (
+            """
+            SELECT id, task_id, kind, title, content, payload_json, created_at
+            FROM task_artifacts
+            WHERE task_id = ? AND id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            "idx_artifacts_task_id_id",
+        ),
+    ],
+)
+def test_watermark_page_query_plans_use_indexes(tmp_path, query, index_name):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    task = store.create_task(question="query plan")
+
+    with store._connect() as conn:
+        plan = conn.execute(
+            f"EXPLAIN QUERY PLAN {query}",
+            (task.id, 0, 2),
+        ).fetchall()
+
+    details = " ".join(str(row[3]) for row in plan)
+    assert index_name in details
+    assert "USE TEMP B-TREE" not in details
 
 
 def test_store_migrates_legacy_task_events_table(tmp_path):
@@ -141,8 +658,14 @@ def test_store_migrates_legacy_task_events_table(tmp_path):
         payload={"migrated": True},
     )
 
-    events = store.list_events("task_legacy")
-    assert events is not None
+    event_page = store.list_events_page(
+        "task_legacy",
+        user_id=None,
+        after_id=0,
+        limit=100,
+    )
+    assert event_page is not None
+    events = event_page.items
     assert events[0].stage is None
     assert events[0].payload == {}
     assert events[1].stage == "prepare"
@@ -161,8 +684,14 @@ def test_add_and_list_task_artifacts(tmp_path):
         payload={"simulated": True},
     )
 
-    artifacts = store.list_artifacts(task.id)
-    assert artifacts == [artifact]
+    artifact_page = store.list_artifacts_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    )
+    assert artifact_page is not None
+    assert artifact_page.items == [artifact]
     assert artifact.id == 1
     assert artifact.kind == "result"
     assert artifact.payload == {"simulated": True}
@@ -171,4 +700,9 @@ def test_add_and_list_task_artifacts(tmp_path):
 def test_artifacts_for_missing_task_return_none(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
 
-    assert store.list_artifacts("task_missing") is None
+    assert store.list_artifacts_page(
+        "task_missing",
+        user_id=None,
+        after_id=0,
+        limit=100,
+    ) is None

@@ -1,19 +1,48 @@
 """FastAPI app for the local PaperPilot Web workbench."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Literal
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from paperpilot.web.auth import (
+    SESSION_COOKIE_NAME,
+    AuthService,
+    InvalidCredentialsError,
+    UsernameAlreadyExistsError,
+)
+from paperpilot.web.config import WebRuntimeConfig
 from paperpilot.web.eval_summary import (
     build_eval_snapshot,
     list_calibration_candidates,
 )
-from paperpilot.web.task_store import TaskStore
+from paperpilot.web.observability import (
+    RUNTIME_LOGGER_NAME,
+    RequestObservabilityMiddleware,
+    configure_paperpilot_logging,
+)
+from paperpilot.web.pagination import (
+    InvalidTaskCursor,
+    decode_task_cursor,
+    encode_task_cursor,
+)
+from paperpilot.web.task_executor import (
+    TaskExecutorAtCapacityError,
+    TaskExecutorLike,
+    TaskExecutorShuttingDownError,
+    build_task_executor,
+)
+from paperpilot.web.task_store import (
+    TaskArtifactBatch,
+    TaskEventBatch,
+    TaskStore,
+    WebUser,
+)
 from paperpilot.web.workflow import WorkflowRunner
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -23,6 +52,17 @@ class CreateTaskRequest(BaseModel):
     question: str = Field(..., min_length=1)
     depth: Literal["quick", "standard", "deep"] = "standard"
     execution_mode: Literal["simulated", "real"] = "simulated"
+
+
+class AuthRequest(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=6)
+
+
+class UserResponse(BaseModel):
+    id: str
+    username: str
+    created_at: str
 
 
 class TaskResponse(BaseModel):
@@ -54,82 +94,391 @@ class TaskArtifactResponse(BaseModel):
     created_at: str
 
 
+class TaskPageResponse(BaseModel):
+    items: list[TaskResponse]
+    next_cursor: str | None
+    has_more: bool
+
+
+class TaskEventPageResponse(BaseModel):
+    items: list[TaskEventResponse]
+    next_after_id: int
+    has_more: bool
+
+
+class TaskArtifactPageResponse(BaseModel):
+    items: list[TaskArtifactResponse]
+    next_after_id: int
+    has_more: bool
+
+
+class TaskUpdatesResponse(BaseModel):
+    task: TaskResponse
+    events: TaskEventPageResponse
+    artifacts: TaskArtifactPageResponse
+
+
+def _event_page_dict(batch: TaskEventBatch) -> dict:
+    return {
+        "items": [event.to_dict() for event in batch.items],
+        "next_after_id": batch.next_after_id,
+        "has_more": batch.has_more,
+    }
+
+
+def _artifact_page_dict(batch: TaskArtifactBatch) -> dict:
+    return {
+        "items": [artifact.to_dict() for artifact in batch.items],
+        "next_after_id": batch.next_after_id,
+        "has_more": batch.has_more,
+    }
+
+
 def create_app(
     task_store: TaskStore | None = None,
     *,
     simulation_delay_seconds: float = 0.4,
     workflow_runner: WorkflowRunner | None = None,
+    task_executor: TaskExecutorLike | None = None,
+    runtime_config: WebRuntimeConfig | None = None,
 ) -> FastAPI:
+    config = runtime_config or WebRuntimeConfig.from_env()
     store = task_store or TaskStore()
     runner = workflow_runner or WorkflowRunner(
         store,
         delay_seconds=simulation_delay_seconds,
     )
+    executor = task_executor or build_task_executor(runner, config=config)
+    auth = AuthService(store)
+    configure_paperpilot_logging(config)
+    runtime_logger = logging.getLogger(RUNTIME_LOGGER_NAME)
     app = FastAPI(title="PaperPilot Web Workbench")
+    app.add_middleware(RequestObservabilityMiddleware, config=config)
+    app.state.runtime_config = config
+    app.state.task_store = store
+    app.state.task_executor = executor
+    if hasattr(app, "add_event_handler"):
+        app.add_event_handler("shutdown", executor.shutdown)
+    else:
+        app.router.add_event_handler("shutdown", executor.shutdown)
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    def require_user(
+        request: Request,
+        session_token: str | None = Cookie(
+            default=None,
+            alias=SESSION_COOKIE_NAME,
+        ),
+    ) -> WebUser:
+        user = auth.get_user_for_token(session_token)
+        if user is None:
+            raise HTTPException(status_code=401, detail="authentication required")
+        request.state.user_id = user.id
+        return user
+
+    def set_session_cookie(response: Response, token: str) -> None:
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=token,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/health/live", include_in_schema=False)
+    def health_live() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/health/ready", include_in_schema=False)
+    def health_ready() -> Response:
+        checks = {"database": "ok", "executor": "ok"}
+        try:
+            store.check_health()
+        except Exception:
+            checks["database"] = "failed"
+        if executor.is_shutdown:
+            checks["executor"] = "failed"
+        if "failed" in checks.values():
+            return JSONResponse(
+                status_code=503,
+                content={"status": "not_ready", "checks": checks},
+            )
+        return JSONResponse(status_code=200, content={"status": "ready"})
+
+    @app.post("/api/auth/register", response_model=UserResponse, status_code=201)
+    def register(payload: AuthRequest, response: Response) -> dict[str, str]:
+        try:
+            session = auth.register(
+                username=payload.username,
+                password=payload.password,
+            )
+        except UsernameAlreadyExistsError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="username already exists",
+            ) from exc
+        set_session_cookie(response, session.token)
+        return session.user.to_public_dict()
+
+    @app.post("/api/auth/login", response_model=UserResponse)
+    def login(payload: AuthRequest, response: Response) -> dict[str, str]:
+        try:
+            session = auth.login(
+                username=payload.username,
+                password=payload.password,
+            )
+        except InvalidCredentialsError as exc:
+            raise HTTPException(
+                status_code=401,
+                detail="invalid username or password",
+            ) from exc
+        set_session_cookie(response, session.token)
+        return session.user.to_public_dict()
+
+    @app.post("/api/auth/logout", status_code=204)
+    def logout(
+        response: Response,
+        session_token: str | None = Cookie(
+            default=None,
+            alias=SESSION_COOKIE_NAME,
+        ),
+    ) -> None:
+        auth.logout(session_token)
+        response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+        return None
+
+    @app.get("/api/auth/me", response_model=UserResponse)
+    def get_current_user(user: WebUser = Depends(require_user)) -> dict[str, str]:
+        return user.to_public_dict()
+
     @app.post("/api/tasks", response_model=TaskResponse, status_code=201)
     def create_task(
         payload: CreateTaskRequest,
-        background_tasks: BackgroundTasks,
+        request: Request,
+        user: WebUser = Depends(require_user),
     ) -> dict[str, str]:
-        task = store.create_task(
-            question=payload.question,
-            depth=payload.depth,
-        )
-        store.add_event(
-            task_id=task.id,
-            type="queued",
-            stage="queue",
-            message=f"Task queued for {payload.execution_mode} workflow.",
-            payload={
-                "depth": task.depth,
-                "execution_mode": payload.execution_mode,
-                "simulated": payload.execution_mode == "simulated",
-            },
-        )
-        if payload.execution_mode == "real":
-            background_tasks.add_task(runner.run_real, task.id)
-        else:
-            background_tasks.add_task(runner.run_simulated, task.id)
-        return task.to_dict()
+        try:
+            reservation = executor.reserve()
+        except TaskExecutorAtCapacityError as exc:
+            runtime_logger.warning(
+                "Task admission rejected",
+                extra={
+                    "event": "task.admission_rejected",
+                    "request_id": request.state.request_id,
+                    "user_id": user.id,
+                    "environment": config.environment,
+                    "reason": "capacity",
+                    "executor": config.task_executor,
+                    "workers": config.thread_workers,
+                    "queue_capacity": config.thread_queue_capacity,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="task executor is at capacity",
+                headers={
+                    "Retry-After": str(config.overload_retry_after_seconds)
+                },
+            ) from exc
+        except TaskExecutorShuttingDownError as exc:
+            runtime_logger.warning(
+                "Task admission rejected",
+                extra={
+                    "event": "task.admission_rejected",
+                    "request_id": request.state.request_id,
+                    "user_id": user.id,
+                    "environment": config.environment,
+                    "reason": "shutdown",
+                    "executor": config.task_executor,
+                    "workers": config.thread_workers,
+                    "queue_capacity": config.thread_queue_capacity,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="task executor is shutting down",
+            ) from exc
 
-    @app.get("/api/tasks", response_model=list[TaskResponse])
+        try:
+            task = store.create_queued_task(
+                question=payload.question,
+                depth=payload.depth,
+                user_id=user.id,
+                execution_mode=payload.execution_mode,
+            )
+        except Exception:
+            reservation.release()
+            raise
+
+        response_payload = task.to_dict()
+        try:
+            reservation.submit(task.id, payload.execution_mode)
+        except Exception as exc:
+            try:
+                failed_task = store.fail_pending_task(task.id)
+                if failed_task is None:
+                    current_task = store.get_task(task.id)
+                    if current_task is not None and current_task.status in {
+                        "running",
+                        "completed",
+                    }:
+                        return response_payload
+                else:
+                    store.add_event(
+                        task_id=task.id,
+                        type="failed",
+                        stage="queue",
+                        message="Task queue submission failed.",
+                        payload={
+                            "execution_mode": payload.execution_mode,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+            except Exception as cleanup_exc:
+                runtime_logger.exception(
+                    "Task submission cleanup failed",
+                    extra={
+                        "event": "task.submission_cleanup_failed",
+                        "request_id": request.state.request_id,
+                        "user_id": user.id,
+                        "environment": config.environment,
+                        "exception_type": type(cleanup_exc).__name__,
+                    },
+                )
+            raise HTTPException(
+                status_code=503,
+                detail="task queue unavailable",
+            ) from exc
+        return response_payload
+
+    @app.get("/api/tasks", response_model=TaskPageResponse)
     def list_tasks(
         status: Literal["pending", "running", "completed", "failed"] | None = Query(
             default=None
         ),
-    ) -> list[dict[str, str]]:
-        return [task.to_dict() for task in store.list_tasks(status=status)]
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = Query(default=None),
+        user: WebUser = Depends(require_user),
+    ) -> dict:
+        before_created_at = None
+        before_id = None
+        if cursor is not None:
+            try:
+                position = decode_task_cursor(
+                    cursor,
+                    expected_user_id=user.id,
+                    expected_status=status,
+                )
+            except InvalidTaskCursor as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail="invalid task cursor",
+                ) from exc
+            before_created_at = position.created_at
+            before_id = position.task_id
+
+        page = store.list_tasks_page(
+            user_id=user.id,
+            status=status,
+            limit=limit,
+            before_created_at=before_created_at,
+            before_id=before_id,
+        )
+        next_cursor = None
+        if page.has_more:
+            final_task = page.items[-1]
+            next_cursor = encode_task_cursor(
+                user_id=user.id,
+                status=status,
+                created_at=final_task.created_at,
+                task_id=final_task.id,
+            )
+        return {
+            "items": [task.to_dict() for task in page.items],
+            "next_cursor": next_cursor,
+            "has_more": page.has_more,
+        }
 
     @app.get("/api/tasks/{task_id}", response_model=TaskResponse)
-    def get_task(task_id: str) -> dict[str, str]:
-        task = store.get_task(task_id)
+    def get_task(
+        task_id: str,
+        user: WebUser = Depends(require_user),
+    ) -> dict[str, str]:
+        task = store.get_task(task_id, user_id=user.id)
         if task is None:
             raise HTTPException(status_code=404, detail="task not found")
         return task.to_dict()
 
-    @app.get("/api/tasks/{task_id}/events", response_model=list[TaskEventResponse])
-    def list_task_events(task_id: str) -> list[dict[str, int | str | dict | None]]:
-        events = store.list_events(task_id)
-        if events is None:
+    @app.get(
+        "/api/tasks/{task_id}/events",
+        response_model=TaskEventPageResponse,
+    )
+    def list_task_events(
+        task_id: str,
+        after_id: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=100),
+        user: WebUser = Depends(require_user),
+    ) -> dict:
+        page = store.list_events_page(
+            task_id,
+            user_id=user.id,
+            after_id=after_id,
+            limit=limit,
+        )
+        if page is None:
             raise HTTPException(status_code=404, detail="task not found")
-        return [event.to_dict() for event in events]
+        return _event_page_dict(page)
 
     @app.get(
         "/api/tasks/{task_id}/artifacts",
-        response_model=list[TaskArtifactResponse],
+        response_model=TaskArtifactPageResponse,
     )
-    def list_task_artifacts(task_id: str) -> list[dict[str, int | str | dict]]:
-        artifacts = store.list_artifacts(task_id)
-        if artifacts is None:
+    def list_task_artifacts(
+        task_id: str,
+        after_id: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=100),
+        user: WebUser = Depends(require_user),
+    ) -> dict:
+        page = store.list_artifacts_page(
+            task_id,
+            user_id=user.id,
+            after_id=after_id,
+            limit=limit,
+        )
+        if page is None:
             raise HTTPException(status_code=404, detail="task not found")
-        return [artifact.to_dict() for artifact in artifacts]
+        return _artifact_page_dict(page)
+
+    @app.get(
+        "/api/tasks/{task_id}/updates",
+        response_model=TaskUpdatesResponse,
+    )
+    def get_task_updates(
+        task_id: str,
+        after_event_id: int = Query(default=0, ge=0),
+        after_artifact_id: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=100),
+        user: WebUser = Depends(require_user),
+    ) -> dict:
+        updates = store.get_task_updates(
+            task_id,
+            user_id=user.id,
+            after_event_id=after_event_id,
+            after_artifact_id=after_artifact_id,
+            limit=limit,
+        )
+        if updates is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        return {
+            "task": updates.task.to_dict(),
+            "events": _event_page_dict(updates.events),
+            "artifacts": _artifact_page_dict(updates.artifacts),
+        }
 
     @app.get("/api/eval/summary")
     def get_eval_summary() -> dict:

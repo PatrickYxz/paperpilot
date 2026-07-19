@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 
-from paperpilot.conversation import ConversationSession
+from paperpilot.conversation import ConversationSession, run
 from paperpilot.bulk_input import BulkPaperInputDetector
 from paperpilot.core.adapter import ParsedResponse, Tool
 from paperpilot.document_store import DocumentStore
@@ -47,6 +48,27 @@ class FakeClient:
                 for result in results
             ],
         })
+
+
+class FakeRuntime:
+    def __init__(self) -> None:
+        self.lease_count = 0
+        self.close_count = 0
+
+    @contextmanager
+    def lease_tools(self):
+        self.lease_count += 1
+        yield [
+            Tool(
+                name="mcp__fake__search",
+                description="fake search",
+                input_schema={"type": "object", "properties": {}},
+                handler=lambda args: "result",
+            )
+        ]
+
+    def close(self) -> None:
+        self.close_count += 1
 
 
 def test_session_reuses_messages_across_asks_and_resets_guardrail_each_turn():
@@ -99,6 +121,27 @@ def test_session_close_closes_mcp():
     session.close()
 
     assert mcps[0].closed == 1
+
+
+def test_run_with_runtime_reuses_mcp_but_isolates_task_messages(monkeypatch):
+    runtime = FakeRuntime()
+    seen_messages: list[list[dict]] = []
+    replies = iter(["reply-1", "reply-2"])
+
+    monkeypatch.setattr(
+        "paperpilot.conversation.LLMClient",
+        lambda: FakeClient(next(replies), seen_messages),
+    )
+
+    run("first task", mcp_runtime=runtime)
+    run("second task", mcp_runtime=runtime)
+
+    assert runtime.lease_count == 2
+    assert runtime.close_count == 0
+    assert seen_messages == [
+        [{"role": "user", "content": "first task"}],
+        [{"role": "user", "content": "second task"}],
+    ]
 
 
 def test_session_reset_rebuilds_clean_conversation():

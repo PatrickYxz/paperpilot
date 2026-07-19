@@ -100,6 +100,148 @@ Runtime artifacts are written under `data/eval/` and `data/traces/`. Large
 JSONL result files and traces are intentionally ignored by git; the committed
 summary is the portable eval artifact.
 
+## Web Workbench With Celery
+
+The Web workbench defaults to its in-process thread executor, so local usage
+does not require Redis. For a broker-backed queue and long-lived worker processes
+that reuse one MCP runtime per process, start Redis and select the Celery
+executor before starting the API:
+
+```bash
+docker compose up -d redis
+
+export PAPERPILOT_TASK_EXECUTOR=celery
+export PAPERPILOT_CELERY_BROKER_URL=redis://127.0.0.1:6379/0
+export PAPERPILOT_TASK_DB_PATH="$PWD/data/web/tasks.sqlite3"
+```
+
+The default worker limits are a 3-hour soft limit, a 3-hour 5-minute hard
+limit, and a 4-hour Redis visibility timeout. Override them together when a
+deployment needs different limits; the visibility timeout must remain greater
+than the hard limit:
+
+```bash
+export PAPERPILOT_TASK_SOFT_TIME_LIMIT_SECONDS=10800
+export PAPERPILOT_TASK_TIME_LIMIT_SECONDS=11100
+export PAPERPILOT_REDIS_VISIBILITY_TIMEOUT_SECONDS=14400
+```
+
+Start a worker in one terminal. Each prefork child lazily loads its MCP runtime
+on its first real research task and reuses it for later tasks. Start with two
+children and adjust only after measuring model memory use:
+
+```bash
+.venv/bin/celery -A paperpilot.web.celery_app:celery_app worker \
+  --loglevel=INFO --concurrency=2
+```
+
+Start the API in another terminal with the same environment variables and
+working directory so the API and workers share the same SQLite database:
+
+```bash
+.venv/bin/uvicorn paperpilot.web.app:app \
+  --host 127.0.0.1 --port 8000 --workers 2 --no-access-log
+```
+
+Celery delivery is **at-least-once**. PaperPilot atomically claims pending
+tasks so duplicate messages cannot run the same task concurrently; a message
+marked as redelivered may reclaim a running task after worker loss. One
+reliability window remains: SQLite task creation and Redis publication are not
+one transaction. If the API process exits after the database commit but before
+broker publication, a pending task can be left without a queue message. A
+transactional outbox or reconciler is required before treating this deployment
+as lossless across process crashes. If publication returns an ambiguous error,
+the API only changes `pending` to `failed`; it never overwrites work that a
+worker has already claimed as `running` or `completed`.
+
+## Web Runtime Protection
+
+For the local, in-process thread executor, configure the runtime before
+starting the API:
+
+```bash
+export PAPERPILOT_TASK_EXECUTOR=thread
+export PAPERPILOT_THREAD_WORKERS=2
+export PAPERPILOT_THREAD_QUEUE_CAPACITY=4
+export PAPERPILOT_OVERLOAD_RETRY_AFTER_SECONDS=1
+export PAPERPILOT_LOG_LEVEL=INFO
+export PAPERPILOT_LOG_FORMAT=json
+export PAPERPILOT_SLOW_REQUEST_MS=1000
+export PAPERPILOT_ENV=development
+```
+
+Thread admission capacity is `workers + queue capacity` per Uvicorn process.
+The defaults therefore allow 6 unfinished tasks per Uvicorn process: 2 running
+and 4 queued. With two Uvicorn workers and the defaults, the theoretical
+aggregate capacity across both processes is 12, but load distribution is not
+guaranteed to be even.
+When that per-process capacity is full, task creation returns `503` with a
+`Retry-After` header and creates no task or event database rows.
+
+`/health/live` has no dependency probe. `/health/ready` checks SQLite with
+`SELECT 1` and only whether the executor has begun shutdown; Redis, MCP, and
+temporary executor saturation do not fail readiness. PaperPilot accepts an
+incoming `X-Request-ID` only when it matches `[A-Za-z0-9._:-]` and is at most
+128 characters; otherwise it generates a new request ID.
+
+When PaperPilot structured access logging is active, use `--no-access-log` to
+disable duplicate Uvicorn access logs:
+
+```bash
+./.venv/bin/uvicorn paperpilot.web.app:app \
+  --host 127.0.0.1 --port 8000 --workers 2 --no-access-log
+```
+
+Run the deterministic admission benchmark after changing thread-capacity
+settings. It checks status and database-row counts, reports latency summaries
+without enforcing machine-specific timing thresholds, and verifies that a
+released runner restores capacity:
+
+```bash
+./.venv/bin/python scripts/benchmark_web_admission.py \
+  --workers 2 --queue-capacity 4 --requests 12
+```
+
+Prometheus/OpenTelemetry and cross-process rate limiting remain separate
+deployment-topology work.
+
+## Web Read Performance
+
+The Web task store configures SQLite in WAL mode and enables foreign-key
+enforcement, a 30-second busy timeout, and `synchronous=NORMAL` on each
+connection. WAL allows API reads to continue while a worker commits a write,
+but SQLite still has only one writer at a time. It remains a local, shared-file
+design rather than a general high-write-concurrency database.
+
+All three list APIs return bounded pagination envelopes. Task lists use
+`{items, next_cursor, has_more}` with keyset cursors; event and artifact lists
+use `{items, next_after_id, has_more}` with numeric watermarks. The default page
+size is 50 and the maximum is 100. `/api/tasks/{task_id}/updates` reads the
+current task plus event and artifact pages in one explicit SQLite read
+transaction, so the combined response comes from one consistent snapshot.
+
+While a task is `pending` or `running`, the Web client polls only the updates
+endpoint once per second. It advances the event and artifact watermarks instead
+of repeatedly downloading complete histories or the full task list.
+
+Run the reproducible store benchmark from the repository root:
+
+```bash
+.venv/bin/python scripts/benchmark_web_task_store.py \
+  --tasks 2000 --writes 200 --workers 8 --page-size 50
+```
+
+The command uses a temporary database unless `--db-path` is provided and emits
+one JSON object with bounded-page size and latency, SQLite settings and indexes,
+query plans, and concurrent-write latency and errors. Timings are
+machine-dependent and are intended for same-machine comparisons, not fixed
+performance thresholds.
+
+Move the task store to PostgreSQL when sustained concurrent writes, multiple
+application hosts, or lock contention exceed this local SQLite design. WAL and
+`busy_timeout` reduce local contention; they do not remove SQLite's
+single-writer boundary.
+
 ## Tech Stack
 
 - **LLM**: DeepSeek through Anthropic-compatible messages API

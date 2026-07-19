@@ -17,8 +17,10 @@ import time
 from contextlib import AsyncExitStack
 from pathlib import Path
 
+from anyio import BrokenResourceError, ClosedResourceError, EndOfStream
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.shared.exceptions import McpError
 
 from paperpilot.core.adapter import Tool
 
@@ -37,6 +39,21 @@ class MCPToolError(RuntimeError):
 
 class MCPToolTimeout(RuntimeError):
     """运行期 tool 调用超过 MCP_TOOL_TIMEOUT。"""
+
+
+class MCPTransportError(RuntimeError):
+    """MCP session transport closed or became unusable."""
+
+
+_TRANSPORT_ERRORS = (
+    McpError,
+    BrokenResourceError,
+    ClosedResourceError,
+    EndOfStream,
+    ConnectionError,
+    EOFError,
+    OSError,
+)
 
 
 class MCPClient:
@@ -143,6 +160,10 @@ class MCPClient:
                 fut.cancel()
                 raise MCPToolTimeout(
                     f"mcp__{server}__{tool} > {MCP_TOOL_TIMEOUT}s"
+                ) from e
+            except _TRANSPORT_ERRORS as e:
+                raise MCPTransportError(
+                    f"mcp__{server}__{tool} transport failed: {e}"
                 ) from e
             text = "\n".join(
                 b.text for b in result.content if hasattr(b, "text")

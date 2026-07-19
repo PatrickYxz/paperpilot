@@ -20,8 +20,18 @@ def test_simulated_workflow_writes_events_status_and_artifact(tmp_path):
     runner.run_simulated(task.id)
 
     updated = store.get_task(task.id)
-    events = store.list_events(task.id)
-    artifacts = store.list_artifacts(task.id)
+    events = store.list_events_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    ).items
+    artifacts = store.list_artifacts_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    ).items
 
     assert updated is not None
     assert updated.status == "completed"
@@ -51,8 +61,18 @@ def test_real_workflow_uses_real_runner_and_writes_result(tmp_path):
     runner.run_real(task.id)
 
     updated = store.get_task(task.id)
-    events = store.list_events(task.id)
-    artifacts = store.list_artifacts(task.id)
+    events = store.list_events_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    ).items
+    artifacts = store.list_artifacts_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    ).items
 
     assert updated is not None
     assert updated.status == "completed"
@@ -78,8 +98,18 @@ def test_real_workflow_persists_agent_events_from_runner(tmp_path):
 
     runner.run_real(task.id)
 
-    events = store.list_events(task.id)
-    artifacts = store.list_artifacts(task.id)
+    events = store.list_events_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    ).items
+    artifacts = store.list_artifacts_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    ).items
 
     assert events is not None
     assert [event.stage for event in events] == [
@@ -107,8 +137,18 @@ def test_real_workflow_failure_marks_task_failed(tmp_path):
     runner.run_real(task.id)
 
     updated = store.get_task(task.id)
-    events = store.list_events(task.id)
-    artifacts = store.list_artifacts(task.id)
+    events = store.list_events_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    ).items
+    artifacts = store.list_artifacts_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    ).items
 
     assert updated is not None
     assert updated.status == "failed"

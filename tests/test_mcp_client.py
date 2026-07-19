@@ -5,9 +5,14 @@ import json
 import sys
 from pathlib import Path
 
+import anyio
 import pytest
 
-from paperpilot.tools.mcp_client import MCPClient, _resolve_command
+from paperpilot.tools.mcp_client import (
+    MCPClient,
+    MCPTransportError,
+    _resolve_command,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "echo_server.py"
 
@@ -75,3 +80,31 @@ def test_python_command_resolves_to_current_interpreter():
     assert _resolve_command("python") == sys.executable
     assert _resolve_command("python.exe") == sys.executable
     assert _resolve_command("custom-python") == "custom-python"
+
+
+def test_closed_mcp_stream_is_translated_to_transport_error(tmp_path, monkeypatch):
+    class FakeSession:
+        async def call_tool(self, tool, args):
+            return None
+
+    class FailedFuture:
+        def result(self, timeout):
+            raise anyio.ClosedResourceError
+
+    client = MCPClient(tmp_path / "manifest.json")
+    client._loop = object()
+    client._sessions["fake"] = FakeSession()
+
+    def fake_run_coroutine_threadsafe(coro, loop):
+        coro.close()
+        return FailedFuture()
+
+    monkeypatch.setattr(
+        "paperpilot.tools.mcp_client.asyncio.run_coroutine_threadsafe",
+        fake_run_coroutine_threadsafe,
+    )
+
+    handler = client._make_handler("fake", "search")
+
+    with pytest.raises(MCPTransportError, match="mcp__fake__search"):
+        handler({"query": "test"})

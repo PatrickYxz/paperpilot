@@ -12,10 +12,31 @@
         <h1>PaperPilot</h1>
         <p>Local research task workbench</p>
       </div>
-      <button id="refreshTasks" type="button">Refresh</button>
+      <div class="auth-panel" aria-label="Authentication">
+        <form id="authForm" class="auth-form">
+          <input id="username" name="username" autocomplete="username" placeholder="Username" required />
+          <input
+            id="password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            placeholder="Password"
+            minlength="6"
+            required
+          />
+          <button id="loginButton" type="submit">Log In</button>
+          <button id="registerButton" type="button" class="secondary-button">Register</button>
+        </form>
+        <div id="currentUser" class="current-user" hidden>
+          <span id="currentUsername"></span>
+          <button id="logoutButton" type="button" class="secondary-button">Log Out</button>
+          <button id="refreshTasks" type="button">Refresh</button>
+        </div>
+        <p id="authMessage" class="message" role="status"></p>
+      </div>
     </header>
 
-    <main class="layout">
+    <main id="workbench" class="layout" hidden>
       <section class="panel create-panel" aria-labelledby="createTitle">
         <h2 id="createTitle">New Research Task</h2>
         <form id="taskForm">
