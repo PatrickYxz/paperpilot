@@ -5,7 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from paperpilot.agent.policy import RunPolicy
+from paperpilot.agent import store as agent_store
 from paperpilot.agent.store import ActiveRunExistsError, SQLiteRunStore, utc_now
+from paperpilot.core.adapter import ToolResult
 from paperpilot.web.task_store import TaskStore
 
 
@@ -242,6 +244,533 @@ def test_create_run_requires_a_real_research_task_and_health_probe_passes(tmp_pa
         )
 
     assert store.check_health() is None
+
+
+class MutableClock:
+    def __init__(self) -> None:
+        self.value = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
+
+    def now(self) -> datetime:
+        return self.value
+
+    def advance(self, *, seconds: float) -> None:
+        self.value += timedelta(seconds=seconds)
+
+
+@pytest.fixture
+def clock():
+    return MutableClock()
+
+
+@pytest.fixture
+def run_store(tmp_path, clock):
+    db_path = tmp_path / "tasks.sqlite3"
+    task = TaskStore(db_path).create_task(question="Question")
+    store = SQLiteRunStore(db_path, clock=clock.now)
+    run = store.create_run(
+        task_id=task.id,
+        policy=RunPolicy.for_depth("standard"),
+        initial_messages=[{"role": "user", "content": task.question}],
+        runtime_state={"turn_count": 0, "tokens_used": 0},
+    )
+    return store, run
+
+
+def test_only_current_unexpired_lease_owner_can_start_and_commit_step(run_store, clock):
+    store, run = run_store
+    claimed = store.claim_run(run.id, owner_id="owner-a", lease_seconds=30)
+
+    assert claimed is not None
+    assert claimed.status == "running"
+    assert claimed.owner_id == "owner-a"
+    assert store.claim_run(run.id, owner_id="owner-b", lease_seconds=30) is None
+    step = store.start_step(
+        run_id=run.id,
+        owner_id="owner-a",
+        kind="llm",
+        input_data={"message_count": 1},
+    )
+    with pytest.raises(agent_store.RunLeaseLostError):
+        store.complete_step_and_checkpoint(
+            step_id=step.id,
+            run_id=run.id,
+            owner_id="owner-b",
+            output_data={"tool_calls": []},
+            messages=[{"role": "assistant", "content": "answer"}],
+            runtime_state={"turn_count": 1, "tokens_used": 10},
+        )
+
+    clock.advance(seconds=31)
+    assert store.has_valid_lease(run.id, "owner-a") is False
+    with pytest.raises(agent_store.RunLeaseLostError):
+        store.start_step(
+            run_id=run.id,
+            owner_id="owner-a",
+            kind="llm",
+            input_data={},
+        )
+
+
+def test_lease_renewal_and_expired_reclaim_are_owner_safe(run_store, clock):
+    store, run = run_store
+    assert store.claim_run(run.id, owner_id="owner-a", lease_seconds=10) is not None
+    clock.advance(seconds=5)
+    assert store.renew_lease(run.id, owner_id="owner-b", lease_seconds=30) is False
+    assert store.renew_lease(run.id, owner_id="owner-a", lease_seconds=30) is True
+    clock.advance(seconds=29)
+    assert store.claim_run(run.id, owner_id="owner-b", lease_seconds=30) is None
+    clock.advance(seconds=2)
+
+    reclaimed = store.claim_run(run.id, owner_id="owner-b", lease_seconds=30)
+
+    assert reclaimed is not None
+    assert reclaimed.owner_id == "owner-b"
+    assert store.has_valid_lease(run.id, "owner-a") is False
+
+
+def test_completed_step_checkpoint_and_tool_success_commit_atomically(run_store):
+    store, run = run_store
+    store.claim_run(run.id, owner_id="worker", lease_seconds=30)
+    step = store.start_step(
+        run_id=run.id,
+        owner_id="worker",
+        kind="tool",
+        input_data={"tool_name": "mcp__colbert__search"},
+    )
+    execution = store.start_tool_execution(
+        run_id=run.id,
+        step_id=step.id,
+        tool_use_id="call-1",
+        tool_name="mcp__colbert__search",
+        arguments={"query": "attention"},
+        classification="read_only",
+    )
+    store.complete_step_and_checkpoint(
+        step_id=step.id,
+        run_id=run.id,
+        owner_id="worker",
+        output_data={"content": "full result"},
+        messages=[{"role": "user", "content": "full result"}],
+        runtime_state={"turn_count": 1, "tokens_used": 10},
+        tool_completion={
+            "execution_id": execution.id,
+            "tool_result": ToolResult(id="call-1", content="full result"),
+            "result_preview": "full result",
+            "duration_ms": 12,
+        },
+    )
+
+    stored_run = store.get_run(run.id)
+    stored_step = store.list_steps(run.id, after_sequence=0, limit=10).items[0]
+    stored_execution = store.get_tool_execution(execution.id)
+    assert stored_run.current_step == 1
+    assert store.get_latest_checkpoint(run.id).step_sequence == 1
+    assert stored_step.status == "completed"
+    assert stored_execution.status == "completed"
+    assert stored_execution.result_preview == "full result"
+    assert stored_execution.duration_ms == 12
+
+
+def test_tool_completion_conflict_rolls_back_step_checkpoint_and_run(run_store):
+    store, run = run_store
+    store.claim_run(run.id, owner_id="worker", lease_seconds=30)
+    step = store.start_step(
+        run_id=run.id, owner_id="worker", kind="tool", input_data={}
+    )
+    execution = store.start_tool_execution(
+        run_id=run.id,
+        step_id=step.id,
+        tool_use_id="call-1",
+        tool_name="mcp__colbert__search",
+        arguments={"query": "attention"},
+        classification="read_only",
+    )
+    store.fail_tool_execution(
+        execution.id,
+        failure_class="transport",
+        failure_message="closed",
+        duration_ms=4,
+    )
+
+    with pytest.raises(agent_store.ToolExecutionConflictError):
+        store.complete_step_and_checkpoint(
+            step_id=step.id,
+            run_id=run.id,
+            owner_id="worker",
+            output_data={"content": "late success"},
+            messages=[{"role": "user", "content": "late success"}],
+            runtime_state={"turn_count": 1},
+            tool_completion={
+                "execution_id": execution.id,
+                "tool_result": ToolResult(id="call-1", content="late success"),
+                "result_preview": "late success",
+                "duration_ms": 5,
+            },
+        )
+
+    assert store.get_run(run.id).current_step == 0
+    assert store.get_latest_checkpoint(run.id).step_sequence == 0
+    assert store.list_steps(run.id, after_sequence=0, limit=10).items[0].status == "started"
+
+
+def test_checkpoint_write_failure_rolls_back_tool_step_and_run(run_store):
+    store, run = run_store
+    store.claim_run(run.id, owner_id="worker", lease_seconds=30)
+    step = store.start_step(
+        run_id=run.id, owner_id="worker", kind="tool", input_data={}
+    )
+    execution = store.start_tool_execution(
+        run_id=run.id,
+        step_id=step.id,
+        tool_use_id="call-1",
+        tool_name="mcp__colbert__search",
+        arguments={"query": "attention"},
+        classification="read_only",
+    )
+    with store._connect() as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER reject_first_runtime_checkpoint
+            BEFORE INSERT ON run_checkpoints
+            WHEN NEW.step_sequence = 1
+            BEGIN
+                SELECT RAISE(ABORT, 'injected checkpoint failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected checkpoint failure"):
+        store.complete_step_and_checkpoint(
+            step_id=step.id,
+            run_id=run.id,
+            owner_id="worker",
+            output_data={"content": "result"},
+            messages=[{"role": "user", "content": "result"}],
+            runtime_state={"turn_count": 1},
+            tool_completion={
+                "execution_id": execution.id,
+                "tool_result": ToolResult(id="call-1", content="result"),
+                "result_preview": "result",
+                "duration_ms": 5,
+            },
+        )
+
+    assert store.get_run(run.id).current_step == 0
+    assert store.get_latest_checkpoint(run.id).step_sequence == 0
+    assert store.list_steps(run.id, 0, 10).items[0].status == "started"
+    assert store.get_tool_execution(execution.id).status == "started"
+
+
+def test_tool_completion_rejects_mismatched_tool_result_id_atomically(run_store):
+    store, run = run_store
+    store.claim_run(run.id, owner_id="worker", lease_seconds=30)
+    step = store.start_step(
+        run_id=run.id, owner_id="worker", kind="tool", input_data={}
+    )
+    execution = store.start_tool_execution(
+        run_id=run.id,
+        step_id=step.id,
+        tool_use_id="call-1",
+        tool_name="mcp__colbert__search",
+        arguments={"query": "attention"},
+        classification="read_only",
+    )
+
+    with pytest.raises(agent_store.ToolExecutionConflictError):
+        store.complete_step_and_checkpoint(
+            step_id=step.id,
+            run_id=run.id,
+            owner_id="worker",
+            output_data={"content": "wrong result"},
+            messages=[{"role": "user", "content": "wrong result"}],
+            runtime_state={"turn_count": 1},
+            tool_completion={
+                "execution_id": execution.id,
+                "tool_result": ToolResult(id="call-other", content="wrong result"),
+                "result_preview": "wrong result",
+                "duration_ms": 5,
+            },
+        )
+
+    assert store.get_run(run.id).current_step == 0
+    assert store.list_steps(run.id, 0, 10).items[0].status == "started"
+    assert store.get_tool_execution(execution.id).status == "started"
+
+
+def test_step_retry_uses_same_sequence_and_increments_attempt(run_store):
+    store, run = run_store
+    store.claim_run(run.id, owner_id="worker", lease_seconds=30)
+    first = store.start_step(
+        run_id=run.id, owner_id="worker", kind="llm", input_data={}
+    )
+    store.fail_step(
+        first.id,
+        run_id=run.id,
+        owner_id="worker",
+        error_data={"failure_class": "transport", "message": "closed"},
+    )
+    second = store.start_step(
+        run_id=run.id, owner_id="worker", kind="llm", input_data={}
+    )
+
+    assert (first.sequence, first.attempt) == (1, 1)
+    assert (second.sequence, second.attempt) == (1, 2)
+
+
+def test_cancel_request_is_idempotent_and_terminal_runs_do_not_change(run_store, clock):
+    store, run = run_store
+    first = store.request_cancel(run.id)
+    clock.advance(seconds=5)
+    second = store.request_cancel(run.id)
+
+    assert first.status == "cancelling"
+    assert second.cancel_requested_at == first.cancel_requested_at
+    claimed = store.claim_run(run.id, owner_id="canceller", lease_seconds=30)
+    assert claimed is not None
+    cancelled = store.mark_cancelled(run.id, owner_id="canceller")
+    assert cancelled.status == "cancelled"
+    assert store.request_cancel(run.id) == cancelled
+
+
+def test_retry_recovery_is_due_once_and_increments_run_attempt(run_store, clock):
+    store, run = run_store
+    store.claim_run(run.id, owner_id="worker", lease_seconds=30)
+    retry_at = clock.now() + timedelta(seconds=10)
+    waiting = store.schedule_retry(
+        run.id,
+        owner_id="worker",
+        retry_at=retry_at,
+        failure_class="transport",
+        failure_message="closed",
+    )
+    assert waiting.status == "waiting_retry"
+    assert waiting.attempt == 1
+    assert store.recover_due_runs(now=clock.now(), limit=10) == []
+    clock.advance(seconds=10)
+
+    recovered = store.recover_due_runs(now=clock.now(), limit=10)
+
+    assert [item.id for item in recovered] == [run.id]
+    assert recovered[0].status == "pending"
+    assert recovered[0].attempt == 2
+    assert recovered[0].retry_at is None
+    assert store.recover_due_runs(now=clock.now(), limit=10) == []
+
+
+def test_expired_running_recovery_releases_owner_once(run_store, clock):
+    store, run = run_store
+    store.claim_run(run.id, owner_id="dead", lease_seconds=10)
+    clock.advance(seconds=11)
+
+    recovered = store.recover_due_runs(now=clock.now(), limit=10)
+
+    assert [item.id for item in recovered] == [run.id]
+    assert recovered[0].status == "pending"
+    assert recovered[0].owner_id is None
+    assert recovered[0].attempt == 1
+    assert store.recover_due_runs(now=clock.now(), limit=10) == []
+
+
+def test_recovery_routes_cancel_requested_run_to_cancelling(run_store, clock):
+    store, run = run_store
+    store.claim_run(run.id, owner_id="worker", lease_seconds=10)
+    store.request_cancel(run.id)
+    clock.advance(seconds=11)
+
+    listed = store.list_cancelling_runs(limit=10)
+    claimed = store.claim_run(run.id, owner_id="canceller", lease_seconds=30)
+
+    assert [item.id for item in listed] == [run.id]
+    assert claimed is not None
+    assert claimed.status == "cancelling"
+    assert claimed.owner_id == "canceller"
+
+
+def test_pending_and_cancelling_reconciliation_lists_are_bounded_oldest_first(tmp_path, clock):
+    db_path = tmp_path / "tasks.sqlite3"
+    task_store = TaskStore(db_path)
+    store = SQLiteRunStore(db_path, clock=clock.now)
+    runs = []
+    for index in range(3):
+        task = task_store.create_task(question=f"Question {index}")
+        runs.append(
+            store.create_run(
+                task_id=task.id,
+                policy=RunPolicy.for_depth("quick"),
+                initial_messages=[{"role": "user", "content": task.question}],
+                runtime_state={},
+            )
+        )
+        clock.advance(seconds=1)
+
+    assert [item.id for item in store.list_pending_runs(limit=2)] == [
+        runs[0].id,
+        runs[1].id,
+    ]
+    store.request_cancel(runs[0].id)
+    store.request_cancel(runs[1].id)
+    assert [item.id for item in store.list_cancelling_runs(limit=1)] == [runs[0].id]
+
+
+def test_step_paging_uses_sequence_cursor_and_reports_more(run_store):
+    store, run = run_store
+    store.claim_run(run.id, owner_id="worker", lease_seconds=30)
+    for sequence in range(1, 4):
+        step = store.start_step(
+            run_id=run.id, owner_id="worker", kind="llm", input_data={}
+        )
+        store.complete_step_and_checkpoint(
+            step_id=step.id,
+            run_id=run.id,
+            owner_id="worker",
+            output_data={"sequence": sequence},
+            messages=[{"role": "assistant", "content": str(sequence)}],
+            runtime_state={"turn_count": sequence},
+        )
+
+    first = store.list_steps(run.id, after_sequence=0, limit=2)
+    second = store.list_steps(run.id, after_sequence=first.next_after_sequence, limit=2)
+    assert [step.sequence for step in first.items] == [1, 2]
+    assert first.has_more is True
+    assert first.next_after_sequence == 2
+    assert [step.sequence for step in second.items] == [3]
+    assert second.has_more is False
+    assert second.next_after_sequence is None
+
+
+def test_tool_execution_id_arguments_and_completed_record_are_stable(run_store):
+    store, run = run_store
+    store.claim_run(run.id, owner_id="worker", lease_seconds=30)
+    step = store.start_step(
+        run_id=run.id, owner_id="worker", kind="tool", input_data={}
+    )
+    expected_id = agent_store.stable_tool_execution_id(run.id, "call-1")
+    first = store.start_tool_execution(
+        run_id=run.id,
+        step_id=step.id,
+        tool_use_id="call-1",
+        tool_name="mcp__colbert__search",
+        arguments={"paper_id": "1", "query": "attention"},
+        classification="read_only",
+    )
+    repeated = store.start_tool_execution(
+        run_id=run.id,
+        step_id=step.id,
+        tool_use_id="call-1",
+        tool_name="mcp__colbert__search",
+        arguments={"query": "attention", "paper_id": "1"},
+        classification="read_only",
+    )
+    assert first.id == expected_id
+    assert repeated == first
+
+    with pytest.raises(agent_store.ToolExecutionConflictError):
+        store.start_tool_execution(
+            run_id=run.id,
+            step_id=step.id,
+            tool_use_id="call-1",
+            tool_name="mcp__colbert__search",
+            arguments={"query": "different"},
+            classification="read_only",
+        )
+
+    store.complete_step_and_checkpoint(
+        step_id=step.id,
+        run_id=run.id,
+        owner_id="worker",
+        output_data={},
+        messages=[{"role": "user", "content": "result"}],
+        runtime_state={},
+        tool_completion={
+            "execution_id": first.id,
+            "tool_result": ToolResult(id="call-1", content="result"),
+            "result_preview": "result",
+            "duration_ms": 1,
+        },
+    )
+    next_step = store.start_step(
+        run_id=run.id, owner_id="worker", kind="tool", input_data={}
+    )
+    completed = store.start_tool_execution(
+        run_id=run.id,
+        step_id=next_step.id,
+        tool_use_id="call-1",
+        tool_name="mcp__colbert__search",
+        arguments={"query": "attention", "paper_id": "1"},
+        classification="read_only",
+    )
+    assert completed.step_id == step.id
+    assert completed.status == "completed"
+
+
+def test_failed_tool_execution_is_idempotent_and_retry_moves_step(run_store):
+    store, run = run_store
+    store.claim_run(run.id, owner_id="worker", lease_seconds=30)
+    first_step = store.start_step(
+        run_id=run.id, owner_id="worker", kind="tool", input_data={}
+    )
+    execution = store.start_tool_execution(
+        run_id=run.id,
+        step_id=first_step.id,
+        tool_use_id="call-1",
+        tool_name="mcp__colbert__search",
+        arguments={"query": "attention"},
+        classification="read_only",
+    )
+    first_failure = store.fail_tool_execution(
+        execution.id,
+        failure_class="transport",
+        failure_message="closed",
+        duration_ms=4,
+    )
+    assert store.fail_tool_execution(
+        execution.id,
+        failure_class="transport",
+        failure_message="closed",
+        duration_ms=4,
+    ) == first_failure
+    with pytest.raises(agent_store.ToolExecutionConflictError):
+        store.fail_tool_execution(
+            execution.id,
+            failure_class="timeout",
+            failure_message="slow",
+            duration_ms=5,
+        )
+    store.fail_step(
+        first_step.id,
+        run_id=run.id,
+        owner_id="worker",
+        error_data={"failure_class": "transport"},
+    )
+    retry_step = store.start_step(
+        run_id=run.id, owner_id="worker", kind="tool", input_data={}
+    )
+    retried = store.start_tool_execution(
+        run_id=run.id,
+        step_id=retry_step.id,
+        tool_use_id="call-1",
+        tool_name="mcp__colbert__search",
+        arguments={"query": "attention"},
+        classification="read_only",
+    )
+    assert retried.id == execution.id
+    assert retried.step_id == retry_step.id
+    assert retried.status == "started"
+    assert retried.failure_class is None
+
+
+def test_owner_guarded_terminal_transitions_clear_lease(run_store):
+    store, run = run_store
+    store.claim_run(run.id, owner_id="worker", lease_seconds=30)
+    with pytest.raises(agent_store.RunLeaseLostError):
+        store.mark_completed(run.id, owner_id="other")
+
+    completed = store.mark_completed(run.id, owner_id="worker")
+
+    assert completed.status == "completed"
+    assert completed.owner_id is None
+    assert completed.lease_expires_at is None
+    assert completed.finished_at is not None
 
 
 def _index_key_columns(conn, index_name):
