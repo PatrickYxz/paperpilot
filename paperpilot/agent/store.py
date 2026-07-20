@@ -52,7 +52,7 @@ class SQLiteRunStore:
         self,
         db_path: Path | str,
         *,
-        clock: Callable[[], str] = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.clock = clock or utc_now
@@ -66,7 +66,7 @@ class SQLiteRunStore:
         initial_messages: list[dict],
         runtime_state: dict,
     ) -> AgentRun:
-        now = self.clock()
+        now = _format_utc_datetime(self.clock())
         run = AgentRun(
             id=f"run_{uuid.uuid4().hex}",
             task_id=task_id,
@@ -149,7 +149,10 @@ class SQLiteRunStore:
             conn.commit()
         except sqlite3.IntegrityError as exc:
             conn.rollback()
-            if "agent_runs.task_id" in str(exc):
+            if (
+                exc.sqlite_errorcode == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+                and "agent_runs.task_id" in str(exc)
+            ):
                 raise ActiveRunExistsError(
                     f"task already has an active run: {task_id}"
                 ) from exc
@@ -175,7 +178,7 @@ class SQLiteRunStore:
                 f"""
                 SELECT * FROM agent_runs
                 WHERE task_id = ? AND status IN ({placeholders})
-                ORDER BY created_at DESC, id DESC
+                ORDER BY created_at DESC, rowid DESC
                 LIMIT 1
                 """,
                 (task_id, *sorted(RUN_ACTIVE_STATUSES)),
@@ -188,7 +191,7 @@ class SQLiteRunStore:
                 """
                 SELECT * FROM agent_runs
                 WHERE task_id = ?
-                ORDER BY created_at DESC, id DESC
+                ORDER BY created_at DESC, rowid DESC
                 LIMIT 1
                 """,
                 (task_id,),
@@ -339,8 +342,16 @@ class SQLiteRunStore:
         return conn
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _format_utc_datetime(value: datetime) -> str:
+    if not isinstance(value, datetime):
+        raise TypeError("clock must return a datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("clock must return a timezone-aware datetime")
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _encode_json(value: object) -> str:
