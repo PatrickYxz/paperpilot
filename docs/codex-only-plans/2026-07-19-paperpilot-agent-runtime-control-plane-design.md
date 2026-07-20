@@ -132,6 +132,7 @@ class RunStore(Protocol):
 - 为调用生成稳定 `tool_execution_id`；
 - 在执行前记录工具名、规范化参数、步骤和 attempt；
 - 检查工具权限；
+- 使用 `run_id`、`step_id` 和当前 `owner_id` 校验未过期租约与最新 step attempt；
 - 调用现有 `Tool.handler`；
 - 记录成功结果、错误类型、耗时和截断后的展示摘要；
 - 将原始结果写入检查点消息；
@@ -144,6 +145,10 @@ class RunStore(Protocol):
   `tool_execution_id` 和相同参数重试。
 
 未声明类别的工具默认 `non_retryable`。这比默认重试更保守。
+
+`owner_id` 必须由 `AgentRuntime` 经 `AgentLoopDriver` 传到 `ToolExecutor`，再传给
+`RunStore` 的工具开始与失败写入。工具写入不得只凭稳定 execution ID 修改记录；条件中
+必须同时包含当前 step 和有效租约，防止旧 attempt 的迟到回调污染新 owner 的记录。
 
 ### 5.5 `paperpilot/agent/driver.py`
 

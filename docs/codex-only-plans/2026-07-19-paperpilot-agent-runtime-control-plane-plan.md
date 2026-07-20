@@ -549,6 +549,10 @@ WHERE id = ?
   AND lease_expires_at > ?
 ```
 
+Owner-sensitive write methods must sample the clock only after acquiring their
+`BEGIN IMMEDIATE` write lock. A lease that expires while waiting for SQLite's
+write lock must not authorize the mutation.
+
 `start_step` always uses `sequence = agent_runs.current_step + 1`. It sets
 `attempt` to one more than the maximum existing attempt for that run/sequence,
 so a crash before checkpoint creates a new attempt at the same logical
@@ -597,6 +601,11 @@ existing record. A retry may move `step_id` to the new attempt only while status
 is `started` or `failed`; a `completed` record is immutable. Completion is
 performed only by `complete_step_and_checkpoint`, while failure updates are
 idempotent for the same final values and reject conflicting final values.
+`start_tool_execution` receives `owner_id`; `fail_tool_execution` receives
+`run_id`, `step_id`, and `owner_id`. Both fence writes on the current unexpired
+lease and latest started attempt. A tool step cannot commit a checkpoint
+without exactly one matching tool completion, and a non-tool step rejects tool
+completion data.
 
 - [ ] **Step 6: Run Agent store and TaskStore regression tests**
 
@@ -631,7 +640,7 @@ git commit -m "Add durable agent run lifecycle"
 - Consumes MCP exceptions from `paperpilot.tools.mcp_client` and execution records from Task 3.
 - Produces `ClassifiedFailure`, `classify_exception(exc)`, `is_step_retryable(failure, classification)`.
 - Produces `ToolPolicyRegistry.classify(tool_name) -> ToolClassification`.
-- Produces `ToolExecutor.execute(run_id, step_id, tool_call, policy) -> ToolInvocationResult`.
+- Produces `ToolExecutor.execute(run_id, step_id, owner_id, tool_call, policy) -> ToolInvocationResult`.
 
 - [ ] **Step 1: Write failing error-classification tests**
 
@@ -671,7 +680,7 @@ def test_tool_executor_returns_success_for_atomic_runtime_commit(executor, store
         "query": "attention", "paper_id": "1706.03762",
     })
     invocation = executor.execute(
-        run_id="run-1", step_id="step-1", tool_call=call,
+        run_id="run-1", step_id="step-1", owner_id="worker-1", tool_call=call,
         policy=RunPolicy.for_depth("standard"),
     )
     stored = store.get_tool_execution(stable_tool_execution_id("run-1", "call-1"))
@@ -686,7 +695,7 @@ def test_persisted_tool_arguments_hash_long_text_and_redact_secrets(executor, st
         "api_key": "secret-value",
     })
     executor.execute(
-        run_id="run-1", step_id="step-1", tool_call=call,
+        run_id="run-1", step_id="step-1", owner_id="worker-1", tool_call=call,
         policy=RunPolicy.for_depth("standard"),
     )
     stored = store.get_tool_execution(stable_tool_execution_id("run-1", "build-1"))
@@ -746,9 +755,11 @@ READ_ONLY_BUILTINS = frozenset({
 index writes, searches, and nested LLM calls behind one handler. `ask_user` is
 denied by Web `RunPolicy`. MCP tools are allowed only when the server segment
 is present in `policy.allowed_mcp_servers`. ToolExecutor must persist `started`
-before invoking `handler`; on success it returns the full
+with the current `owner_id` fencing token before invoking `handler`; on success
+it returns the full
 `ToolInvocationResult` for Runtime's atomic step/checkpoint commit, and on
-failure it persists the failed execution and raises `ToolExecutionFailure`
+failure it persists the failed execution with `run_id`, `step_id`, and
+`owner_id`, then raises `ToolExecutionFailure`
 carrying `ClassifiedFailure`, classification, and `retryable`.
 Calling `paper_deep_read` when `policy.allow_subagents` is false is a
 validation failure before any tool execution row is started.
@@ -789,7 +800,8 @@ git commit -m "Govern durable agent tool execution"
 
 - Consumes `LLMClient`, `Tool`, `ToolCall`, `ToolResult`, `ContextManager`, `RunPolicy`, and `ToolExecutor`.
 - Produces serializable `DriverState`, `DriverAction`, and `DriverStepResult`.
-- Produces `AgentLoopDriver.plan_next(state) -> DriverAction` and `execute(action, state) -> DriverStepResult`.
+- Produces `AgentLoopDriver.plan_next(state) -> DriverAction` and
+  `execute(action, state, run_id, step_id, owner_id) -> DriverStepResult`.
 - Legacy `agent_loop` consumes extracted public helpers and must preserve its current tests exactly.
 
 `DriverStepResult` contains `state`, `output_data`, `final_text`, and optional
@@ -838,10 +850,16 @@ def test_driver_state_round_trip_preserves_pending_tool_batch():
 
 def test_driver_executes_one_tool_and_appends_batch_after_last_result(driver):
     state = driver_state_with_two_pending_tools()
-    first = driver.execute(driver.plan_next(state), state)
+    first = driver.execute(
+        driver.plan_next(state), state,
+        run_id="run-1", step_id="step-1", owner_id="worker-1",
+    )
     assert first.state.messages == state.messages
     assert len(first.state.pending_tool_results) == 1
-    second = driver.execute(driver.plan_next(first.state), first.state)
+    second = driver.execute(
+        driver.plan_next(first.state), first.state,
+        run_id="run-1", step_id="step-2", owner_id="worker-1",
+    )
     assert second.state.pending_tool_calls == []
     assert second.state.pending_tool_results == []
     assert second.state.messages[-1]["role"] == "user"
@@ -889,7 +907,13 @@ Before returning an LLM action, reject exhausted iteration/token budgets. If com
 
 - [ ] **Step 5: Implement exactly-one-boundary execution**
 
-LLM execution calls `client.call` once, records usage, appends the assistant turn, and either sets `final_text` or stores all returned tool calls. Tool execution repairs `build_index` arguments using extracted helpers, calls ToolExecutor once, records downloaded documents, removes one pending call, and appends all tool results only after the final pending call finishes. Compact execution calls `compact_messages` once. Finalize returns the existing final text without another LLM call.
+LLM execution calls `client.call` once, records usage, appends the assistant
+turn, and either sets `final_text` or stores all returned tool calls. Tool
+execution repairs `build_index` arguments using extracted helpers, calls
+ToolExecutor once with `run_id`, `step_id`, and `owner_id`, records downloaded
+documents, removes one pending call, and appends all tool results only after the
+final pending call finishes. Compact execution calls `compact_messages` once.
+Finalize returns the existing final text without another LLM call.
 
 - [ ] **Step 6: Run Driver, loop, context, compact, and message-codec tests**
 
@@ -1004,7 +1028,9 @@ while True:
         kind=action.kind,
         input_data=action.input_data,
     )
-    result = driver.execute(action, state, run_id=run_id, step_id=step.id)
+    result = driver.execute(
+        action, state, run_id=run_id, step_id=step.id, owner_id=owner_id,
+    )
     if heartbeat.lease_lost:
         raise RunLeaseLostError(run_id)
     if store.get_run(run_id).cancel_requested_at is not None:
