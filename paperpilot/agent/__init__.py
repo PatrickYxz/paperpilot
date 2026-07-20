@@ -9,6 +9,7 @@ from paperpilot.agent.models import (
     ToolExecution,
 )
 from paperpilot.agent.policy import RunPolicy
+from paperpilot.agent.store import ActiveRunExistsError, RunStore, SQLiteRunStore
 
 __all__ = [
     "AgentRun",
@@ -17,7 +18,10 @@ __all__ = [
     "RunCheckpoint",
     "RunOutcome",
     "RunPolicy",
+    "RunStore",
     "RunStatus",
+    "SQLiteRunStore",
     "StepKind",
     "ToolExecution",
+    "ActiveRunExistsError",
 ]
