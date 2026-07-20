@@ -194,6 +194,22 @@ def test_schema_has_required_tables_columns_indexes_and_foreign_keys(tmp_path):
         assert "idx_run_checkpoints_run_sequence" in {
             row[1] for row in conn.execute("PRAGMA index_list(run_checkpoints)")
         }
+        assert _index_key_columns(conn, "idx_agent_runs_task_created") == [
+            ("task_id", 0),
+            ("created_at", 1),
+        ]
+        assert _index_key_columns(conn, "idx_agent_runs_status_retry") == [
+            ("status", 0),
+            ("retry_at", 0),
+        ]
+        assert _index_key_columns(conn, "idx_agent_steps_run_sequence") == [
+            ("run_id", 0),
+            ("sequence", 0),
+        ]
+        assert _index_key_columns(conn, "idx_run_checkpoints_run_sequence") == [
+            ("run_id", 0),
+            ("step_sequence", 0),
+        ]
         foreign_keys = {
             table: {
                 (row[3], row[2])
@@ -226,3 +242,11 @@ def test_create_run_requires_a_real_research_task_and_health_probe_passes(tmp_pa
         )
 
     assert store.check_health() is None
+
+
+def _index_key_columns(conn, index_name):
+    return [
+        (str(row["name"]), int(row["desc"]))
+        for row in conn.execute(f"PRAGMA index_xinfo({index_name})")
+        if int(row["key"]) == 1
+    ]
