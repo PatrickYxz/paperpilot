@@ -6,7 +6,11 @@ import json
 from paperpilot.core.adapter import ParsedResponse, Tool, ToolCall
 from paperpilot.core.context_manager import ContextManager
 from paperpilot.core.guardrail import Guardrail
-from paperpilot.core.loop import agent_loop
+from paperpilot.core.loop import (
+    agent_loop,
+    extract_downloaded_document,
+    should_repair_build_index_args,
+)
 
 
 class FakeClient:
@@ -91,6 +95,21 @@ class CompactingFakeClient:
 
     def append_tool_results(self, messages, results):
         messages.append({"role": "user", "content": []})
+
+
+def test_downloaded_document_helpers_preserve_existing_behavior():
+    document = extract_downloaded_document(
+        "mcp__arxiv__download_paper",
+        '{"paper_id":"1706.03762","text":"full text"}',
+    )
+    call = ToolCall(
+        id="build",
+        name="mcp__colbert__build_index",
+        arguments={},
+    )
+
+    assert document == {"paper_id": "1706.03762", "text": "full text"}
+    assert should_repair_build_index_args(call, [document]) is True
 
 
 def test_agent_loop_repairs_empty_build_index_args_from_download_result():

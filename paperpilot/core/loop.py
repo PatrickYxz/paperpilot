@@ -12,7 +12,7 @@ import json
 from typing import Callable
 
 from paperpilot.builtin_tools.compact import compact_messages
-from paperpilot.core.adapter import LLMClient, Tool, ToolResult
+from paperpilot.core.adapter import LLMClient, Tool, ToolCall, ToolResult
 from paperpilot.core.context_manager import ContextManager
 from paperpilot.core.guardrail import Guardrail, GuardrailStop
 
@@ -87,7 +87,7 @@ def agent_loop(
             if spec is None:
                 content, is_error = f"Error: tool '{tc.name}' not found", True
             else:
-                if _should_repair_build_index_args(tc, downloaded_documents):
+                if should_repair_build_index_args(tc, downloaded_documents):
                     original = dict(tc.arguments)
                     tc.arguments = {
                         **tc.arguments,
@@ -114,7 +114,7 @@ def agent_loop(
                 try:
                     content = str(spec.handler(tc.arguments))
                     is_error = False
-                    doc = _extract_downloaded_document(tc.name, content)
+                    doc = extract_downloaded_document(tc.name, content)
                     if doc is not None:
                         downloaded_documents = [doc]
                 except Exception as e:
@@ -132,7 +132,7 @@ def agent_loop(
     return messages
 
 
-def _should_repair_build_index_args(
+def should_repair_build_index_args(
     tc: ToolCall, downloaded_documents: list[dict]
 ) -> bool:
     if not tc.name.endswith("__build_index") or not downloaded_documents:
@@ -141,7 +141,7 @@ def _should_repair_build_index_args(
     return not documents
 
 
-def _extract_downloaded_document(tool_name: str, content: str) -> dict | None:
+def extract_downloaded_document(tool_name: str, content: str) -> dict | None:
     if not tool_name.endswith("__download_paper"):
         return None
     try:
