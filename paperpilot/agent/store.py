@@ -40,6 +40,9 @@ class ToolExecutionConflictError(RuntimeError):
     """Raised when a stable tool execution ID is reused inconsistently."""
 
 
+_LOCKED_NOW = object()
+
+
 class RunStore(Protocol):
     """Persistence surface required before the execution runtime is introduced."""
 
@@ -148,6 +151,7 @@ class RunStore(Protocol):
         *,
         run_id: str,
         step_id: str,
+        owner_id: str,
         tool_use_id: str,
         tool_name: str,
         arguments: dict[str, Any],
@@ -162,6 +166,9 @@ class RunStore(Protocol):
         self,
         execution_id: str,
         *,
+        run_id: str,
+        step_id: str,
+        owner_id: str,
         failure_class: str,
         failure_message: str,
         duration_ms: int,
@@ -344,13 +351,13 @@ class SQLiteRunStore:
         lease_seconds: int,
     ) -> AgentRun | None:
         _validate_owner_and_lease(owner_id, lease_seconds)
-        now = _format_utc_datetime(self.clock())
-        expires_at = _format_utc_datetime(
-            _parse_utc_datetime(now) + timedelta(seconds=lease_seconds)
-        )
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            now = _format_utc_datetime(self.clock())
+            expires_at = _format_utc_datetime(
+                _parse_utc_datetime(now) + timedelta(seconds=lease_seconds)
+            )
             cursor = conn.execute(
                 """
                 UPDATE agent_runs
@@ -390,13 +397,13 @@ class SQLiteRunStore:
         lease_seconds: int,
     ) -> bool:
         _validate_owner_and_lease(owner_id, lease_seconds)
-        now = _format_utc_datetime(self.clock())
-        expires_at = _format_utc_datetime(
-            _parse_utc_datetime(now) + timedelta(seconds=lease_seconds)
-        )
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            now = _format_utc_datetime(self.clock())
+            expires_at = _format_utc_datetime(
+                _parse_utc_datetime(now) + timedelta(seconds=lease_seconds)
+            )
             cursor = conn.execute(
                 """
                 UPDATE agent_runs
@@ -456,10 +463,10 @@ class SQLiteRunStore:
         kind: str,
         input_data: dict[str, Any],
     ) -> AgentStep:
-        now = _format_utc_datetime(self.clock())
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            now = _format_utc_datetime(self.clock())
             run_row = self._owned_run_row(conn, run_id, owner_id, now, ("running",))
             sequence = int(run_row["current_step"]) + 1
             attempt_row = conn.execute(
@@ -515,10 +522,10 @@ class SQLiteRunStore:
         runtime_state: dict[str, Any],
         tool_completion: Mapping[str, Any] | Any | None = None,
     ) -> RunCheckpoint:
-        now = _format_utc_datetime(self.clock())
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            now = _format_utc_datetime(self.clock())
             run_row = self._owned_run_row(conn, run_id, owner_id, now, ("running",))
             step_row = conn.execute(
                 """
@@ -529,7 +536,28 @@ class SQLiteRunStore:
             ).fetchone()
             if step_row is None or int(step_row["sequence"]) != int(run_row["current_step"]) + 1:
                 raise ValueError(f"step is not the active sequence for run: {step_id}")
-            if tool_completion is not None:
+            is_tool_step = str(step_row["kind"]) == "tool"
+            if is_tool_step and tool_completion is None:
+                raise ValueError("tool step requires tool_completion")
+            if not is_tool_step and tool_completion is not None:
+                raise ValueError("non-tool step forbids tool_completion")
+            if is_tool_step:
+                execution_rows = conn.execute(
+                    """
+                    SELECT id FROM tool_executions
+                    WHERE run_id = ? AND step_id = ?
+                    ORDER BY id
+                    """,
+                    (run_id, step_id),
+                ).fetchall()
+                completion_id = _completion_value(tool_completion, "execution_id")
+                if (
+                    len(execution_rows) != 1
+                    or str(execution_rows[0]["id"]) != str(completion_id)
+                ):
+                    raise ToolExecutionConflictError(
+                        f"tool step must have one matching execution: {step_id}"
+                    )
                 self._complete_tool_execution_in_transaction(
                     conn, run_id=run_id, step_id=step_id,
                     completion=tool_completion, now=now,
@@ -826,6 +854,7 @@ class SQLiteRunStore:
         *,
         run_id: str,
         step_id: str,
+        owner_id: str,
         tool_use_id: str,
         tool_name: str,
         arguments: dict[str, Any],
@@ -833,14 +862,25 @@ class SQLiteRunStore:
     ) -> ToolExecution:
         execution_id = stable_tool_execution_id(run_id, tool_use_id)
         arguments_json = _encode_json(arguments)
-        now = _format_utc_datetime(self.clock())
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            self._require_started_step(conn, run_id, step_id)
+            now = _format_utc_datetime(self.clock())
+            self._require_current_started_tool_step(
+                conn, run_id=run_id, step_id=step_id,
+                owner_id=owner_id, now=now,
+            )
             row = conn.execute(
                 "SELECT * FROM tool_executions WHERE id = ?", (execution_id,)
             ).fetchone()
+            step_execution = conn.execute(
+                "SELECT id FROM tool_executions WHERE run_id = ? AND step_id = ?",
+                (run_id, step_id),
+            ).fetchone()
+            if step_execution is not None and str(step_execution["id"]) != execution_id:
+                raise ToolExecutionConflictError(
+                    f"tool step already has an execution: {step_id}"
+                )
             if row is not None:
                 if (
                     str(row["run_id"]) != run_id
@@ -901,19 +941,32 @@ class SQLiteRunStore:
         self,
         execution_id: str,
         *,
+        run_id: str,
+        step_id: str,
+        owner_id: str,
         failure_class: str,
         failure_message: str,
         duration_ms: int,
     ) -> ToolExecution:
-        now = _format_utc_datetime(self.clock())
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            now = _format_utc_datetime(self.clock())
+            self._require_current_started_tool_step(
+                conn, run_id=run_id, step_id=step_id,
+                owner_id=owner_id, now=now,
+            )
             row = conn.execute(
-                "SELECT * FROM tool_executions WHERE id = ?", (execution_id,)
+                """
+                SELECT * FROM tool_executions
+                WHERE id = ? AND run_id = ? AND step_id = ?
+                """,
+                (execution_id, run_id, step_id),
             ).fetchone()
             if row is None:
-                raise KeyError(execution_id)
+                raise ToolExecutionConflictError(
+                    f"tool execution does not belong to current step: {execution_id}"
+                )
             if str(row["status"]) == "failed":
                 if (
                     row["failure_class"] == failure_class
@@ -929,15 +982,22 @@ class SQLiteRunStore:
                 raise ToolExecutionConflictError(
                     f"completed tool execution is immutable: {execution_id}"
                 )
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE tool_executions
                 SET status = 'failed', failure_class = ?, failure_message = ?,
                     duration_ms = ?, finished_at = ?
-                WHERE id = ? AND status = 'started'
+                WHERE id = ? AND run_id = ? AND step_id = ? AND status = 'started'
                 """,
-                (failure_class, failure_message, duration_ms, now, execution_id),
+                (
+                    failure_class, failure_message, duration_ms, now,
+                    execution_id, run_id, step_id,
+                ),
             )
+            if cursor.rowcount != 1:
+                raise ToolExecutionConflictError(
+                    f"tool execution failure raced: {execution_id}"
+                )
             row = conn.execute(
                 "SELECT * FROM tool_executions WHERE id = ?", (execution_id,)
             ).fetchone()
@@ -980,10 +1040,10 @@ class SQLiteRunStore:
         error_data: dict[str, Any],
         run_statuses: tuple[str, ...] = ("running",),
     ) -> AgentStep:
-        now = _format_utc_datetime(self.clock())
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            now = _format_utc_datetime(self.clock())
             self._owned_run_row(conn, run_id, owner_id, now, run_statuses)
             cursor = conn.execute(
                 """
@@ -1014,10 +1074,10 @@ class SQLiteRunStore:
         target_status: str,
         fields: dict[str, Any],
     ) -> AgentRun:
-        now = _format_utc_datetime(self.clock())
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            now = _format_utc_datetime(self.clock())
             self._owned_run_row(conn, run_id, owner_id, now, expected_statuses)
             assignments = ["status = ?", "updated_at = ?"]
             values: list[Any] = [target_status, now]
@@ -1028,7 +1088,7 @@ class SQLiteRunStore:
                 }:
                     raise ValueError(f"unsupported run transition field: {key}")
                 assignments.append(f"{key} = ?")
-                values.append(value)
+                values.append(now if value is _LOCKED_NOW else value)
             placeholders = ", ".join("?" for _ in expected_statuses)
             cursor = conn.execute(
                 f"""
@@ -1063,7 +1123,6 @@ class SQLiteRunStore:
         failure_class: str | None,
         failure_message: str | None,
     ) -> AgentRun:
-        now = _format_utc_datetime(self.clock())
         return self._transition_owned_run(
             run_id,
             owner_id=owner_id,
@@ -1075,22 +1134,39 @@ class SQLiteRunStore:
                 "retry_at": None,
                 "owner_id": None,
                 "lease_expires_at": None,
-                "finished_at": now,
+                "finished_at": _LOCKED_NOW,
             },
         )
 
-    def _require_started_step(
-        self, conn: sqlite3.Connection, run_id: str, step_id: str
+    def _require_current_started_tool_step(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        step_id: str,
+        owner_id: str,
+        now: str,
     ) -> sqlite3.Row:
+        run_row = self._owned_run_row(
+            conn, run_id, owner_id, now, ("running",)
+        )
+        sequence = int(run_row["current_step"]) + 1
         row = conn.execute(
             """
             SELECT * FROM agent_steps
-            WHERE id = ? AND run_id = ? AND status = 'started'
+            WHERE id = ? AND run_id = ? AND sequence = ?
+              AND kind = 'tool' AND status = 'started'
+              AND attempt = (
+                  SELECT MAX(attempt) FROM agent_steps
+                  WHERE run_id = ? AND sequence = ?
+              )
             """,
-            (step_id, run_id),
+            (step_id, run_id, sequence, run_id, sequence),
         ).fetchone()
         if row is None:
-            raise ValueError(f"tool execution requires a started step: {step_id}")
+            raise ToolExecutionConflictError(
+                f"tool execution requires current highest started attempt: {step_id}"
+            )
         return row
 
     def _complete_tool_execution_in_transaction(
