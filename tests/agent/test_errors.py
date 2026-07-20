@@ -35,13 +35,15 @@ def test_provider_status_codes_have_deterministic_classification():
     assert classify_exception(ProviderError(503)).transient is True
 
 
-def test_failure_message_is_bounded_without_mutating_exception_text():
+def test_failure_keeps_full_message_and_exposes_bounded_persistence_message():
     message = "x" * 2_500
     exc = RuntimeError(message)
 
     failure = classify_exception(exc)
 
-    assert len(failure.message) == 2_000
+    assert failure.message.endswith(message)
+    assert len(failure.message) > len(message)
+    assert len(failure.persisted_message) == 2_000
     assert str(exc) == message
 
 

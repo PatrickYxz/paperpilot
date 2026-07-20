@@ -16,6 +16,10 @@ class ClassifiedFailure:
     message: str
     transient: bool
 
+    @property
+    def persisted_message(self) -> str:
+        return self.message[:_MAX_FAILURE_MESSAGE_LENGTH]
+
 
 class ToolExecutionFailure(RuntimeError):
     """A tool invocation failed after its durable execution record was started."""
@@ -30,6 +34,23 @@ class ToolExecutionFailure(RuntimeError):
         self.failure = failure
         self.classification = classification
         self.retryable = retryable
+
+
+class ToolExecutionReplayRequired(RuntimeError):
+    """The caller must recover a completed tool result from a checkpoint."""
+
+    def __init__(self, execution: object) -> None:
+        super().__init__("tool execution is completed and requires checkpoint replay")
+        self.execution = execution
+
+
+class ToolExecutionBlocked(RuntimeError):
+    """A durable execution exists but policy forbids another external call."""
+
+    def __init__(self, execution: object, disposition: str) -> None:
+        super().__init__(f"tool execution cannot run: {disposition}")
+        self.execution = execution
+        self.disposition = disposition
 
 
 def classify_exception(exc: BaseException) -> ClassifiedFailure:
@@ -62,6 +83,6 @@ def _failure(
 ) -> ClassifiedFailure:
     return ClassifiedFailure(
         failure_class=failure_class,
-        message=message[:_MAX_FAILURE_MESSAGE_LENGTH],
+        message=message,
         transient=transient,
     )

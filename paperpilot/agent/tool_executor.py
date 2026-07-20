@@ -11,13 +11,15 @@ from typing import Any
 
 from paperpilot.agent.errors import (
     ClassifiedFailure,
+    ToolExecutionBlocked,
     ToolExecutionFailure,
+    ToolExecutionReplayRequired,
     classify_exception,
     is_step_retryable,
 )
 from paperpilot.agent.models import ToolClassification
 from paperpilot.agent.policy import RunPolicy
-from paperpilot.agent.store import RunStore, stable_tool_execution_id
+from paperpilot.agent.store import RunStore
 from paperpilot.core.adapter import Tool, ToolCall, ToolResult
 
 READ_ONLY_TOOL_SUFFIXES = (
@@ -100,7 +102,7 @@ class ToolExecutor:
             self._raise_validation(f"tool is not registered: {tool_call.name}", classification)
 
         sanitized_arguments = sanitize_tool_arguments(tool_call.arguments)
-        execution = self._store.start_tool_execution(
+        start = self._store.start_tool_execution(
             run_id=run_id,
             step_id=step_id,
             owner_id=owner_id,
@@ -109,10 +111,16 @@ class ToolExecutor:
             arguments=sanitized_arguments,
             classification=classification,
         )
+        if start.disposition == "completed":
+            raise ToolExecutionReplayRequired(start.execution)
+        if not start.should_invoke:
+            raise ToolExecutionBlocked(start.execution, start.disposition)
+
+        execution = start.execution
         started_at = self._monotonic()
         try:
             content = _stringify_tool_content(tool.handler(tool_call.arguments))
-        except BaseException as exc:
+        except Exception as exc:
             failure = classify_exception(exc)
             duration_ms = _duration_milliseconds(started_at, self._monotonic())
             self._store.fail_tool_execution(
@@ -121,7 +129,7 @@ class ToolExecutor:
                 step_id=step_id,
                 owner_id=owner_id,
                 failure_class=failure.failure_class,
-                failure_message=failure.message,
+                failure_message=failure.persisted_message,
                 duration_ms=duration_ms,
             )
             raise ToolExecutionFailure(
@@ -132,7 +140,7 @@ class ToolExecutor:
 
         duration_ms = _duration_milliseconds(started_at, self._monotonic())
         return ToolInvocationResult(
-            execution_id=stable_tool_execution_id(run_id, tool_call.id),
+            execution_id=execution.id,
             tool_result=ToolResult(id=tool_call.id, content=content),
             result_preview=content[:_RESULT_PREVIEW_LENGTH],
             duration_ms=duration_ms,

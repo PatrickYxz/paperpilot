@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
-from paperpilot.agent.errors import ToolExecutionFailure
+from paperpilot.agent.errors import (
+    ToolExecutionBlocked,
+    ToolExecutionFailure,
+    ToolExecutionReplayRequired,
+)
 from paperpilot.agent.policy import RunPolicy
 from paperpilot.agent.store import RunLeaseLostError, SQLiteRunStore, stable_tool_execution_id
 from paperpilot.agent.tool_executor import ToolExecutor, ToolPolicyRegistry
-from paperpilot.core.adapter import Tool, ToolCall
+from paperpilot.core.adapter import Tool, ToolCall, ToolResult
 from paperpilot.web.task_store import TaskStore
 
 
@@ -191,7 +196,7 @@ def test_handler_failure_persists_bounded_failure_and_exposes_retryability(store
             "mcp__colbert__search",
             "search",
             {},
-            lambda arguments: (_ for _ in ()).throw(TimeoutError("slow")),
+            lambda arguments: (_ for _ in ()).throw(TimeoutError("x" * 2_500)),
         ),
     )
 
@@ -207,9 +212,10 @@ def test_handler_failure_persists_bounded_failure_and_exposes_retryability(store
     stored = store.get_tool_execution(stable_tool_execution_id(run.id, "timeout-1"))
     assert raised.value.failure.failure_class == "timeout"
     assert raised.value.retryable is True
+    assert len(str(raised.value)) == 2_500
     assert stored is not None
     assert stored.status == "failed"
-    assert stored.failure_message == "slow"
+    assert len(stored.failure_message) == 2_000
 
 
 def test_non_retryable_tool_failure_is_not_retryable(store_and_run):
@@ -298,3 +304,240 @@ def test_old_attempt_cannot_write_failure_after_new_owner_claims(store_and_run):
     assert stored is not None
     assert stored.step_id == old_step.id
     assert stored.status == "started"
+
+
+@pytest.mark.parametrize("exception_type", (KeyboardInterrupt, SystemExit, GeneratorExit))
+def test_process_control_exceptions_propagate_without_failing_execution(
+    store_and_run, exception_type
+):
+    store, run, step = store_and_run
+    call = ToolCall("control-1", "mcp__colbert__search", {})
+    executor = _executor(
+        store,
+        Tool(
+            call.name,
+            "search",
+            {},
+            lambda arguments: (_ for _ in ()).throw(exception_type()),
+        ),
+    )
+
+    with pytest.raises(exception_type):
+        executor.execute(
+            run_id=run.id,
+            step_id=step.id,
+            owner_id="worker-1",
+            tool_call=call,
+            policy=RunPolicy.for_depth("standard"),
+        )
+
+    stored = store.get_tool_execution(stable_tool_execution_id(run.id, call.id))
+    assert stored is not None
+    assert stored.status == "started"
+
+
+def test_completed_execution_requires_checkpoint_replay_without_reinvoking_handler(store_and_run):
+    store, run, first_step = store_and_run
+    calls = 0
+
+    def handler(arguments):
+        nonlocal calls
+        calls += 1
+        return f"result-{calls}"
+
+    call = ToolCall("same-call", "mcp__colbert__search", {})
+    executor = _executor(store, Tool(call.name, "search", {}, handler))
+    first = executor.execute(
+        run_id=run.id,
+        step_id=first_step.id,
+        owner_id="worker-1",
+        tool_call=call,
+        policy=RunPolicy.for_depth("standard"),
+    )
+    store.complete_step_and_checkpoint(
+        step_id=first_step.id,
+        run_id=run.id,
+        owner_id="worker-1",
+        output_data={"content": first.tool_result.content},
+        messages=[{"role": "user", "content": first.tool_result.content}],
+        runtime_state={"turn_count": 1, "tokens_used": 1},
+        tool_completion={
+            "execution_id": first.execution_id,
+            "tool_result": first.tool_result,
+            "result_preview": first.result_preview,
+            "duration_ms": first.duration_ms,
+        },
+    )
+    second_step = store.start_step(
+        run_id=run.id,
+        owner_id="worker-1",
+        kind="tool",
+        input_data={"tool_name": call.name},
+    )
+
+    with pytest.raises(ToolExecutionReplayRequired) as raised:
+        executor.execute(
+            run_id=run.id,
+            step_id=second_step.id,
+            owner_id="worker-1",
+            tool_call=call,
+            policy=RunPolicy.for_depth("standard"),
+        )
+
+    assert raised.value.execution.step_id == first_step.id
+    assert calls == 1
+
+
+def test_non_retryable_failure_blocks_new_attempt_without_reinvoking_handler(store_and_run):
+    store, run, first_step = store_and_run
+    calls = 0
+
+    def handler(arguments):
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("slow")
+
+    call = ToolCall("deep-retry", "paper_deep_read", {})
+    executor = _executor(store, Tool(call.name, "read", {}, handler))
+    with pytest.raises(ToolExecutionFailure):
+        executor.execute(
+            run_id=run.id,
+            step_id=first_step.id,
+            owner_id="worker-1",
+            tool_call=call,
+            policy=RunPolicy.for_depth("standard"),
+        )
+    store.fail_step(
+        first_step.id,
+        run_id=run.id,
+        owner_id="worker-1",
+        error_data={"failure_class": "timeout"},
+    )
+    retry_step = store.start_step(
+        run_id=run.id,
+        owner_id="worker-1",
+        kind="tool",
+        input_data={"tool_name": call.name},
+    )
+
+    with pytest.raises(ToolExecutionBlocked) as raised:
+        executor.execute(
+            run_id=run.id,
+            step_id=retry_step.id,
+            owner_id="worker-1",
+            tool_call=call,
+            policy=RunPolicy.for_depth("standard"),
+        )
+
+    assert raised.value.execution.status == "failed"
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected_calls"),
+    (
+        ("mcp__colbert__search", 2),
+        ("mcp__colbert__build_index", 2),
+        ("paper_deep_read", 1),
+    ),
+)
+def test_stale_execution_only_reinvokes_safe_classifications(
+    store_and_run, tool_name, expected_calls
+):
+    store, run, first_step = store_and_run
+    calls = 0
+
+    def handler(arguments):
+        nonlocal calls
+        calls += 1
+        return f"result-{calls}"
+
+    call = ToolCall("stale-call", tool_name, {})
+    executor = _executor(store, Tool(call.name, "tool", {}, handler))
+    executor.execute(
+        run_id=run.id,
+        step_id=first_step.id,
+        owner_id="worker-1",
+        tool_call=call,
+        policy=RunPolicy.for_depth("standard"),
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET lease_expires_at = '2000-01-01T00:00:00.000000Z' WHERE id = ?",
+            (run.id,),
+        )
+    assert store.claim_run(run.id, owner_id="worker-2", lease_seconds=30) is not None
+    retry_step = store.start_step(
+        run_id=run.id,
+        owner_id="worker-2",
+        kind="tool",
+        input_data={"tool_name": call.name},
+    )
+
+    if expected_calls == 1:
+        with pytest.raises(ToolExecutionBlocked):
+            executor.execute(
+                run_id=run.id,
+                step_id=retry_step.id,
+                owner_id="worker-2",
+                tool_call=call,
+                policy=RunPolicy.for_depth("standard"),
+            )
+    else:
+        executor.execute(
+            run_id=run.id,
+            step_id=retry_step.id,
+            owner_id="worker-2",
+            tool_call=call,
+            policy=RunPolicy.for_depth("standard"),
+        )
+
+    assert calls == expected_calls
+
+
+def test_concurrent_duplicate_execute_invokes_handler_once(store_and_run):
+    store, run, step = store_and_run
+    handler_entered = threading.Event()
+    release_handler = threading.Event()
+    calls = 0
+
+    def handler(arguments):
+        nonlocal calls
+        calls += 1
+        handler_entered.set()
+        assert release_handler.wait(timeout=5)
+        return "result"
+
+    call = ToolCall("concurrent-1", "mcp__colbert__search", {})
+    executor = _executor(store, Tool(call.name, "search", {}, handler))
+    first_result = []
+    second_result = []
+
+    def invoke(result):
+        try:
+            result.append(
+                executor.execute(
+                    run_id=run.id,
+                    step_id=step.id,
+                    owner_id="worker-1",
+                    tool_call=call,
+                    policy=RunPolicy.for_depth("standard"),
+                )
+            )
+        except Exception as exc:
+            result.append(exc)
+
+    first_thread = threading.Thread(target=invoke, args=(first_result,))
+    first_thread.start()
+    assert handler_entered.wait(timeout=5)
+    second_thread = threading.Thread(target=invoke, args=(second_result,))
+    second_thread.start()
+    second_thread.join(timeout=5)
+    release_handler.set()
+    first_thread.join(timeout=5)
+
+    assert calls == 1
+    assert len(first_result) == len(second_result) == 1
+    assert isinstance(second_result[0], ToolExecutionBlocked)
+    assert first_thread.is_alive() is False
+    assert second_thread.is_alive() is False

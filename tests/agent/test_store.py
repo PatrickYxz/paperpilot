@@ -672,7 +672,9 @@ def test_tool_execution_id_arguments_and_completed_record_are_stable(run_store):
         classification="read_only",
     )
     assert first.id == expected_id
-    assert repeated == first
+    assert first.disposition == "new"
+    assert repeated.disposition == "in_progress"
+    assert repeated.execution == first.execution
 
     with pytest.raises(agent_store.ToolExecutionConflictError):
         store.start_tool_execution(
@@ -713,6 +715,7 @@ def test_tool_execution_id_arguments_and_completed_record_are_stable(run_store):
     )
     assert completed.step_id == step.id
     assert completed.status == "completed"
+    assert completed.disposition == "completed"
 
 
 def test_failed_tool_execution_is_idempotent_and_retry_moves_step(run_store):
@@ -780,6 +783,79 @@ def test_failed_tool_execution_is_idempotent_and_retry_moves_step(run_store):
     assert retried.step_id == retry_step.id
     assert retried.status == "started"
     assert retried.failure_class is None
+    assert retried.disposition == "retry"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "classification", "expected_disposition"),
+    (
+        ("mcp__colbert__search", "read_only", "retry"),
+        ("mcp__colbert__build_index", "idempotent_write", "retry"),
+        ("paper_deep_read", "non_retryable", "blocked"),
+    ),
+)
+@pytest.mark.parametrize("stale_started", (False, True))
+def test_tool_start_disposition_enforces_replay_safety_across_attempts(
+    run_store, clock, tool_name, classification, expected_disposition, stale_started
+):
+    store, run = run_store
+    owner_id = "owner-a"
+    store.claim_run(run.id, owner_id=owner_id, lease_seconds=10)
+    first_step = store.start_step(
+        run_id=run.id, owner_id=owner_id, kind="tool", input_data={}
+    )
+    first = store.start_tool_execution(
+        run_id=run.id,
+        step_id=first_step.id,
+        owner_id=owner_id,
+        tool_use_id="call-1",
+        tool_name=tool_name,
+        arguments={"query": "attention"},
+        classification=classification,
+    )
+
+    if stale_started:
+        clock.advance(seconds=11)
+        assert [item.id for item in store.recover_due_runs(now=clock.now())] == [run.id]
+        owner_id = "owner-b"
+        assert store.claim_run(run.id, owner_id=owner_id, lease_seconds=30) is not None
+    else:
+        store.fail_tool_execution(
+            first.id,
+            run_id=run.id,
+            step_id=first_step.id,
+            owner_id=owner_id,
+            failure_class="transport",
+            failure_message="closed",
+            duration_ms=1,
+        )
+        store.fail_step(
+            first_step.id,
+            run_id=run.id,
+            owner_id=owner_id,
+            error_data={"failure_class": "transport"},
+        )
+
+    retry_step = store.start_step(
+        run_id=run.id, owner_id=owner_id, kind="tool", input_data={}
+    )
+    restarted = store.start_tool_execution(
+        run_id=run.id,
+        step_id=retry_step.id,
+        owner_id=owner_id,
+        tool_use_id="call-1",
+        tool_name=tool_name,
+        arguments={"query": "attention"},
+        classification=classification,
+    )
+
+    assert restarted.disposition == expected_disposition
+    if expected_disposition == "retry":
+        assert restarted.step_id == retry_step.id
+        assert restarted.status == "started"
+    else:
+        assert restarted.step_id == first_step.id
+        assert restarted.status == ("started" if stale_started else "failed")
 
 
 def test_owner_guarded_terminal_transitions_clear_lease(run_store):

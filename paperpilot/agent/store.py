@@ -10,9 +10,10 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from paperpilot.agent.models import (
     AgentRun,
@@ -38,6 +39,27 @@ class RunLeaseLostError(RuntimeError):
 
 class ToolExecutionConflictError(RuntimeError):
     """Raised when a stable tool execution ID is reused inconsistently."""
+
+
+ToolExecutionStartDisposition = Literal[
+    "new", "retry", "in_progress", "failed", "completed", "blocked"
+]
+
+
+@dataclass(frozen=True)
+class ToolExecutionStart:
+    """Atomic decision about whether a stable tool execution may invoke a handler."""
+
+    execution: ToolExecution
+    disposition: ToolExecutionStartDisposition
+
+    @property
+    def should_invoke(self) -> bool:
+        return self.disposition in {"new", "retry"}
+
+    def __getattr__(self, name: str) -> Any:
+        """Keep Task 3 callers source-compatible while exposing the disposition."""
+        return getattr(self.execution, name)
 
 
 _LOCKED_NOW = object()
@@ -156,7 +178,7 @@ class RunStore(Protocol):
         tool_name: str,
         arguments: dict[str, Any],
         classification: str,
-    ) -> ToolExecution: ...
+    ) -> ToolExecutionStart: ...
 
     def get_tool_execution(self, execution_id: str) -> ToolExecution | None: ...
 
@@ -859,7 +881,7 @@ class SQLiteRunStore:
         tool_name: str,
         arguments: dict[str, Any],
         classification: str,
-    ) -> ToolExecution:
+    ) -> ToolExecutionStart:
         execution_id = stable_tool_execution_id(run_id, tool_use_id)
         arguments_json = _encode_json(arguments)
         conn = self._connect()
@@ -891,19 +913,31 @@ class SQLiteRunStore:
                     raise ToolExecutionConflictError(
                         f"tool execution ID reused with conflicting data: {execution_id}"
                     )
-                if str(row["status"]) == "completed" or str(row["step_id"]) == step_id:
-                    conn.commit()
-                    return _tool_execution_from_row(row)
-                conn.execute(
-                    """
-                    UPDATE tool_executions
-                    SET step_id = ?, status = 'started', result_preview = NULL,
-                        failure_class = NULL, failure_message = NULL,
-                        duration_ms = NULL, started_at = ?, finished_at = NULL
-                    WHERE id = ? AND status IN ('started', 'failed')
-                    """,
-                    (step_id, now, execution_id),
-                )
+                current = _tool_execution_from_row(row)
+                if current.status == "completed":
+                    result = ToolExecutionStart(current, "completed")
+                elif current.step_id == step_id:
+                    disposition: ToolExecutionStartDisposition = (
+                        "in_progress" if current.status == "started" else "failed"
+                    )
+                    result = ToolExecutionStart(current, disposition)
+                elif current.classification == "non_retryable":
+                    result = ToolExecutionStart(current, "blocked")
+                else:
+                    conn.execute(
+                        """
+                        UPDATE tool_executions
+                        SET step_id = ?, status = 'started', result_preview = NULL,
+                            failure_class = NULL, failure_message = NULL,
+                            duration_ms = NULL, started_at = ?, finished_at = NULL
+                        WHERE id = ? AND status IN ('started', 'failed')
+                        """,
+                        (step_id, now, execution_id),
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM tool_executions WHERE id = ?", (execution_id,)
+                    ).fetchone()
+                    result = ToolExecutionStart(_tool_execution_from_row(row), "retry")
             else:
                 conn.execute(
                     """
@@ -919,16 +953,17 @@ class SQLiteRunStore:
                         classification, SCHEMA_VERSION, now,
                     ),
                 )
-            row = conn.execute(
-                "SELECT * FROM tool_executions WHERE id = ?", (execution_id,)
-            ).fetchone()
+                row = conn.execute(
+                    "SELECT * FROM tool_executions WHERE id = ?", (execution_id,)
+                ).fetchone()
+                result = ToolExecutionStart(_tool_execution_from_row(row), "new")
             conn.commit()
         except BaseException:
             conn.rollback()
             raise
         finally:
             conn.close()
-        return _tool_execution_from_row(row)
+        return result
 
     def get_tool_execution(self, execution_id: str) -> ToolExecution | None:
         with self._connect() as conn:
