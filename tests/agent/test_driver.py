@@ -544,8 +544,8 @@ def test_driver_accounts_near_budget_compact_and_blocks_next_provider_call():
     assert client.call_count == 1
 
 
-def test_driver_already_compact_noop_does_not_consume_budget():
-    client = FakeClient()
+def test_driver_short_noncritical_context_plans_llm_without_compact_loop():
+    client = FakeClient([response(text="answer", usage={"total_tokens": 4})])
     driver = make_driver(
         client=client,
         context_manager=ContextManager(
@@ -562,12 +562,21 @@ def test_driver_already_compact_noop_does_not_consume_budget():
         tokens_used=30,
     )
 
-    result = execute_next(driver, state)
+    first = driver.plan_next(state)
+    repeated = driver.plan_next(state)
+    result = driver.execute(
+        first,
+        state,
+        run_id="run-1",
+        step_id="step-1",
+        owner_id="worker-1",
+    )
 
-    assert result.state.turn_count == 2
-    assert result.state.tokens_used == 30
-    assert result.output_data["usage"] is None
-    assert client.call_count == 0
+    assert first.kind == "llm"
+    assert repeated == first
+    assert result.state.turn_count == 3
+    assert result.state.tokens_used == 34
+    assert client.call_count == 1
 
 
 def test_driver_raises_non_retryable_overflow_when_compaction_cannot_help():
@@ -585,7 +594,7 @@ def test_driver_raises_non_retryable_overflow_when_compaction_cannot_help():
     state = DriverState(messages=[{"role": "user", "content": "x" * 500}])
 
     with pytest.raises(ContextOverflowError) as raised:
-        execute_next(driver, state)
+        driver.plan_next(state)
 
     assert raised.value.retryable is False
     assert client.call_count == 0

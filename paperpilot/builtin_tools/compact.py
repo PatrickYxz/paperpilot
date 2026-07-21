@@ -91,16 +91,10 @@ def compact_messages(
     on_usage: UsageCallback | None = None,
 ) -> str:
     """Compact older messages in place while preserving recent protocol turns."""
-    k = keep_recent_turns
-    if len(messages_ref) <= 1 + 2 * k:
+    parts = _compaction_parts(messages_ref, keep_recent_turns)
+    if parts is None:
         return "already compact, nothing to summarize"
-
-    head = messages_ref[0]
-    tail_start = _tail_start_preserving_tool_results(messages_ref, 2 * k)
-    tail = messages_ref[tail_start:]
-    middle = messages_ref[1:tail_start]
-    if not middle:
-        return "already compact, nothing to summarize"
+    head, middle, tail = parts
 
     on_event("compact_start", {"middle_count": len(middle)})
     summary_text, usage = _summarize(middle, client_factory())
@@ -120,6 +114,13 @@ def compact_messages(
         f"compacted {len(middle)} messages into summary; "
         f"kept last {len(tail)} turns"
     )
+
+
+def can_compact_messages(
+    messages: list[dict], keep_recent_turns: int = 3
+) -> bool:
+    """Return whether compact_messages has a summarizable middle section."""
+    return _compaction_parts(messages, keep_recent_turns) is not None
 
 
 def _summarize(
@@ -185,6 +186,21 @@ def _tail_start_preserving_tool_results(
     if start < len(messages) and _is_tool_result_message(messages[start]):
         start = max(1, start - 1)
     return start
+
+
+def _compaction_parts(
+    messages: list[dict], keep_recent_turns: int
+) -> tuple[dict, list[dict], list[dict]] | None:
+    if len(messages) <= 1 + 2 * keep_recent_turns:
+        return None
+    tail_start = _tail_start_preserving_tool_results(
+        messages,
+        2 * keep_recent_turns,
+    )
+    middle = messages[1:tail_start]
+    if not middle:
+        return None
+    return messages[0], middle, messages[tail_start:]
 
 
 def _is_tool_result_message(message: dict) -> bool:

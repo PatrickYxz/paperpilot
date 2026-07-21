@@ -9,7 +9,7 @@ from typing import Any
 from paperpilot.agent.models import StepKind
 from paperpilot.agent.policy import RunPolicy
 from paperpilot.agent.tool_executor import ToolExecutor, ToolInvocationResult
-from paperpilot.builtin_tools.compact import compact_messages
+from paperpilot.builtin_tools.compact import can_compact_messages, compact_messages
 from paperpilot.core.adapter import LLMClient, Tool, ToolCall, ToolResult
 from paperpilot.core.context_manager import ContextManager
 from paperpilot.core.loop import (
@@ -168,11 +168,16 @@ class AgentLoopDriver:
                 kind=kind,
                 input_data={"tool_call": tool_call_dict(call)},
             )
-        if context.needs_compact:
+        if context.needs_compact and can_compact_messages(state.messages):
             self._check_llm_budget(state)
             return DriverAction(
                 kind="compact",
                 input_data={"estimated_tokens": context.estimated_tokens},
+            )
+        if context.over_critical_limit:
+            raise ContextOverflowError(
+                "context is above the critical limit and cannot be compacted: "
+                f"{context.estimated_tokens} >= {context.critical_limit}"
             )
         self._check_llm_budget(state)
         return DriverAction(

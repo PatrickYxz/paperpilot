@@ -7,6 +7,7 @@ import pytest
 
 from paperpilot.builtin_tools.compact import (
     COMPACT_CONTEXT_NUDGE,
+    can_compact_messages,
     compact_context_tool,
     compact_messages,
 )
@@ -30,6 +31,13 @@ def _make_long_messages(n: int) -> list[dict]:
         role = "assistant" if i % 2 == 1 else "user"
         messages.append({"role": role, "content": f"turn-{i}"})
     return messages
+
+
+def test_can_compact_messages_matches_long_and_short_structure():
+    assert can_compact_messages(_make_long_messages(10)) is True
+    assert can_compact_messages([
+        {"role": "user", "content": "one large turn"},
+    ]) is False
 
 
 def test_handler_too_short_returns_noop():
