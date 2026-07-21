@@ -1070,11 +1070,14 @@ def test_tool_execution_start_requires_current_highest_started_attempt(run_store
         )
 
 
-def test_tool_step_requires_completion_before_any_durable_mutation(run_store):
+@pytest.mark.parametrize("step_kind", ("tool", "subagent"))
+def test_external_step_requires_completion_before_any_durable_mutation(
+    run_store, step_kind
+):
     store, run = run_store
     store.claim_run(run.id, owner_id="worker", lease_seconds=30)
     step = store.start_step(
-        run_id=run.id, owner_id="worker", kind="tool", input_data={}
+        run_id=run.id, owner_id="worker", kind=step_kind, input_data={}
     )
     execution = store.start_tool_execution(
         run_id=run.id,
@@ -1086,7 +1089,7 @@ def test_tool_step_requires_completion_before_any_durable_mutation(run_store):
         classification="read_only",
     )
 
-    with pytest.raises(ValueError, match="tool step requires tool_completion"):
+    with pytest.raises(ValueError, match="requires tool_completion"):
         store.complete_step_and_checkpoint(
             step_id=step.id,
             run_id=run.id,
@@ -1130,11 +1133,12 @@ def test_non_tool_step_rejects_tool_completion_before_any_durable_mutation(run_s
     assert store.list_steps(run.id, 0, 10).items[0].status == "started"
 
 
-def test_tool_step_allows_only_one_execution_record(run_store):
+@pytest.mark.parametrize("step_kind", ("tool", "subagent"))
+def test_external_step_allows_only_one_execution_record(run_store, step_kind):
     store, run = run_store
     store.claim_run(run.id, owner_id="worker", lease_seconds=30)
     step = store.start_step(
-        run_id=run.id, owner_id="worker", kind="tool", input_data={}
+        run_id=run.id, owner_id="worker", kind=step_kind, input_data={}
     )
     store.start_tool_execution(
         run_id=run.id,
@@ -1158,11 +1162,14 @@ def test_tool_step_allows_only_one_execution_record(run_store):
         )
 
 
-def test_tool_completion_rejects_multiple_records_for_same_step_atomically(run_store):
+@pytest.mark.parametrize("step_kind", ("tool", "subagent"))
+def test_external_completion_rejects_multiple_records_atomically(
+    run_store, step_kind
+):
     store, run = run_store
     store.claim_run(run.id, owner_id="worker", lease_seconds=30)
     step = store.start_step(
-        run_id=run.id, owner_id="worker", kind="tool", input_data={}
+        run_id=run.id, owner_id="worker", kind=step_kind, input_data={}
     )
     execution = store.start_tool_execution(
         run_id=run.id,

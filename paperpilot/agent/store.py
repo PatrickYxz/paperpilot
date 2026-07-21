@@ -558,12 +558,12 @@ class SQLiteRunStore:
             ).fetchone()
             if step_row is None or int(step_row["sequence"]) != int(run_row["current_step"]) + 1:
                 raise ValueError(f"step is not the active sequence for run: {step_id}")
-            is_tool_step = str(step_row["kind"]) == "tool"
-            if is_tool_step and tool_completion is None:
-                raise ValueError("tool step requires tool_completion")
-            if not is_tool_step and tool_completion is not None:
+            is_external_step = str(step_row["kind"]) in {"tool", "subagent"}
+            if is_external_step and tool_completion is None:
+                raise ValueError("external step requires tool_completion")
+            if not is_external_step and tool_completion is not None:
                 raise ValueError("non-tool step forbids tool_completion")
-            if is_tool_step:
+            if is_external_step:
                 execution_rows = conn.execute(
                     """
                     SELECT id FROM tool_executions
@@ -1190,7 +1190,7 @@ class SQLiteRunStore:
             """
             SELECT * FROM agent_steps
             WHERE id = ? AND run_id = ? AND sequence = ?
-              AND kind = 'tool' AND status = 'started'
+              AND kind IN ('tool', 'subagent') AND status = 'started'
               AND attempt = (
                   SELECT MAX(attempt) FROM agent_steps
                   WHERE run_id = ? AND sequence = ?

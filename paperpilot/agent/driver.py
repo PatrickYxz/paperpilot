@@ -169,6 +169,7 @@ class AgentLoopDriver:
                 input_data={"tool_call": tool_call_dict(call)},
             )
         if context.needs_compact:
+            self._check_llm_budget(state)
             return DriverAction(
                 kind="compact",
                 input_data={"estimated_tokens": context.estimated_tokens},
@@ -188,10 +189,17 @@ class AgentLoopDriver:
         step_id: str,
         owner_id: str,
     ) -> DriverStepResult:
+        expected_action = self.plan_next(state)
+        if action != expected_action:
+            raise ValueError(
+                "driver action does not match state: "
+                f"expected {expected_action.to_dict()}, got {action.to_dict()}"
+            )
         if action.kind == "llm":
             return self._execute_llm(state)
         if action.kind in {"tool", "subagent"}:
             return self._execute_tool(
+                action,
                 state,
                 run_id=run_id,
                 step_id=step_id,
@@ -239,6 +247,7 @@ class AgentLoopDriver:
 
     def _execute_tool(
         self,
+        action: DriverAction,
         state: DriverState,
         *,
         run_id: str,
@@ -247,7 +256,7 @@ class AgentLoopDriver:
     ) -> DriverStepResult:
         if not state.pending_tool_calls:
             raise ValueError("tool action requires a pending tool call")
-        call = tool_call_from_dict(tool_call_dict(state.pending_tool_calls[0]))
+        call = tool_call_from_dict(action.input_data["tool_call"])
         if should_repair_build_index_args(call, state.downloaded_documents):
             call.arguments = {
                 **call.arguments,
@@ -316,10 +325,12 @@ class AgentLoopDriver:
 
     def _execute_compact(self, state: DriverState) -> DriverStepResult:
         messages = deepcopy(state.messages)
+        compact_usage: list[dict[str, Any]] = []
         compact_result = compact_messages(
             messages_ref=messages,
             client_factory=lambda: self.client,
             on_event=self.emit,
+            on_usage=lambda usage: compact_usage.append(deepcopy(usage)),
         )
         context = self.context_manager.inspect(
             system=self.system,
@@ -331,10 +342,14 @@ class AgentLoopDriver:
                 "context remains above the critical limit after compaction: "
                 f"{context.estimated_tokens} >= {context.critical_limit}"
             )
+        usage = compact_usage[0] if compact_usage else None
         next_state = DriverState(
             messages=messages,
-            turn_count=state.turn_count,
-            tokens_used=state.tokens_used,
+            turn_count=state.turn_count + (1 if usage is not None else 0),
+            tokens_used=(
+                state.tokens_used
+                + (_usage_total_tokens(usage) if usage is not None else 0)
+            ),
             downloaded_documents=deepcopy(state.downloaded_documents),
             todo_items=deepcopy(state.todo_items),
             pending_tool_calls=[
@@ -352,6 +367,7 @@ class AgentLoopDriver:
             output_data={
                 "result": compact_result,
                 "estimated_tokens": context.estimated_tokens,
+                "usage": usage,
             },
             final_text=state.final_text,
         )

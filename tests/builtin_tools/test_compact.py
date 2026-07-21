@@ -8,6 +8,7 @@ import pytest
 from paperpilot.builtin_tools.compact import (
     COMPACT_CONTEXT_NUDGE,
     compact_context_tool,
+    compact_messages,
 )
 from paperpilot.core.adapter import ParsedResponse
 
@@ -71,6 +72,35 @@ def test_handler_normal_path_replaces_middle():
     for index, expected_obj in enumerate(tail_objs):
         assert messages[2 + index] is expected_obj
     client.call.assert_called_once()
+
+
+def test_compact_messages_reports_actual_summarizer_usage():
+    messages = _make_long_messages(10)
+    usage = []
+
+    result = compact_messages(
+        messages_ref=messages,
+        client_factory=lambda: _fake_client("SUMMARY"),
+        on_event=lambda k, v: None,
+        on_usage=lambda value: usage.append(value),
+    )
+
+    assert result.startswith("compacted ")
+    assert usage == [{"total_tokens": 50}]
+
+
+def test_compact_messages_noop_does_not_report_usage():
+    usage = []
+
+    result = compact_messages(
+        messages_ref=[{"role": "user", "content": "short"}],
+        client_factory=lambda: _fake_client("unused"),
+        on_event=lambda k, v: None,
+        on_usage=lambda value: usage.append(value),
+    )
+
+    assert "already compact" in result
+    assert usage == []
 
 
 def test_handler_summarize_failure_reraises_and_keeps_messages():

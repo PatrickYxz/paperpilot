@@ -18,10 +18,16 @@ from paperpilot.agent.driver import (
 )
 from paperpilot.agent.errors import ToolExecutionReplayRequired
 from paperpilot.agent.policy import RunPolicy
-from paperpilot.agent.tool_executor import ToolInvocationResult
+from paperpilot.agent.store import (
+    RunLeaseLostError,
+    SQLiteRunStore,
+    stable_tool_execution_id,
+)
+from paperpilot.agent.tool_executor import ToolExecutor, ToolInvocationResult
 from paperpilot.builtin_tools.research_todo import TodoStore, research_todo_tool
 from paperpilot.core.adapter import ParsedResponse, Tool, ToolCall, ToolResult
 from paperpilot.core.context_manager import ContextManager
+from paperpilot.web.task_store import TaskStore
 
 
 @dataclass
@@ -211,6 +217,106 @@ def test_plan_next_rejects_exhausted_budgets_as_non_retryable(state):
     assert raised.value.retryable is False
 
 
+def test_execute_rejects_mismatched_tool_action_before_executor_call():
+    executor = RecordingExecutor()
+    driver = make_driver(executor=executor)
+    state = pending_state(ToolCall(id="A", name="search", arguments={"q": "a"}))
+    snapshot = state.to_dict()
+    action = DriverAction(
+        kind="tool",
+        input_data={
+            "tool_call": {
+                "id": "B",
+                "name": "search",
+                "arguments": {"q": "b"},
+            }
+        },
+    )
+
+    with pytest.raises(ValueError, match="action does not match state"):
+        driver.execute(
+            action,
+            state,
+            run_id="run-1",
+            step_id="step-1",
+            owner_id="worker-1",
+        )
+
+    assert executor.calls == []
+    assert state.to_dict() == snapshot
+
+
+def test_execute_rejects_mismatched_llm_action_before_client_call():
+    client = FakeClient([response(text="must not run")])
+    driver = make_driver(client=client)
+    state = DriverState(messages=[])
+    snapshot = state.to_dict()
+
+    with pytest.raises(ValueError, match="action does not match state"):
+        driver.execute(
+            DriverAction(kind="llm", input_data={"message_count": 99}),
+            state,
+            run_id="run-1",
+            step_id="step-1",
+            owner_id="worker-1",
+        )
+
+    assert client.call_count == 0
+    assert state.to_dict() == snapshot
+
+
+def test_execute_rejects_mismatched_compact_action_before_client_call():
+    messages = [{"role": "user", "content": "question"}]
+    messages.extend(
+        {"role": "assistant", "content": "x" * 80 + str(index)}
+        for index in range(10)
+    )
+    client = FakeClient([response(text="must not run")])
+    driver = make_driver(
+        client=client,
+        context_manager=ContextManager(
+            window_tokens=500,
+            expected_output_tokens=1,
+            soft_ratio=0.3,
+            hard_ratio=0.8,
+            critical_ratio=0.99,
+        ),
+    )
+    state = DriverState(messages=messages)
+    snapshot = state.to_dict()
+
+    with pytest.raises(ValueError, match="action does not match state"):
+        driver.execute(
+            DriverAction(kind="compact", input_data={"estimated_tokens": -1}),
+            state,
+            run_id="run-1",
+            step_id="step-1",
+            owner_id="worker-1",
+        )
+
+    assert client.call_count == 0
+    assert state.to_dict() == snapshot
+
+
+def test_execute_rejects_finalize_for_non_final_state_without_mutation():
+    client = FakeClient()
+    driver = make_driver(client=client)
+    state = DriverState(messages=[])
+    snapshot = state.to_dict()
+
+    with pytest.raises(ValueError, match="action does not match state"):
+        driver.execute(
+            DriverAction(kind="finalize", input_data={}),
+            state,
+            run_id="run-1",
+            step_id="step-1",
+            owner_id="worker-1",
+        )
+
+    assert client.call_count == 0
+    assert state.to_dict() == snapshot
+
+
 def test_driver_executes_one_llm_call_and_preserves_assistant_blocks():
     call = ToolCall(id="search-1", name="search", arguments={"query": "q"})
     blocks = [
@@ -359,7 +465,7 @@ def test_driver_compacts_once_and_returns_checkpointable_messages(monkeypatch):
         {"role": "assistant", "content": "x" * 80 + str(index)}
         for index in range(10)
     )
-    client = FakeClient([response(text="SUMMARY")])
+    client = FakeClient([response(text="SUMMARY", usage={"total_tokens": 7})])
     driver = make_driver(
         client=client,
         context_manager=ContextManager(
@@ -378,6 +484,90 @@ def test_driver_compacts_once_and_returns_checkpointable_messages(monkeypatch):
     assert len(calls) == 1
     assert client.call_count == 1
     assert "<context_summary>" in result.state.messages[1]["content"]
+    assert result.state.turn_count == 1
+    assert result.state.tokens_used == 7
+    assert result.output_data["usage"] == {"total_tokens": 7}
+
+
+def test_driver_rejects_exhausted_budget_before_compact_provider_call():
+    messages = [{"role": "user", "content": "question"}]
+    messages.extend(
+        {"role": "assistant", "content": "x" * 80 + str(index)}
+        for index in range(10)
+    )
+    client = FakeClient([response(text="must not run")])
+    driver = make_driver(
+        client=client,
+        policy=RunPolicy.for_depth("quick"),
+        context_manager=ContextManager(
+            window_tokens=500,
+            expected_output_tokens=1,
+            soft_ratio=0.3,
+            hard_ratio=0.8,
+            critical_ratio=0.99,
+        ),
+    )
+    state = DriverState(messages=messages, turn_count=4, tokens_used=20_000)
+
+    with pytest.raises(BudgetExceededError):
+        driver.plan_next(state)
+
+    assert client.call_count == 0
+
+
+def test_driver_accounts_near_budget_compact_and_blocks_next_provider_call():
+    messages = [{"role": "user", "content": "question"}]
+    messages.extend(
+        {"role": "assistant", "content": "x" * 80 + str(index)}
+        for index in range(10)
+    )
+    client = FakeClient([response(text="SUMMARY", usage={"total_tokens": 5})])
+    driver = make_driver(
+        client=client,
+        policy=RunPolicy.for_depth("quick"),
+        context_manager=ContextManager(
+            window_tokens=500,
+            expected_output_tokens=1,
+            soft_ratio=0.3,
+            hard_ratio=0.8,
+            critical_ratio=0.99,
+        ),
+    )
+    state = DriverState(messages=messages, tokens_used=19_999)
+
+    result = execute_next(driver, state)
+
+    assert result.state.turn_count == 1
+    assert result.state.tokens_used == 20_004
+    with pytest.raises(BudgetExceededError):
+        driver.plan_next(result.state)
+    assert client.call_count == 1
+
+
+def test_driver_already_compact_noop_does_not_consume_budget():
+    client = FakeClient()
+    driver = make_driver(
+        client=client,
+        context_manager=ContextManager(
+            window_tokens=1_000,
+            expected_output_tokens=1,
+            soft_ratio=0.1,
+            hard_ratio=0.8,
+            critical_ratio=0.9,
+        ),
+    )
+    state = DriverState(
+        messages=[{"role": "user", "content": "x" * 500}],
+        turn_count=2,
+        tokens_used=30,
+    )
+
+    result = execute_next(driver, state)
+
+    assert result.state.turn_count == 2
+    assert result.state.tokens_used == 30
+    assert result.output_data["usage"] is None
+    assert client.call_count == 0
 
 
 def test_driver_raises_non_retryable_overflow_when_compaction_cannot_help():
@@ -399,3 +589,80 @@ def test_driver_raises_non_retryable_overflow_when_compaction_cannot_help():
 
     assert raised.value.retryable is False
     assert client.call_count == 0
+
+
+def test_driver_paper_deep_read_commits_subagent_checkpoint_with_real_sqlite(
+    tmp_path,
+):
+    db_path = tmp_path / "tasks.sqlite3"
+    task = TaskStore(db_path).create_task(question="Read this paper")
+    store = SQLiteRunStore(db_path)
+    run = store.create_run(
+        task_id=task.id,
+        policy=RunPolicy.for_depth("standard"),
+        initial_messages=[{"role": "user", "content": task.question}],
+        runtime_state={},
+    )
+    assert store.claim_run(run.id, owner_id="worker-1", lease_seconds=30)
+    handler_calls = []
+    tool = Tool(
+        name="paper_deep_read",
+        description="read",
+        input_schema={},
+        handler=lambda arguments: handler_calls.append(arguments) or "deep result",
+    )
+    driver = make_driver(
+        tools=[tool],
+        executor=ToolExecutor(store=store, tools=[tool]),
+    )
+    state = pending_state(
+        ToolCall(
+            id="deep-1",
+            name="paper_deep_read",
+            arguments={"paper_id": "1706.03762"},
+        )
+    )
+    action = driver.plan_next(state)
+    step = store.start_step(
+        run_id=run.id,
+        owner_id="worker-1",
+        kind=action.kind,
+        input_data=action.input_data,
+    )
+
+    with pytest.raises(RunLeaseLostError):
+        driver.execute(
+            action,
+            state,
+            run_id=run.id,
+            step_id=step.id,
+            owner_id="worker-other",
+        )
+    assert handler_calls == []
+
+    result = driver.execute(
+        action,
+        state,
+        run_id=run.id,
+        step_id=step.id,
+        owner_id="worker-1",
+    )
+    checkpoint = store.complete_step_and_checkpoint(
+        step_id=step.id,
+        run_id=run.id,
+        owner_id="worker-1",
+        output_data=result.output_data,
+        messages=result.state.messages,
+        runtime_state=result.state.runtime_payload(),
+        tool_completion=result.tool_completion,
+    )
+
+    assert action.kind == "subagent"
+    assert handler_calls == [{"paper_id": "1706.03762"}]
+    assert checkpoint.step_sequence == 1
+    assert checkpoint.messages == result.state.messages
+    execution = store.get_tool_execution(
+        stable_tool_execution_id(run.id, "deep-1")
+    )
+    assert execution is not None
+    assert execution.status == "completed"

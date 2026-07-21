@@ -6,11 +6,12 @@ summary while keeping the most recent turns intact.
 """
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 from paperpilot.core.adapter import LLMClient, Tool
 
 EventCallback = Callable[[str, dict], None]
+UsageCallback = Callable[[dict[str, Any]], None]
 
 
 COMPACT_CONTEXT_NUDGE = """
@@ -87,6 +88,7 @@ def compact_messages(
     client_factory: Callable[[], LLMClient],
     on_event: EventCallback,
     keep_recent_turns: int = 3,
+    on_usage: UsageCallback | None = None,
 ) -> str:
     """Compact older messages in place while preserving recent protocol turns."""
     k = keep_recent_turns
@@ -101,7 +103,9 @@ def compact_messages(
         return "already compact, nothing to summarize"
 
     on_event("compact_start", {"middle_count": len(middle)})
-    summary_text = _summarize(middle, client_factory())
+    summary_text, usage = _summarize(middle, client_factory())
+    if on_usage is not None:
+        on_usage(dict(usage))
     on_event("compact_done", {"kept_recent": len(tail)})
 
     messages_ref[:] = [
@@ -118,7 +122,9 @@ def compact_messages(
     )
 
 
-def _summarize(middle: list[dict], client: LLMClient) -> str:
+def _summarize(
+    middle: list[dict], client: LLMClient
+) -> tuple[str, dict[str, Any]]:
     rendered = _render_messages_for_summary(middle)
     prompt = f"{SUMMARIZE_PROMPT}\n{rendered}"
     response = client.call(
@@ -126,7 +132,7 @@ def _summarize(middle: list[dict], client: LLMClient) -> str:
         tools=[],
         system=SUMMARIZE_SYSTEM,
     )
-    return response.text or "(empty summary)"
+    return response.text or "(empty summary)", response.usage
 
 
 def _render_messages_for_summary(middle: list[dict]) -> str:
