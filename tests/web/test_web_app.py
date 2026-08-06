@@ -9,6 +9,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+import paperpilot.web.app as web_app_module
 from paperpilot.web.app import create_app
 from paperpilot.web.config import WebRuntimeConfig
 from paperpilot.web.observability import ACCESS_LOGGER_NAME, RUNTIME_LOGGER_NAME
@@ -121,6 +122,16 @@ class FailingHealthStore(TaskStore):
         raise sqlite3.OperationalError("database unavailable")
 
 
+class TrackingTaskStore(TaskStore):
+    def __init__(self, db_path) -> None:
+        super().__init__(db_path)
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        super().close()
+
+
 class RecordHandler(logging.Handler):
     def __init__(self) -> None:
         super().__init__()
@@ -146,6 +157,41 @@ def _register(client: TestClient, username: str = "alice") -> dict:
     )
     assert response.status_code == 201
     return response.json()
+
+
+def test_app_shutdown_closes_owned_task_store(tmp_path, monkeypatch):
+    store = TrackingTaskStore(tmp_path / "owned.sqlite3")
+    executor = FailingExecutor()
+    monkeypatch.setattr(web_app_module, "TaskStore", lambda: store)
+
+    with TestClient(
+        create_app(
+            task_executor=executor,
+            runtime_config=WebRuntimeConfig(),
+        )
+    ):
+        pass
+
+    assert executor.is_shutdown is True
+    assert store.close_calls == 1
+
+
+def test_app_shutdown_does_not_close_injected_task_store(tmp_path):
+    store = TrackingTaskStore(tmp_path / "injected.sqlite3")
+    executor = FailingExecutor()
+
+    with TestClient(
+        create_app(
+            store,
+            task_executor=executor,
+            runtime_config=WebRuntimeConfig(),
+        )
+    ):
+        pass
+
+    assert executor.is_shutdown is True
+    assert store.close_calls == 0
+    store.close()
 
 
 def test_authentication_error_has_request_id(tmp_path):

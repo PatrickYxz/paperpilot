@@ -27,6 +27,24 @@ class ClosableRuntime:
         self.close_count += 1
 
 
+class TrackingTaskStore(TaskStore):
+    def __init__(self, db_path) -> None:
+        super().__init__(db_path)
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        super().close()
+
+
+class RaisingWorkflowRunner:
+    def __init__(self, store: TaskStore) -> None:
+        self.store = store
+
+    def run_simulated(self, task_id: str) -> None:
+        raise RuntimeError("workflow failed before cleanup")
+
+
 def test_celery_app_uses_long_task_safety_settings(monkeypatch):
     monkeypatch.setenv(
         "PAPERPILOT_CELERY_BROKER_URL",
@@ -56,6 +74,28 @@ def test_celery_app_rejects_time_limits_beyond_visibility_timeout(monkeypatch):
 
     with pytest.raises(ValueError, match="visibility timeout"):
         create_celery_app()
+
+
+def test_worker_closes_task_store_after_success(tmp_path, monkeypatch):
+    store = TrackingTaskStore(tmp_path / "success.sqlite3")
+    task = store.create_task(question="close after success")
+    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: store)
+
+    worker_tasks._execute_research_task(task.id, "simulated")
+
+    assert store.close_calls == 1
+
+
+def test_worker_closes_task_store_after_failure(tmp_path, monkeypatch):
+    store = TrackingTaskStore(tmp_path / "failure.sqlite3")
+    task = store.create_task(question="close after failure")
+    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: store)
+    monkeypatch.setattr(worker_tasks, "WorkflowRunner", RaisingWorkflowRunner)
+
+    with pytest.raises(RuntimeError, match="workflow failed before cleanup"):
+        worker_tasks._execute_research_task(task.id, "simulated")
+
+    assert store.close_calls == 1
 
 
 def test_worker_reuses_one_runtime_for_two_real_tasks(tmp_path, monkeypatch):

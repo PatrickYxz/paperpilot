@@ -39,25 +39,28 @@ def _execute_research_task(
     if execution_mode not in {"simulated", "real"}:
         raise ValueError(f"invalid execution mode: {execution_mode!r}")
     store = _store_factory()
-    claimed = store.claim_task(task_id, allow_running=redelivered)
-    if claimed is None and store.get_task(task_id) is None:
-        raise ValueError(f"task not found: {task_id}")
-    if claimed is None:
-        return
-    if execution_mode == "simulated":
-        WorkflowRunner(store).run_simulated(task_id)
-        return
+    try:
+        claimed = store.claim_task(task_id, allow_running=redelivered)
+        if claimed is None and store.get_task(task_id) is None:
+            raise ValueError(f"task not found: {task_id}")
+        if claimed is None:
+            return
+        if execution_mode == "simulated":
+            WorkflowRunner(store).run_simulated(task_id)
+            return
 
-    runtime = _get_runtime()
+        runtime = _get_runtime()
 
-    def real_runner(query: str, *, on_event=None) -> list[dict]:
-        return run_conversation(
-            query,
-            on_event=on_event,
-            mcp_runtime=runtime,
-        )
+        def real_runner(query: str, *, on_event=None) -> list[dict]:
+            return run_conversation(
+                query,
+                on_event=on_event,
+                mcp_runtime=runtime,
+            )
 
-    WorkflowRunner(store, real_runner=real_runner).run_real(task_id)
+        WorkflowRunner(store, real_runner=real_runner).run_real(task_id)
+    finally:
+        store.close()
 
 
 @celery_app.task(

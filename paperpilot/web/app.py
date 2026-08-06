@@ -143,7 +143,8 @@ def create_app(
     runtime_config: WebRuntimeConfig | None = None,
 ) -> FastAPI:
     config = runtime_config or WebRuntimeConfig.from_env()
-    store = task_store or TaskStore()
+    owns_task_store = task_store is None
+    store = task_store if task_store is not None else TaskStore()
     runner = workflow_runner or WorkflowRunner(
         store,
         delay_seconds=simulation_delay_seconds,
@@ -157,10 +158,18 @@ def create_app(
     app.state.runtime_config = config
     app.state.task_store = store
     app.state.task_executor = executor
+
+    def shutdown_resources() -> None:
+        try:
+            executor.shutdown()
+        finally:
+            if owns_task_store:
+                store.close()
+
     if hasattr(app, "add_event_handler"):
-        app.add_event_handler("shutdown", executor.shutdown)
+        app.add_event_handler("shutdown", shutdown_resources)
     else:
-        app.router.add_event_handler("shutdown", executor.shutdown)
+        app.router.add_event_handler("shutdown", shutdown_resources)
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
