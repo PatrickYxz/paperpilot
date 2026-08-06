@@ -5,7 +5,8 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import event
+from sqlalchemy.exc import DatabaseError, IntegrityError, OperationalError
 
 from paperpilot.web.db_migrations import get_database_heads, get_script_heads
 from paperpilot.web.task_store import TaskStore
@@ -69,22 +70,25 @@ def test_create_and_get_task_persists_to_sqlite(tmp_path):
 def test_store_enables_wal_and_connection_pragmas(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
 
-    with store._connect() as conn:
-        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30_000
-        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
+    with store.engine.connect() as connection:
+        assert connection.exec_driver_sql("PRAGMA journal_mode").scalar_one() == "wal"
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+        assert (
+            connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+            == 30_000
+        )
+        assert connection.exec_driver_sql("PRAGMA synchronous").scalar_one() == 1
 
 
 def test_store_creates_query_indexes(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
 
-    with store._connect() as conn:
+    with store.engine.connect() as connection:
         names = {
             row[0]
-            for row in conn.execute(
+            for row in connection.exec_driver_sql(
                 "SELECT name FROM sqlite_master WHERE type = 'index'"
-            ).fetchall()
+            ).all()
         }
 
     assert {
@@ -140,8 +144,8 @@ def test_list_tasks_page_uses_stable_keyset_with_equal_timestamps(tmp_path):
         store.create_task(question=f"task {index}", user_id=user.id)
         for index in range(5)
     ]
-    with store._connect() as conn:
-        conn.execute(
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
             "UPDATE research_tasks SET created_at = ? WHERE user_id = ?",
             ("2026-07-14T08:00:00+00:00", user.id),
         )
@@ -224,8 +228,8 @@ def test_list_tasks_page_query_plans_use_business_indexes(
         """
         params = (user.id, status, 11)
 
-    with store._connect() as conn:
-        plan = conn.execute(query, params).fetchall()
+    with store.engine.connect() as connection:
+        plan = connection.exec_driver_sql(query, params).all()
 
     details = " ".join(str(row[3]) for row in plan)
     assert expected_index in details
@@ -314,32 +318,45 @@ def test_create_queued_task_rejects_invalid_execution_mode(tmp_path):
         )
 
 
-def test_check_health_executes_a_lightweight_select(tmp_path, monkeypatch):
+def test_check_health_executes_a_lightweight_select(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
-    statements = []
-    original_connect = store._connect
+    statements: list[str] = []
 
-    def traced_connect():
-        connection = original_connect()
-        connection.set_trace_callback(statements.append)
-        return connection
+    def capture_statement(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        statements.append(statement.strip().upper())
 
-    monkeypatch.setattr(store, "_connect", traced_connect)
+    event.listen(store.engine, "before_cursor_execute", capture_statement)
+    try:
+        assert store.check_health() is None
+    finally:
+        event.remove(store.engine, "before_cursor_execute", capture_statement)
 
-    assert store.check_health() is None
-    assert [statement.strip().upper() for statement in statements] == ["SELECT 1"]
+    assert [statement for statement in statements if statement != "BEGIN"] == [
+        "SELECT 1"
+    ]
 
 
 def test_check_health_propagates_connection_error(tmp_path, monkeypatch):
     store = TaskStore(tmp_path / "tasks.sqlite3")
-    connection_error = sqlite3.OperationalError("connection failed")
+    connection_error = OperationalError(
+        "connect",
+        {},
+        sqlite3.OperationalError("connection failed"),
+    )
 
     def failing_connect():
         raise connection_error
 
-    monkeypatch.setattr(store, "_connect", failing_connect)
+    monkeypatch.setattr(store.engine, "connect", failing_connect)
 
-    with pytest.raises(sqlite3.Error) as exc_info:
+    with pytest.raises(OperationalError) as exc_info:
         store.check_health()
 
     assert exc_info.value is connection_error
@@ -347,7 +364,11 @@ def test_check_health_propagates_connection_error(tmp_path, monkeypatch):
 
 def test_check_health_propagates_select_error(tmp_path, monkeypatch):
     store = TaskStore(tmp_path / "tasks.sqlite3")
-    select_error = sqlite3.DatabaseError("select failed")
+    select_error = DatabaseError(
+        "SELECT 1",
+        {},
+        sqlite3.DatabaseError("select failed"),
+    )
 
     class FailingConnection:
         def __enter__(self):
@@ -357,12 +378,12 @@ def test_check_health_propagates_select_error(tmp_path, monkeypatch):
             return False
 
         def execute(self, statement):
-            assert statement == "SELECT 1"
+            assert str(statement) == "SELECT 1"
             raise select_error
 
-    monkeypatch.setattr(store, "_connect", FailingConnection)
+    monkeypatch.setattr(store.engine, "connect", FailingConnection)
 
-    with pytest.raises(sqlite3.Error) as exc_info:
+    with pytest.raises(DatabaseError) as exc_info:
         store.check_health()
 
     assert exc_info.value is select_error
@@ -573,20 +594,27 @@ def test_task_updates_starts_explicit_transaction_before_selects(tmp_path):
     task = store.create_task(question="snapshot transaction")
     statements: list[str] = []
 
-    with store._connect() as conn:
-        conn.set_trace_callback(statements.append)
-        original_connect = store._connect
-        store._connect = lambda: conn
-        try:
-            updates = store.get_task_updates(
-                task.id,
-                user_id=None,
-                after_event_id=0,
-                after_artifact_id=0,
-                limit=1,
-            )
-        finally:
-            store._connect = original_connect
+    def capture_statement(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(store.engine, "before_cursor_execute", capture_statement)
+    try:
+        updates = store.get_task_updates(
+            task.id,
+            user_id=None,
+            after_event_id=0,
+            after_artifact_id=0,
+            limit=1,
+        )
+    finally:
+        event.remove(store.engine, "before_cursor_execute", capture_statement)
 
     assert updates is not None
     begin_index = next(
@@ -600,6 +628,68 @@ def test_task_updates_starts_explicit_transaction_before_selects(tmp_path):
         if statement.lstrip().upper().startswith("SELECT")
     )
     assert begin_index < first_select_index
+
+
+def test_task_updates_keeps_one_snapshot_across_event_and_artifact_reads(
+    tmp_path,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    task = store.create_task(question="snapshot consistency")
+    store.add_event(task_id=task.id, type="progress", message="event")
+    inserted_artifacts = []
+
+    def insert_artifact_after_event_read(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if inserted_artifacts or "FROM task_events" not in statement:
+            return
+        inserted_artifacts.append(
+            store.add_artifact(
+                task_id=task.id,
+                kind="late",
+                title="Late artifact",
+                content="Committed after the snapshot started.",
+            )
+        )
+
+    event.listen(
+        store.engine,
+        "after_cursor_execute",
+        insert_artifact_after_event_read,
+    )
+    try:
+        updates = store.get_task_updates(
+            task.id,
+            user_id=None,
+            after_event_id=0,
+            after_artifact_id=0,
+            limit=10,
+        )
+    finally:
+        event.remove(
+            store.engine,
+            "after_cursor_execute",
+            insert_artifact_after_event_read,
+        )
+
+    assert inserted_artifacts
+    assert updates is not None
+    assert updates.artifacts.items == []
+
+    later_updates = store.get_task_updates(
+        task.id,
+        user_id=None,
+        after_event_id=0,
+        after_artifact_id=0,
+        limit=10,
+    )
+    assert later_updates is not None
+    assert later_updates.artifacts.items == inserted_artifacts
 
 
 @pytest.mark.parametrize(
@@ -631,11 +721,11 @@ def test_watermark_page_query_plans_use_indexes(tmp_path, query, index_name):
     store = TaskStore(tmp_path / "tasks.sqlite3")
     task = store.create_task(question="query plan")
 
-    with store._connect() as conn:
-        plan = conn.execute(
+    with store.engine.connect() as connection:
+        plan = connection.exec_driver_sql(
             f"EXPLAIN QUERY PLAN {query}",
             (task.id, 0, 2),
-        ).fetchall()
+        ).all()
 
     details = " ".join(str(row[3]) for row in plan)
     assert index_name in details

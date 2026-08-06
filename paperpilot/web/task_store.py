@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -10,8 +9,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from paperpilot.web.database import (
     DEFAULT_TASK_DB_PATH,
@@ -23,6 +23,7 @@ from paperpilot.web.db_migrations import ensure_database_current
 from paperpilot.web.db_models import (
     LoginSessionRow,
     ResearchTaskRow,
+    TaskArtifactRow,
     TaskEventRow,
     UserRow,
 )
@@ -278,8 +279,8 @@ class TaskStore:
         return task
 
     def check_health(self) -> None:
-        with self._connect() as conn:
-            row = conn.execute("SELECT 1").fetchone()
+        with self.engine.connect() as connection:
+            row = connection.execute(text("SELECT 1")).one_or_none()
         if row is None or int(row[0]) != 1:
             raise RuntimeError("SQLite health probe returned an invalid result")
 
@@ -415,35 +416,20 @@ class TaskStore:
     ) -> TaskEvent:
         if not message.strip():
             raise ValueError("event message is required")
-        created_at = _utc_now()
-        payload_dict = payload or {}
-        payload_json = json.dumps(payload_dict, ensure_ascii=False)
-        with self._connect() as conn:
-            existing = conn.execute(
-                "SELECT id FROM research_tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
-            if existing is None:
-                raise ValueError(f"task not found: {task_id}")
-            cursor = conn.execute(
-                """
-                INSERT INTO task_events (
-                    task_id, type, stage, message, payload_json, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (task_id, type, stage, message.strip(), payload_json, created_at),
-            )
-            event_id = int(cursor.lastrowid)
-        return TaskEvent(
-            id=event_id,
+        row = TaskEventRow(
             task_id=task_id,
             type=type,
             stage=stage,
             message=message.strip(),
-            payload=payload_dict,
-            created_at=created_at,
+            payload_json=json.dumps(payload or {}, ensure_ascii=False),
+            created_at=_utc_now(),
         )
+        with self._session_factory.begin() as session:
+            if session.get(ResearchTaskRow, task_id) is None:
+                raise ValueError(f"task not found: {task_id}")
+            session.add(row)
+            session.flush()
+        return _event_from_model(row)
 
     def list_events_page(
         self,
@@ -454,11 +440,11 @@ class TaskStore:
         limit: int,
     ) -> TaskEventBatch | None:
         _validate_incremental_page(after_id, limit)
-        with self._connect() as conn:
-            if _select_owned_task_row(conn, task_id, user_id) is None:
+        with self._session_factory() as session:
+            if _select_owned_task_model(session, task_id, user_id) is None:
                 return None
             return _read_event_batch(
-                conn,
+                session,
                 task_id,
                 after_id=after_id,
                 limit=limit,
@@ -479,42 +465,20 @@ class TaskStore:
             raise ValueError("artifact title is required")
         if not content.strip():
             raise ValueError("artifact content is required")
-        created_at = _utc_now()
-        payload_dict = payload or {}
-        payload_json = json.dumps(payload_dict, ensure_ascii=False)
-        with self._connect() as conn:
-            existing = conn.execute(
-                "SELECT id FROM research_tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
-            if existing is None:
-                raise ValueError(f"task not found: {task_id}")
-            cursor = conn.execute(
-                """
-                INSERT INTO task_artifacts (
-                    task_id, kind, title, content, payload_json, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_id,
-                    kind.strip(),
-                    title.strip(),
-                    content.strip(),
-                    payload_json,
-                    created_at,
-                ),
-            )
-            artifact_id = int(cursor.lastrowid)
-        return TaskArtifact(
-            id=artifact_id,
+        row = TaskArtifactRow(
             task_id=task_id,
             kind=kind.strip(),
             title=title.strip(),
             content=content.strip(),
-            payload=payload_dict,
-            created_at=created_at,
+            payload_json=json.dumps(payload or {}, ensure_ascii=False),
+            created_at=_utc_now(),
         )
+        with self._session_factory.begin() as session:
+            if session.get(ResearchTaskRow, task_id) is None:
+                raise ValueError(f"task not found: {task_id}")
+            session.add(row)
+            session.flush()
+        return _artifact_from_model(row)
 
     def list_artifacts_page(
         self,
@@ -525,11 +489,11 @@ class TaskStore:
         limit: int,
     ) -> TaskArtifactBatch | None:
         _validate_incremental_page(after_id, limit)
-        with self._connect() as conn:
-            if _select_owned_task_row(conn, task_id, user_id) is None:
+        with self._session_factory() as session:
+            if _select_owned_task_model(session, task_id, user_id) is None:
                 return None
             return _read_artifact_batch(
-                conn,
+                session,
                 task_id,
                 after_id=after_id,
                 limit=limit,
@@ -546,34 +510,26 @@ class TaskStore:
     ) -> TaskUpdates | None:
         _validate_incremental_page(after_event_id, limit)
         _validate_incremental_page(after_artifact_id, limit)
-        with self._connect() as conn:
-            conn.execute("BEGIN")
-            row = _select_owned_task_row(conn, task_id, user_id)
+        with self._session_factory.begin() as session:
+            row = _select_owned_task_model(session, task_id, user_id)
             if row is None:
                 return None
             return TaskUpdates(
-                task=_task_from_row(row),
+                task=_task_from_model(row),
                 events=_read_event_batch(
-                    conn,
+                    session,
                     task_id,
                     after_id=after_event_id,
                     limit=limit,
                 ),
                 artifacts=_read_artifact_batch(
-                    conn,
+                    session,
                     task_id,
                     after_id=after_artifact_id,
                     limit=limit,
                 ),
             )
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA busy_timeout = 30000")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        return conn
 
 def _new_task(
     *,
@@ -622,18 +578,6 @@ def _task_from_model(row: ResearchTaskRow) -> ResearchTask:
     )
 
 
-def _task_from_row(row: sqlite3.Row) -> ResearchTask:
-    return ResearchTask(
-        id=str(row["id"]),
-        question=str(row["question"]),
-        depth=str(row["depth"]),
-        status=str(row["status"]),
-        created_at=str(row["created_at"]),
-        updated_at=str(row["updated_at"]),
-        user_id=_optional_str(row["user_id"]),
-    )
-
-
 def _user_from_model(row: UserRow) -> WebUser:
     return WebUser(
         id=row.id,
@@ -644,65 +588,60 @@ def _user_from_model(row: UserRow) -> WebUser:
     )
 
 
-def _event_from_row(row: sqlite3.Row) -> TaskEvent:
-    payload_json = row["payload_json"]
+def _event_from_model(row: TaskEventRow) -> TaskEvent:
     return TaskEvent(
-        id=int(row["id"]),
-        task_id=str(row["task_id"]),
-        type=str(row["type"]),
-        stage=_optional_str(row["stage"]),
-        message=str(row["message"]),
-        payload=_decode_payload(payload_json),
-        created_at=str(row["created_at"]),
+        id=row.id,
+        task_id=row.task_id,
+        type=row.type,
+        stage=row.stage,
+        message=row.message,
+        payload=_decode_payload(row.payload_json),
+        created_at=row.created_at,
     )
 
 
-def _artifact_from_row(row: sqlite3.Row) -> TaskArtifact:
+def _artifact_from_model(row: TaskArtifactRow) -> TaskArtifact:
     return TaskArtifact(
-        id=int(row["id"]),
-        task_id=str(row["task_id"]),
-        kind=str(row["kind"]),
-        title=str(row["title"]),
-        content=str(row["content"]),
-        payload=_decode_payload(row["payload_json"]),
-        created_at=str(row["created_at"]),
+        id=row.id,
+        task_id=row.task_id,
+        kind=row.kind,
+        title=row.title,
+        content=row.content,
+        payload=_decode_payload(row.payload_json),
+        created_at=row.created_at,
     )
 
 
-def _select_owned_task_row(
-    conn: sqlite3.Connection,
+def _select_owned_task_model(
+    session: Session,
     task_id: str,
     user_id: str | None,
-) -> sqlite3.Row | None:
-    if user_id is None:
-        return conn.execute(
-            "SELECT * FROM research_tasks WHERE id = ?",
-            (task_id,),
-        ).fetchone()
-    return conn.execute(
-        "SELECT * FROM research_tasks WHERE id = ? AND user_id = ?",
-        (task_id, user_id),
-    ).fetchone()
+) -> ResearchTaskRow | None:
+    filters = [ResearchTaskRow.id == task_id]
+    if user_id is not None:
+        filters.append(ResearchTaskRow.user_id == user_id)
+    return session.scalar(select(ResearchTaskRow).where(*filters))
 
 
 def _read_event_batch(
-    conn: sqlite3.Connection,
+    session: Session,
     task_id: str,
     *,
     after_id: int,
     limit: int,
 ) -> TaskEventBatch:
-    rows = conn.execute(
-        """
-        SELECT id, task_id, type, stage, message, payload_json, created_at
-        FROM task_events
-        WHERE task_id = ? AND id > ?
-        ORDER BY id ASC
-        LIMIT ?
-        """,
-        (task_id, after_id, limit + 1),
-    ).fetchall()
-    items = [_event_from_row(row) for row in rows[:limit]]
+    rows = list(
+        session.scalars(
+            select(TaskEventRow)
+            .where(
+                TaskEventRow.task_id == task_id,
+                TaskEventRow.id > after_id,
+            )
+            .order_by(TaskEventRow.id.asc())
+            .limit(limit + 1)
+        )
+    )
+    items = [_event_from_model(row) for row in rows[:limit]]
     return TaskEventBatch(
         items=items,
         next_after_id=items[-1].id if items else after_id,
@@ -711,23 +650,24 @@ def _read_event_batch(
 
 
 def _read_artifact_batch(
-    conn: sqlite3.Connection,
+    session: Session,
     task_id: str,
     *,
     after_id: int,
     limit: int,
 ) -> TaskArtifactBatch:
-    rows = conn.execute(
-        """
-        SELECT id, task_id, kind, title, content, payload_json, created_at
-        FROM task_artifacts
-        WHERE task_id = ? AND id > ?
-        ORDER BY id ASC
-        LIMIT ?
-        """,
-        (task_id, after_id, limit + 1),
-    ).fetchall()
-    items = [_artifact_from_row(row) for row in rows[:limit]]
+    rows = list(
+        session.scalars(
+            select(TaskArtifactRow)
+            .where(
+                TaskArtifactRow.task_id == task_id,
+                TaskArtifactRow.id > after_id,
+            )
+            .order_by(TaskArtifactRow.id.asc())
+            .limit(limit + 1)
+        )
+    )
+    items = [_artifact_from_model(row) for row in rows[:limit]]
     return TaskArtifactBatch(
         items=items,
         next_after_id=items[-1].id if items else after_id,
@@ -740,12 +680,6 @@ def _validate_incremental_page(after_id: int, limit: int) -> None:
         raise ValueError("after_id must be non-negative")
     if limit < 1 or limit > 100:
         raise ValueError("limit must be between 1 and 100")
-
-
-def _optional_str(value: object) -> str | None:
-    if value is None:
-        return None
-    return str(value)
 
 
 def _decode_payload(value: object) -> dict:
