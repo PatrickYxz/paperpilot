@@ -61,6 +61,7 @@ logs/
 *.log
 tmp/
 .cache/
+.worktrees/
 
 # 大文件 / 二进制
 *.pkl
