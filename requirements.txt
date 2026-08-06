@@ -10,6 +10,8 @@ pytest>=8.0.0
 fastapi>=0.115.0
 uvicorn>=0.30.0
 celery[redis]>=5.5,<6
+SQLAlchemy>=2.0.51,<2.1
+alembic>=1.18.5,<2
 
 # ===== Day 6: PDF 解析 + ColBERT 检索 =====
 # PyLate (Stanford ColBERT v2 现代 Python 重写) 取代 ragatouille:
