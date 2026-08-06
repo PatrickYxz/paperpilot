@@ -5,6 +5,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from paperpilot.web.db_migrations import get_database_heads, get_script_heads
 from paperpilot.web.task_store import TaskStore
@@ -277,8 +278,8 @@ def test_create_queued_task_writes_task_and_event_together(tmp_path):
 def test_create_queued_task_rolls_back_task_when_event_insert_fails(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
     user = _create_test_user(store, "rollback-user")
-    with sqlite3.connect(store.db_path) as conn:
-        conn.execute(
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
             """
             CREATE TRIGGER reject_queued_event
             BEFORE INSERT ON task_events
@@ -288,7 +289,7 @@ def test_create_queued_task_rolls_back_task_when_event_insert_fails(tmp_path):
             """
         )
 
-    with pytest.raises(sqlite3.IntegrityError, match="event insert rejected"):
+    with pytest.raises(IntegrityError, match="event insert rejected"):
         store.create_queued_task(
             question="Must roll back",
             depth="standard",

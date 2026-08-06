@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from paperpilot.web.database import (
@@ -20,7 +20,12 @@ from paperpilot.web.database import (
     resolve_task_db_path,
 )
 from paperpilot.web.db_migrations import ensure_database_current
-from paperpilot.web.db_models import LoginSessionRow, UserRow
+from paperpilot.web.db_models import (
+    LoginSessionRow,
+    ResearchTaskRow,
+    TaskEventRow,
+    UserRow,
+)
 
 
 TaskDepth = Literal["quick", "standard", "deep"]
@@ -235,8 +240,8 @@ class TaskStore:
         user_id: str | None = None,
     ) -> ResearchTask:
         task = _new_task(question=question, depth=depth, user_id=user_id)
-        with self._connect() as conn:
-            _insert_task(conn, task)
+        with self._session_factory.begin() as session:
+            session.add(_task_to_model(task))
         return task
 
     def create_queued_task(
@@ -256,24 +261,19 @@ class TaskStore:
             "execution_mode": execution_mode,
             "simulated": execution_mode == "simulated",
         }
-        with self._connect() as conn:
-            conn.execute("BEGIN")
-            _insert_task(conn, task)
-            conn.execute(
-                """
-                INSERT INTO task_events (
-                    task_id, type, stage, message, payload_json, created_at
+        task_row = _task_to_model(task)
+        with self._session_factory.begin() as session:
+            session.add(task_row)
+            session.flush()
+            session.add(
+                TaskEventRow(
+                    task_id=task.id,
+                    type="queued",
+                    stage="queue",
+                    message=f"Task queued for {execution_mode} workflow.",
+                    payload_json=json.dumps(payload, ensure_ascii=False),
+                    created_at=_utc_now(),
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task.id,
-                    "queued",
-                    "queue",
-                    f"Task queued for {execution_mode} workflow.",
-                    json.dumps(payload, ensure_ascii=False),
-                    _utc_now(),
-                ),
             )
         return task
 
@@ -299,33 +299,36 @@ class TaskStore:
         if (before_created_at is None) != (before_id is None):
             raise ValueError("task page position requires created_at and id")
 
-        clauses: list[str] = []
-        params: list[object] = []
-        if user_id is None:
-            clauses.append("user_id IS NULL")
-        else:
-            clauses.append("user_id = ?")
-            params.append(user_id)
+        filters = [
+            ResearchTaskRow.user_id.is_(None)
+            if user_id is None
+            else ResearchTaskRow.user_id == user_id
+        ]
         if status is not None:
-            clauses.append("status = ?")
-            params.append(status)
+            filters.append(ResearchTaskRow.status == status)
         if before_created_at is not None:
-            clauses.append(
-                "(created_at < ? OR (created_at = ? AND id < ?))"
+            assert before_id is not None
+            filters.append(
+                or_(
+                    ResearchTaskRow.created_at < before_created_at,
+                    and_(
+                        ResearchTaskRow.created_at == before_created_at,
+                        ResearchTaskRow.id < before_id,
+                    ),
+                )
             )
-            params.extend([before_created_at, before_created_at, before_id])
-
-        query = f"""
-            SELECT *
-            FROM research_tasks
-            WHERE {' AND '.join(clauses)}
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?
-        """
-        params.append(limit + 1)
-        with self._connect() as conn:
-            rows = conn.execute(query, tuple(params)).fetchall()
-        tasks = [_task_from_row(row) for row in rows]
+        statement = (
+            select(ResearchTaskRow)
+            .where(*filters)
+            .order_by(
+                ResearchTaskRow.created_at.desc(),
+                ResearchTaskRow.id.desc(),
+            )
+            .limit(limit + 1)
+        )
+        with self._session_factory() as session:
+            rows = list(session.scalars(statement))
+        tasks = [_task_from_model(row) for row in rows]
         return TaskPage(
             items=tasks[:limit],
             has_more=len(tasks) > limit,
@@ -337,32 +340,24 @@ class TaskStore:
         *,
         user_id: str | None = None,
     ) -> ResearchTask | None:
-        query = "SELECT * FROM research_tasks WHERE id = ?"
-        params: list[str] = [task_id]
+        filters = [ResearchTaskRow.id == task_id]
         if user_id is not None:
-            query += " AND user_id = ?"
-            params.append(user_id)
-        with self._connect() as conn:
-            row = conn.execute(query, tuple(params)).fetchone()
-        if row is None:
-            return None
-        return _task_from_row(row)
+            filters.append(ResearchTaskRow.user_id == user_id)
+        with self._session_factory() as session:
+            row = session.scalar(select(ResearchTaskRow).where(*filters))
+        return _task_from_model(row) if row is not None else None
 
     def update_status(self, task_id: str, status: str) -> ResearchTask | None:
         if status not in VALID_STATUSES:
             raise ValueError(f"invalid status: {status!r}")
 
-        updated_at = _utc_now()
-        with self._connect() as conn:
-            result = conn.execute(
-                """
-                UPDATE research_tasks
-                SET status = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (status, updated_at, task_id),
+        with self._session_factory.begin() as session:
+            result = session.execute(
+                update(ResearchTaskRow)
+                .where(ResearchTaskRow.id == task_id)
+                .values(status=status, updated_at=_utc_now())
             )
-            if result.rowcount == 0:
+            if result.rowcount != 1:
                 return None
         return self.get_task(task_id)
 
@@ -374,46 +369,40 @@ class TaskStore:
     ) -> ResearchTask | None:
         """Atomically claim pending work or recover a redelivered running task."""
         claimable_statuses = ("pending", "running") if allow_running else ("pending",)
-        placeholders = ", ".join("?" for _ in claimable_statuses)
         updated_at = _utc_now()
-        with self._connect() as conn:
-            result = conn.execute(
-                f"""
-                UPDATE research_tasks
-                SET status = 'running', updated_at = ?
-                WHERE id = ? AND status IN ({placeholders})
-                """,
-                (updated_at, task_id, *claimable_statuses),
+        with self._session_factory.begin() as session:
+            result = session.execute(
+                update(ResearchTaskRow)
+                .where(
+                    ResearchTaskRow.id == task_id,
+                    ResearchTaskRow.status.in_(claimable_statuses),
+                )
+                .values(status="running", updated_at=updated_at)
             )
-            if result.rowcount == 0:
+            if result.rowcount != 1:
                 return None
-            row = conn.execute(
-                "SELECT * FROM research_tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
-        assert row is not None
-        return _task_from_row(row)
+            row = session.get(ResearchTaskRow, task_id)
+            if row is None:
+                raise RuntimeError("claimed task disappeared within transaction")
+            return _task_from_model(row)
 
     def fail_pending_task(self, task_id: str) -> ResearchTask | None:
         """Mark an unclaimed task failed without overwriting active work."""
-        updated_at = _utc_now()
-        with self._connect() as conn:
-            result = conn.execute(
-                """
-                UPDATE research_tasks
-                SET status = 'failed', updated_at = ?
-                WHERE id = ? AND status = 'pending'
-                """,
-                (updated_at, task_id),
+        with self._session_factory.begin() as session:
+            result = session.execute(
+                update(ResearchTaskRow)
+                .where(
+                    ResearchTaskRow.id == task_id,
+                    ResearchTaskRow.status == "pending",
+                )
+                .values(status="failed", updated_at=_utc_now())
             )
-            if result.rowcount == 0:
+            if result.rowcount != 1:
                 return None
-            row = conn.execute(
-                "SELECT * FROM research_tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
-        assert row is not None
-        return _task_from_row(row)
+            row = session.get(ResearchTaskRow, task_id)
+            if row is None:
+                raise RuntimeError("failed task disappeared within transaction")
+            return _task_from_model(row)
 
     def add_event(
         self,
@@ -609,23 +598,27 @@ def _new_task(
     )
 
 
-def _insert_task(conn: sqlite3.Connection, task: ResearchTask) -> None:
-    conn.execute(
-        """
-        INSERT INTO research_tasks (
-            id, question, depth, status, created_at, updated_at, user_id
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            task.id,
-            task.question,
-            task.depth,
-            task.status,
-            task.created_at,
-            task.updated_at,
-            task.user_id,
-        ),
+def _task_to_model(task: ResearchTask) -> ResearchTaskRow:
+    return ResearchTaskRow(
+        id=task.id,
+        question=task.question,
+        depth=task.depth,
+        status=task.status,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        user_id=task.user_id,
+    )
+
+
+def _task_from_model(row: ResearchTaskRow) -> ResearchTask:
+    return ResearchTask(
+        id=row.id,
+        question=row.question,
+        depth=row.depth,
+        status=row.status,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        user_id=row.user_id,
     )
 
 
