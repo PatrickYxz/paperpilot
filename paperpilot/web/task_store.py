@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import secrets
 import uuid
@@ -11,7 +10,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-DEFAULT_TASK_DB_PATH = Path("data/web/tasks.sqlite3")
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
+
+from paperpilot.web.database import (
+    DEFAULT_TASK_DB_PATH,
+    create_session_factory,
+    create_task_engine,
+    resolve_task_db_path,
+)
+from paperpilot.web.db_migrations import ensure_database_current
+from paperpilot.web.db_models import LoginSessionRow, UserRow
+
+
 TaskDepth = Literal["quick", "standard", "deep"]
 TaskStatus = Literal["pending", "running", "completed", "failed"]
 
@@ -135,12 +146,13 @@ class TaskStore:
     """Persist local research tasks in SQLite."""
 
     def __init__(self, db_path: Path | str | None = None) -> None:
-        configured_path = db_path or os.environ.get(
-            "PAPERPILOT_TASK_DB_PATH",
-            str(DEFAULT_TASK_DB_PATH),
-        )
-        self.db_path = Path(configured_path)
-        self._ensure_schema()
+        self.db_path = resolve_task_db_path(db_path)
+        ensure_database_current(self.db_path)
+        self.engine = create_task_engine(self.db_path)
+        self._session_factory = create_session_factory(self.engine)
+
+    def close(self) -> None:
+        self.engine.dispose()
 
     def create_user(
         self,
@@ -152,54 +164,31 @@ class TaskStore:
         username = username.strip()
         if not username:
             raise ValueError("username is required")
-        now = _utc_now()
-        user = WebUser(
+        row = UserRow(
             id=f"user_{uuid.uuid4().hex}",
             username=username,
             password_hash=password_hash,
             password_salt=password_salt,
-            created_at=now,
+            created_at=_utc_now(),
         )
-        with self._connect() as conn:
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO users (
-                        id, username, password_hash, password_salt, created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        user.id,
-                        user.username,
-                        user.password_hash,
-                        user.password_salt,
-                        user.created_at,
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise DuplicateUsernameError("username already exists") from exc
-        return user
+        try:
+            with self._session_factory.begin() as session:
+                session.add(row)
+        except IntegrityError as exc:
+            raise DuplicateUsernameError("username already exists") from exc
+        return _user_from_model(row)
 
     def get_user_by_username(self, username: str) -> WebUser | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM users WHERE username = ?",
-                (username,),
-            ).fetchone()
-        if row is None:
-            return None
-        return _user_from_row(row)
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(UserRow).where(UserRow.username == username)
+            )
+        return _user_from_model(row) if row is not None else None
 
     def get_user_by_id(self, user_id: str) -> WebUser | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM users WHERE id = ?",
-                (user_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        return _user_from_row(row)
+        with self._session_factory() as session:
+            row = session.get(UserRow, user_id)
+        return _user_from_model(row) if row is not None else None
 
     def create_session(self, user_id: str) -> str:
         if self.get_user_by_id(user_id) is None:
@@ -207,35 +196,36 @@ class TaskStore:
         token = f"session_{secrets.token_urlsafe(32)}"
         created_at = _utc_now()
         expires_at = _utc_in(days=7)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO sessions (token, user_id, created_at, expires_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (token, user_id, created_at, expires_at),
+        with self._session_factory.begin() as session:
+            session.add(
+                LoginSessionRow(
+                    token=token,
+                    user_id=user_id,
+                    created_at=created_at,
+                    expires_at=expires_at,
+                )
             )
         return token
 
     def get_user_for_session(self, token: str) -> WebUser | None:
         now = _utc_now()
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT users.*
-                FROM sessions
-                JOIN users ON users.id = sessions.user_id
-                WHERE sessions.token = ? AND sessions.expires_at > ?
-                """,
-                (token, now),
-            ).fetchone()
-        if row is None:
-            return None
-        return _user_from_row(row)
+        statement = (
+            select(UserRow)
+            .join(LoginSessionRow, LoginSessionRow.user_id == UserRow.id)
+            .where(
+                LoginSessionRow.token == token,
+                LoginSessionRow.expires_at > now,
+            )
+        )
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+        return _user_from_model(row) if row is not None else None
 
     def delete_session(self, token: str) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        with self._session_factory.begin() as session:
+            session.execute(
+                delete(LoginSessionRow).where(LoginSessionRow.token == token)
+            )
 
     def create_task(
         self,
@@ -588,107 +578,6 @@ class TaskStore:
                 ),
             )
 
-    def _ensure_schema(self) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            journal_mode = str(
-                conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
-            ).strip().lower()
-            if journal_mode != "wal":
-                raise RuntimeError(
-                    f"SQLite WAL initialization failed: returned {journal_mode!r}"
-                )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    id TEXT PRIMARY KEY,
-                    username TEXT NOT NULL UNIQUE,
-                    password_hash TEXT NOT NULL,
-                    password_salt TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS sessions (
-                    token TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    expires_at TEXT NOT NULL,
-                    FOREIGN KEY(user_id) REFERENCES users(id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS research_tasks (
-                    id TEXT PRIMARY KEY,
-                    question TEXT NOT NULL,
-                    depth TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    user_id TEXT,
-                    FOREIGN KEY(user_id) REFERENCES users(id)
-                )
-                """
-            )
-            self._ensure_research_task_columns(conn)
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS task_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    task_id TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    stage TEXT,
-                    message TEXT NOT NULL,
-                    payload_json TEXT,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(task_id) REFERENCES research_tasks(id)
-                )
-                """
-            )
-            self._ensure_task_event_columns(conn)
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS task_artifacts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    task_id TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    payload_json TEXT,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(task_id) REFERENCES research_tasks(id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_tasks_user_created_id
-                ON research_tasks(user_id, created_at DESC, id DESC)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_tasks_user_status_created_id
-                ON research_tasks(user_id, status, created_at DESC, id DESC)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_events_task_id_id
-                ON task_events(task_id, id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_artifacts_task_id_id
-                ON task_artifacts(task_id, id)
-                """
-            )
-
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
@@ -696,21 +585,6 @@ class TaskStore:
         conn.execute("PRAGMA busy_timeout = 30000")
         conn.execute("PRAGMA synchronous = NORMAL")
         return conn
-
-    def _ensure_research_task_columns(self, conn: sqlite3.Connection) -> None:
-        rows = conn.execute("PRAGMA table_info(research_tasks)").fetchall()
-        columns = {str(row["name"]) for row in rows}
-        if "user_id" not in columns:
-            conn.execute("ALTER TABLE research_tasks ADD COLUMN user_id TEXT")
-
-    def _ensure_task_event_columns(self, conn: sqlite3.Connection) -> None:
-        rows = conn.execute("PRAGMA table_info(task_events)").fetchall()
-        columns = {str(row["name"]) for row in rows}
-        if "stage" not in columns:
-            conn.execute("ALTER TABLE task_events ADD COLUMN stage TEXT")
-        if "payload_json" not in columns:
-            conn.execute("ALTER TABLE task_events ADD COLUMN payload_json TEXT")
-
 
 def _new_task(
     *,
@@ -767,13 +641,13 @@ def _task_from_row(row: sqlite3.Row) -> ResearchTask:
     )
 
 
-def _user_from_row(row: sqlite3.Row) -> WebUser:
+def _user_from_model(row: UserRow) -> WebUser:
     return WebUser(
-        id=str(row["id"]),
-        username=str(row["username"]),
-        password_hash=str(row["password_hash"]),
-        password_salt=str(row["password_salt"]),
-        created_at=str(row["created_at"]),
+        id=row.id,
+        username=row.username,
+        password_hash=row.password_hash,
+        password_salt=row.password_salt,
+        created_at=row.created_at,
     )
 
 

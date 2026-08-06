@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from paperpilot.web.db_migrations import get_database_heads, get_script_heads
 from paperpilot.web.task_store import TaskStore
 
 
@@ -15,6 +16,38 @@ def _create_test_user(store, username):
         password_hash="hash",
         password_salt="salt",
     )
+
+
+def test_constructor_upgrades_blank_database_to_alembic_head(tmp_path):
+    db_path = tmp_path / "tasks.sqlite3"
+    store = TaskStore(db_path)
+    try:
+        assert get_database_heads(db_path) == get_script_heads()
+        assert store.check_health() is None
+    finally:
+        store.close()
+
+
+def test_close_is_idempotent(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+
+    store.close()
+    store.close()
+
+
+def test_user_and_session_persist_across_store_instances(tmp_path):
+    db_path = tmp_path / "tasks.sqlite3"
+    first = TaskStore(db_path)
+    user = _create_test_user(first, "persistent-user")
+    token = first.create_session(user.id)
+    first.close()
+
+    second = TaskStore(db_path)
+    try:
+        assert second.get_user_by_username(user.username) == user
+        assert second.get_user_for_session(token) == user
+    finally:
+        second.close()
 
 
 def test_create_and_get_task_persists_to_sqlite(tmp_path):
