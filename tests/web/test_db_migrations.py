@@ -1,6 +1,7 @@
 """Alembic adoption tests against real temporary SQLite files."""
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import subprocess
@@ -223,3 +224,21 @@ def test_alembic_cli_uses_configured_database_path(
 
     assert MANAGED_TABLES <= _table_names(db_path)
     assert get_database_heads(db_path) == get_script_heads()
+
+
+def test_upgrade_does_not_disable_existing_application_loggers(
+    tmp_path: Path,
+) -> None:
+    logger = logging.getLogger("paperpilot.test.migration-logging")
+    handler = logging.NullHandler()
+    previous_disabled = logger.disabled
+    logger.disabled = False
+    logger.addHandler(handler)
+    try:
+        upgrade_database(tmp_path / "logging.sqlite3")
+
+        assert logger.disabled is False
+        assert handler in logger.handlers
+    finally:
+        logger.removeHandler(handler)
+        logger.disabled = previous_disabled
