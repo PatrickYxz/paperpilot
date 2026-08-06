@@ -100,6 +100,55 @@ Runtime artifacts are written under `data/eval/` and `data/traces/`. Large
 JSONL result files and traces are intentionally ignored by git; the committed
 summary is the portable eval artifact.
 
+## Web Database Migrations
+
+The Web business database continues to use SQLite, but its five tables are now
+managed by SQLAlchemy 2.0 and Alembic:
+
+- `users`
+- `sessions`
+- `research_tasks`
+- `task_events`
+- `task_artifacts`
+
+Agent runtime tables in the same SQLite file are outside this Alembic metadata
+and are preserved. Install `requirements.txt` before running migrations, and
+set `PAPERPILOT_TASK_DB_PATH` to the exact file shared by the API and workers.
+
+For an existing deployment, stop the API and workers first. Then create and
+verify a SQLite backup before changing the schema:
+
+```bash
+export PAPERPILOT_TASK_DB_PATH="$PWD/data/web/tasks.sqlite3"
+mkdir -p data/backups
+BACKUP_PATH="data/backups/tasks-$(date +%Y%m%d-%H%M%S).sqlite3"
+sqlite3 "$PAPERPILOT_TASK_DB_PATH" ".backup '$BACKUP_PATH'"
+sqlite3 "$BACKUP_PATH" "PRAGMA integrity_check;"
+```
+
+The integrity check must print `ok`. Upgrade the selected database explicitly
+and confirm its revision:
+
+```bash
+.venv/bin/python -m alembic -c alembic.ini upgrade head
+.venv/bin/python -m alembic -c alembic.ini current
+```
+
+Only start the API and Celery workers after both commands succeed and `current`
+reports `20260806_0001 (head)`. An adopted legacy database intentionally keeps
+SQLite primary-key reflection differences and may lack the historical
+`research_tasks.user_id` foreign key, so `alembic check` is not a rollout gate
+for that database. A new or existing single-process local workbench still
+upgrades through `TaskStore` as a compatibility convenience, but production
+must run the explicit command first so multiple API/worker processes never race
+to migrate the same file.
+
+The adoption migration is non-destructive: it creates missing Web tables,
+columns, and indexes while retaining existing rows and unknown tables. Its
+downgrade intentionally refuses to delete business data. To roll back this
+initial adoption, stop all processes and restore the verified backup instead of
+running `alembic downgrade`.
+
 ## Web Workbench With Celery
 
 The Web workbench defaults to its in-process thread executor, so local usage
