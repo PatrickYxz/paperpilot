@@ -52,8 +52,8 @@ def search_arxiv_candidates(
     """Search arXiv and map its results to structured paper candidates."""
     if not query.strip():
         raise ValueError("query must not be empty")
-    if not 1 <= limit <= 20:
-        raise ValueError("limit must be between 1 and 20")
+    if not 1 <= limit <= 50:
+        raise ValueError("limit must be between 1 and 50")
 
     search = arxiv.Search(query=query, max_results=limit, sort_by=sort_by)
     arxiv_client = client or arxiv.Client()

@@ -91,7 +91,16 @@ def test_search_rejects_empty_query(query: str) -> None:
         search_arxiv_candidates(query, limit=1, client=FakeArxivClient())
 
 
-@pytest.mark.parametrize("limit", [0, 21])
+def test_search_allows_shared_catalog_maximum_limit() -> None:
+    client = FakeArxivClient()
+
+    candidates = search_arxiv_candidates("catalog", limit=50, client=client)
+
+    assert [candidate.external_id for candidate in candidates] == ["2401.12345v2"]
+    assert client.searches[0].max_results == 50
+
+
+@pytest.mark.parametrize("limit", [0, 51])
 def test_search_rejects_limit_outside_catalog_range(limit: int) -> None:
     with pytest.raises(ValueError, match="limit"):
         search_arxiv_candidates("catalog", limit=limit, client=FakeArxivClient())

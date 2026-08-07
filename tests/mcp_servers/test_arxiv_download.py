@@ -99,7 +99,7 @@ def test_search_papers_keeps_legacy_text_output_with_catalog(monkeypatch):
     client = FakeClient()
     monkeypatch.setattr(arxiv_mod, "_client", client)
 
-    result = arxiv_mod.search_papers("catalog", max_results=1)
+    result = arxiv_mod.search_papers("catalog", max_results=50)
 
     assert result == (
         "arxiv_id: 2401.12345v2\n"
@@ -110,6 +110,7 @@ def test_search_papers_keeps_legacy_text_output_with_catalog(monkeypatch):
         "pdf_url: https://arxiv.org/pdf/2401.12345v2\n"
         "abstract: An abstract"
     )
+    assert client.searches[0].max_results == 50
 
 
 def test_search_papers_keeps_legacy_sort_semantics(monkeypatch):

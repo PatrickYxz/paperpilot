@@ -45,7 +45,7 @@ def search_papers(
     Args:
         query: 搜索关键词,如 "LoRA fine-tuning"。支持 arXiv 查询语法:
             au:作者名 / ti:标题 / abs:摘要 / cat:类目。
-        max_results: 返回结果数,默认 10,上限 20。
+        max_results: 返回结果数,默认 10,上限 50。
         category: 限定 arXiv 类目,如 "cs.CL"/"cs.LG"。None 不限。
         sort_by: "relevance"(默认) / "submittedDate" / "lastUpdatedDate"。
 
@@ -53,7 +53,7 @@ def search_papers(
         每篇论文一段,字段:arxiv_id / title / authors / published /
         primary_category / pdf_url / abstract,多篇用 --- 分隔。
     """
-    max_results = min(max_results, 20)
+    max_results = min(max_results, 50)
     full_q = f"({query}) AND cat:{category}" if category else query
     sort_enum = {
         "relevance": arxiv.SortCriterion.Relevance,
