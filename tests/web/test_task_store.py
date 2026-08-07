@@ -67,6 +67,43 @@ def test_create_and_get_task_persists_to_sqlite(tmp_path):
     assert created.id.startswith("task_")
 
 
+def test_research_task_maps_conversation_fields_without_expanding_legacy_dict(
+    tmp_path,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    user = _create_test_user(store, "task-shape-user")
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            INSERT INTO research_tasks (
+                id, question, depth, status, created_at, updated_at, user_id,
+                conversation_id, base_checkpoint_id, final_checkpoint_id,
+                result_quality
+            ) VALUES (
+                'task_shape', 'Shape test', 'standard', 'completed', 't1', 't2',
+                ?, NULL, 'cp-base', 'cp-final', 'partial'
+            )
+            """,
+            (user.id,),
+        )
+
+    task = store.get_task("task_shape", user_id=user.id)
+
+    assert task is not None
+    assert task.conversation_id is None
+    assert task.base_checkpoint_id == "cp-base"
+    assert task.final_checkpoint_id == "cp-final"
+    assert task.result_quality == "partial"
+    assert task.to_dict() == {
+        "id": "task_shape",
+        "question": "Shape test",
+        "depth": "standard",
+        "status": "completed",
+        "created_at": "t1",
+        "updated_at": "t2",
+    }
+
+
 def test_store_enables_wal_and_connection_pragmas(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
 

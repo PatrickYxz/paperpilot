@@ -9,7 +9,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from sqlalchemy import and_, delete, or_, select, text, update
+from sqlalchemy import (
+    and_,
+    delete,
+    exists,
+    insert,
+    literal,
+    or_,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -26,6 +36,7 @@ from paperpilot.web.db_models import (
     ConversationPaperRow,
     ConversationRow,
     LoginSessionRow,
+    MessageRow,
     PaperRow,
     ResearchTaskRow,
     TaskArtifactRow,
@@ -45,6 +56,14 @@ class DuplicateUsernameError(ValueError):
     """Raised when the users table rejects a duplicate username."""
 
 
+class ConversationBusyError(ValueError):
+    """Raised when a conversation already has pending or running work."""
+
+
+class StaleConversationHeadError(ValueError):
+    """Raised when a caller submits against an obsolete stable head."""
+
+
 @dataclass(frozen=True)
 class ResearchTask:
     id: str
@@ -54,6 +73,10 @@ class ResearchTask:
     created_at: str
     updated_at: str
     user_id: str | None = None
+    conversation_id: str | None = None
+    base_checkpoint_id: str | None = None
+    final_checkpoint_id: str | None = None
+    result_quality: str | None = None
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -198,6 +221,31 @@ class ConversationDetail:
     active_papers: list[PaperRecord]
     paper_associations: list[ConversationPaperRecord]
     active_task: ResearchTask | None
+
+
+@dataclass(frozen=True)
+class MessageRecord:
+    id: str
+    conversation_id: str
+    task_id: str | None
+    parent_message_id: str | None
+    role: str
+    content: str
+    status: str
+    metadata: dict
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ConversationTurn:
+    user_message: MessageRecord
+    task: ResearchTask
+
+
+@dataclass(frozen=True)
+class ConversationAlternative:
+    user_message: MessageRecord
+    assistant_message: MessageRecord
 
 
 class TaskStore:
@@ -482,6 +530,337 @@ class TaskStore:
                 row.updated_at = _utc_now()
             session.flush()
             return _conversation_from_model(row)
+
+    def create_conversation_turn(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        content: str,
+        depth: str,
+        expected_head_message_id: str | None,
+    ) -> ConversationTurn:
+        task = _new_task(
+            question=content,
+            depth=depth,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        now = task.created_at
+        user_message_row = MessageRow(
+            id=f"msg_{uuid.uuid4().hex}",
+            conversation_id=conversation_id,
+            task_id=task.id,
+            parent_message_id=expected_head_message_id,
+            role="user",
+            content=task.question,
+            status="complete",
+            metadata_json="{}",
+            created_at=now,
+        )
+        head_matches = (
+            ConversationRow.head_message_id.is_(None)
+            if expected_head_message_id is None
+            else ConversationRow.head_message_id == expected_head_message_id
+        )
+        active_task_exists = exists(
+            select(ResearchTaskRow.id).where(
+                ResearchTaskRow.conversation_id == conversation_id,
+                ResearchTaskRow.status.in_(("pending", "running")),
+            )
+        )
+        eligible_conversation = (
+            select(
+                literal(task.id),
+                literal(task.question),
+                literal(task.depth),
+                literal(task.status),
+                literal(task.created_at),
+                literal(task.updated_at),
+                literal(task.user_id),
+                ConversationRow.id,
+                ConversationRow.head_checkpoint_id,
+                literal(None),
+                literal(None),
+            )
+            .select_from(ConversationRow)
+            .where(
+                ConversationRow.id == conversation_id,
+                ConversationRow.user_id == user_id,
+                ConversationRow.archived_at.is_(None),
+                head_matches,
+                ~active_task_exists,
+            )
+        )
+        task_insert = insert(ResearchTaskRow).from_select(
+            [
+                ResearchTaskRow.id,
+                ResearchTaskRow.question,
+                ResearchTaskRow.depth,
+                ResearchTaskRow.status,
+                ResearchTaskRow.created_at,
+                ResearchTaskRow.updated_at,
+                ResearchTaskRow.user_id,
+                ResearchTaskRow.conversation_id,
+                ResearchTaskRow.base_checkpoint_id,
+                ResearchTaskRow.final_checkpoint_id,
+                ResearchTaskRow.result_quality,
+            ],
+            eligible_conversation,
+        )
+
+        try:
+            with self._session_factory.begin() as session:
+                result = session.execute(task_insert)
+                if result.rowcount != 1:
+                    _raise_conversation_turn_conflict(
+                        session,
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        expected_head_message_id=expected_head_message_id,
+                    )
+                task_row = session.get(ResearchTaskRow, task.id)
+                if task_row is None:
+                    raise RuntimeError("conversation task disappeared within transaction")
+                task = _task_from_model(task_row)
+                user_message_row.parent_message_id = expected_head_message_id
+                session.add(user_message_row)
+                session.flush()
+                session.add(
+                    TaskEventRow(
+                        task_id=task.id,
+                        type="queued",
+                        stage="queue",
+                        message="Task queued for real workflow.",
+                        payload_json=json.dumps(
+                            {
+                                "depth": task.depth,
+                                "execution_mode": "real",
+                                "simulated": False,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        created_at=_utc_now(),
+                    )
+                )
+                session.flush()
+                return ConversationTurn(
+                    user_message=_message_from_model(user_message_row),
+                    task=task,
+                )
+        except IntegrityError as exc:
+            if _is_active_task_unique_conflict(exc):
+                raise ConversationBusyError(
+                    "conversation already has an active task"
+                ) from exc
+            raise
+
+    def get_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        user_id: str,
+    ) -> MessageRecord | None:
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(MessageRow)
+                .join(
+                    ConversationRow,
+                    ConversationRow.id == MessageRow.conversation_id,
+                )
+                .where(
+                    MessageRow.id == message_id,
+                    MessageRow.conversation_id == conversation_id,
+                    ConversationRow.user_id == user_id,
+                )
+            )
+        return _message_from_model(row) if row is not None else None
+
+    def get_task_message(
+        self,
+        task_id: str,
+        role: str,
+    ) -> MessageRecord | None:
+        if role not in {"user", "assistant", "system"}:
+            raise ValueError(f"invalid message role: {role!r}")
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(MessageRow).where(
+                    MessageRow.task_id == task_id,
+                    MessageRow.role == role,
+                )
+            )
+        return _message_from_model(row) if row is not None else None
+
+    def list_active_messages(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str,
+    ) -> list[MessageRecord] | None:
+        with self._session_factory() as session:
+            conversation_row = _select_owned_conversation_model(
+                session,
+                conversation_id,
+                user_id,
+            )
+            if conversation_row is None:
+                return None
+            if conversation_row.head_message_id is None:
+                return []
+
+            rows = list(
+                session.scalars(
+                    select(MessageRow).where(
+                        MessageRow.conversation_id == conversation_id
+                    )
+                )
+            )
+            rows_by_id = {row.id: row for row in rows}
+            head_row = rows_by_id.get(conversation_row.head_message_id)
+            if head_row is None:
+                _raise_broken_message_reference(
+                    session,
+                    conversation_id=conversation_id,
+                    message_id=conversation_row.head_message_id,
+                    relation="head",
+                )
+            assert head_row is not None
+            if head_row.role != "assistant" or head_row.status != "complete":
+                raise RuntimeError(
+                    "conversation head is not a complete assistant message: "
+                    f"{head_row.id}"
+                )
+
+            path: list[MessageRow] = []
+            seen: set[str] = set()
+            current: MessageRow | None = head_row
+            while current is not None:
+                if current.id in seen:
+                    raise RuntimeError(
+                        f"message tree cycle detected at message: {current.id}"
+                    )
+                seen.add(current.id)
+                path.append(current)
+                parent_id = current.parent_message_id
+                if parent_id is None:
+                    break
+                current = rows_by_id.get(parent_id)
+                if current is None:
+                    _raise_broken_message_reference(
+                        session,
+                        conversation_id=conversation_id,
+                        message_id=parent_id,
+                        relation="parent",
+                    )
+
+            path.reverse()
+            return [_message_from_model(row) for row in path]
+
+    def list_message_alternatives(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        user_id: str,
+    ) -> list[ConversationAlternative] | None:
+        with self._session_factory() as session:
+            if (
+                _select_owned_conversation_model(
+                    session,
+                    conversation_id,
+                    user_id,
+                )
+                is None
+            ):
+                return None
+            branch_point = session.scalar(
+                select(MessageRow).where(
+                    MessageRow.id == message_id,
+                    MessageRow.conversation_id == conversation_id,
+                )
+            )
+            if branch_point is None:
+                return None
+            if branch_point.role != "assistant" or branch_point.status != "complete":
+                raise ValueError("alternatives require a complete assistant message")
+
+            user_rows = list(
+                session.scalars(
+                    select(MessageRow)
+                    .where(
+                        MessageRow.conversation_id == conversation_id,
+                        MessageRow.parent_message_id == message_id,
+                        MessageRow.role == "user",
+                        MessageRow.status == "complete",
+                    )
+                    .order_by(MessageRow.created_at.asc(), MessageRow.id.asc())
+                )
+            )
+            alternatives: list[ConversationAlternative] = []
+            for user_row in user_rows:
+                assistant_row = session.scalar(
+                    select(MessageRow).where(
+                        MessageRow.conversation_id == conversation_id,
+                        MessageRow.parent_message_id == user_row.id,
+                        MessageRow.task_id == user_row.task_id,
+                        MessageRow.role == "assistant",
+                        MessageRow.status == "complete",
+                    )
+                )
+                if assistant_row is not None:
+                    alternatives.append(
+                        ConversationAlternative(
+                            user_message=_message_from_model(user_row),
+                            assistant_message=_message_from_model(assistant_row),
+                        )
+                    )
+            return alternatives
+
+    def get_unstable_turn(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str,
+    ) -> ConversationTurn | None:
+        with self._session_factory() as session:
+            conversation_row = _select_owned_conversation_model(
+                session,
+                conversation_id,
+                user_id,
+            )
+            if conversation_row is None:
+                return None
+            parent_matches = (
+                MessageRow.parent_message_id.is_(None)
+                if conversation_row.head_message_id is None
+                else MessageRow.parent_message_id == conversation_row.head_message_id
+            )
+            result = session.execute(
+                select(MessageRow, ResearchTaskRow)
+                .join(ResearchTaskRow, ResearchTaskRow.id == MessageRow.task_id)
+                .where(
+                    MessageRow.conversation_id == conversation_id,
+                    MessageRow.role == "user",
+                    parent_matches,
+                    ResearchTaskRow.conversation_id == conversation_id,
+                    ResearchTaskRow.user_id == user_id,
+                    ResearchTaskRow.status.in_(("pending", "running", "failed")),
+                )
+                .order_by(
+                    ResearchTaskRow.created_at.desc(),
+                    ResearchTaskRow.id.desc(),
+                )
+                .limit(1)
+            ).first()
+            if result is None:
+                return None
+            message_row, task_row = result
+            return ConversationTurn(
+                user_message=_message_from_model(message_row),
+                task=_task_from_model(task_row),
+            )
 
     def create_task(
         self,
@@ -786,6 +1165,8 @@ def _new_task(
     question: str,
     depth: str,
     user_id: str | None,
+    conversation_id: str | None = None,
+    base_checkpoint_id: str | None = None,
 ) -> ResearchTask:
     cleaned_question = question.strip()
     if not cleaned_question:
@@ -801,6 +1182,8 @@ def _new_task(
         created_at=now,
         updated_at=now,
         user_id=user_id,
+        conversation_id=conversation_id,
+        base_checkpoint_id=base_checkpoint_id,
     )
 
 
@@ -813,6 +1196,10 @@ def _task_to_model(task: ResearchTask) -> ResearchTaskRow:
         created_at=task.created_at,
         updated_at=task.updated_at,
         user_id=task.user_id,
+        conversation_id=task.conversation_id,
+        base_checkpoint_id=task.base_checkpoint_id,
+        final_checkpoint_id=task.final_checkpoint_id,
+        result_quality=task.result_quality,
     )
 
 
@@ -825,6 +1212,10 @@ def _task_from_model(row: ResearchTaskRow) -> ResearchTask:
         created_at=row.created_at,
         updated_at=row.updated_at,
         user_id=row.user_id,
+        conversation_id=row.conversation_id,
+        base_checkpoint_id=row.base_checkpoint_id,
+        final_checkpoint_id=row.final_checkpoint_id,
+        result_quality=row.result_quality,
     )
 
 
@@ -882,6 +1273,20 @@ def _conversation_paper_from_model(
     )
 
 
+def _message_from_model(row: MessageRow) -> MessageRecord:
+    return MessageRecord(
+        id=row.id,
+        conversation_id=row.conversation_id,
+        task_id=row.task_id,
+        parent_message_id=row.parent_message_id,
+        role=row.role,
+        content=row.content,
+        status=row.status,
+        metadata=_decode_payload(row.metadata_json),
+        created_at=row.created_at,
+    )
+
+
 def _event_from_model(row: TaskEventRow) -> TaskEvent:
     return TaskEvent(
         id=row.id,
@@ -928,6 +1333,62 @@ def _select_owned_conversation_model(
             ConversationRow.user_id == user_id,
         )
     )
+
+
+def _raise_conversation_turn_conflict(
+    session: Session,
+    *,
+    conversation_id: str,
+    user_id: str,
+    expected_head_message_id: str | None,
+) -> None:
+    conversation_row = _select_owned_conversation_model(
+        session,
+        conversation_id,
+        user_id,
+    )
+    if conversation_row is None:
+        raise ValueError(f"conversation not found: {conversation_id}")
+    if conversation_row.archived_at is not None:
+        raise ValueError("conversation is archived")
+    active_task_id = session.scalar(
+        select(ResearchTaskRow.id).where(
+            ResearchTaskRow.conversation_id == conversation_id,
+            ResearchTaskRow.status.in_(("pending", "running")),
+        )
+    )
+    if active_task_id is not None:
+        raise ConversationBusyError("conversation already has an active task")
+    if conversation_row.head_message_id != expected_head_message_id:
+        raise StaleConversationHeadError("conversation head has changed")
+    raise ConversationBusyError("conversation turn admission lost a concurrent race")
+
+
+def _is_active_task_unique_conflict(exc: IntegrityError) -> bool:
+    message = str(exc.orig).lower()
+    return (
+        "unique constraint failed" in message
+        and "research_tasks.conversation_id" in message
+    )
+
+
+def _raise_broken_message_reference(
+    session: Session,
+    *,
+    conversation_id: str,
+    message_id: str,
+    relation: str,
+) -> None:
+    referenced_row = session.get(MessageRow, message_id)
+    if referenced_row is None:
+        raise RuntimeError(
+            f"message tree has a missing {relation}: {message_id}"
+        )
+    if referenced_row.conversation_id != conversation_id:
+        raise RuntimeError(
+            f"message tree {relation} belongs to another conversation: {message_id}"
+        )
+    raise RuntimeError(f"message tree could not resolve {relation}: {message_id}")
 
 
 def _read_event_batch(
