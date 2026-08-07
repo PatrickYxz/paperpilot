@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 from sqlalchemy import and_, delete, or_, select, text, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -298,37 +299,37 @@ class TaskStore:
         source = paper.source.strip()
         external_id = paper.external_id.strip()
         now = _utc_now()
+        authors_json = json.dumps(paper.authors, ensure_ascii=False)
+        source_url = paper.source_url.strip()
 
         with self._session_factory.begin() as session:
             paper_row = session.scalar(
-                select(PaperRow).where(
-                    PaperRow.source == source,
-                    PaperRow.external_id == external_id,
-                )
-            )
-            if paper_row is None:
-                paper_row = PaperRow(
+                sqlite_insert(PaperRow)
+                .values(
                     id=f"paper_{uuid.uuid4().hex}",
                     source=source,
                     external_id=external_id,
                     title=paper_title,
-                    authors_json=json.dumps(paper.authors, ensure_ascii=False),
+                    authors_json=authors_json,
                     abstract=paper.abstract,
-                    source_url=paper.source_url.strip(),
+                    source_url=source_url,
                     created_at=now,
                     updated_at=now,
                 )
-                session.add(paper_row)
-                session.flush()
-            else:
-                paper_row.title = paper_title
-                paper_row.authors_json = json.dumps(
-                    paper.authors,
-                    ensure_ascii=False,
+                .on_conflict_do_update(
+                    index_elements=[PaperRow.source, PaperRow.external_id],
+                    set_={
+                        "title": paper_title,
+                        "authors_json": authors_json,
+                        "abstract": paper.abstract,
+                        "source_url": source_url,
+                        "updated_at": now,
+                    },
                 )
-                paper_row.abstract = paper.abstract
-                paper_row.source_url = paper.source_url.strip()
-                paper_row.updated_at = now
+                .returning(PaperRow)
+            )
+            if paper_row is None:
+                raise RuntimeError("paper upsert did not return a row")
 
             conversation_row = ConversationRow(
                 id=f"conv_{uuid.uuid4().hex}",

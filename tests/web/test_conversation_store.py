@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 
 from paperpilot.papers import PaperCandidate
@@ -98,6 +101,61 @@ def test_create_conversation_reuses_paper_id_and_refreshes_public_metadata(tmp_p
     assert detail.primary_paper.abstract == "updated abstract"
     assert _table_count(db_path, "papers") == 1
     assert _table_count(db_path, "conversations") == 2
+
+
+def test_concurrent_conversation_creation_upserts_one_shared_paper(tmp_path):
+    db_path = tmp_path / "tasks.sqlite3"
+    store = TaskStore(db_path)
+    users = [
+        _create_test_user(store, "alice"),
+        _create_test_user(store, "bob"),
+    ]
+    paper_select_ready = Barrier(2)
+
+    def synchronize_old_select_before_insert(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = " ".join(statement.split())
+        if (
+            normalized.startswith("SELECT papers.id")
+            and "papers.source =" in normalized
+        ):
+            paper_select_ready.wait(timeout=5)
+
+    def create_for(user_id: str):
+        return store.create_conversation(
+            user_id=user_id,
+            paper=_paper(),
+            title=None,
+        )
+
+    event.listen(
+        store.engine,
+        "after_cursor_execute",
+        synchronize_old_select_before_insert,
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            conversations = list(
+                executor.map(create_for, (user.id for user in users))
+            )
+    finally:
+        event.remove(
+            store.engine,
+            "after_cursor_execute",
+            synchronize_old_select_before_insert,
+        )
+
+    assert len(conversations) == 2
+    assert len({item.primary_paper_id for item in conversations}) == 1
+    assert _table_count(db_path, "papers") == 1
+    assert _table_count(db_path, "conversations") == 2
+    assert _table_count(db_path, "conversation_papers") == 2
 
 
 def test_create_conversation_rolls_back_paper_and_conversation_on_link_failure(
