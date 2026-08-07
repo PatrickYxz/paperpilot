@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import arxiv as arxiv_sdk
 
 from paperpilot.mcp_servers import arxiv as arxiv_mod
 
@@ -69,3 +70,60 @@ def test_pdf_corrupt(tmp_path, monkeypatch):
     with patch("urllib.request.urlopen", return_value=_fake_urlopen_ctx(bad)):
         with pytest.raises(arxiv_mod.PDFParseError):
             arxiv_mod._download_paper_impl("2401.12345")
+
+
+def test_search_papers_keeps_legacy_text_output_with_catalog(monkeypatch):
+    """搜索仍使用旧 MCP 字段和分段格式，但数据来自 catalog。"""
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    class FakeResult:
+        title = "Catalog paper"
+        authors = [SimpleNamespace(name="Ada")]
+        summary = "An abstract"
+        pdf_url = "https://arxiv.org/pdf/2401.12345v2"
+        published = datetime(2024, 1, 31)
+        primary_category = "cs.AI"
+        entry_id = "https://arxiv.org/abs/2401.12345v2"
+
+        def get_short_id(self):
+            return "2401.12345v2"
+
+    class FakeClient:
+        searches = []
+
+        def results(self, search):
+            self.searches.append(search)
+            return iter([FakeResult()])
+
+    client = FakeClient()
+    monkeypatch.setattr(arxiv_mod, "_client", client)
+
+    result = arxiv_mod.search_papers("catalog", max_results=1)
+
+    assert result == (
+        "arxiv_id: 2401.12345v2\n"
+        "title: Catalog paper\n"
+        "authors: Ada\n"
+        "published: 2024-01-31\n"
+        "primary_category: cs.AI\n"
+        "pdf_url: https://arxiv.org/pdf/2401.12345v2\n"
+        "abstract: An abstract"
+    )
+
+
+def test_search_papers_keeps_legacy_sort_semantics(monkeypatch):
+    class FakeClient:
+        def __init__(self):
+            self.searches = []
+
+        def results(self, search):
+            self.searches.append(search)
+            return iter([])
+
+    client = FakeClient()
+    monkeypatch.setattr(arxiv_mod, "_client", client)
+
+    arxiv_mod.search_papers("catalog", max_results=1, sort_by="submittedDate")
+
+    assert client.searches[0].sort_by is arxiv_sdk.SortCriterion.SubmittedDate
