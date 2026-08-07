@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, BrokenBarrierError
 
 import pytest
 from sqlalchemy import event
@@ -110,9 +110,9 @@ def test_concurrent_conversation_creation_upserts_one_shared_paper(tmp_path):
         _create_test_user(store, "alice"),
         _create_test_user(store, "bob"),
     ]
-    paper_select_ready = Barrier(2)
+    paper_writers_ready = Barrier(2)
 
-    def synchronize_old_select_before_insert(
+    def synchronize_paper_writers(
         _connection,
         _cursor,
         statement,
@@ -121,11 +121,13 @@ def test_concurrent_conversation_creation_upserts_one_shared_paper(tmp_path):
         _executemany,
     ) -> None:
         normalized = " ".join(statement.split())
-        if (
-            normalized.startswith("SELECT papers.id")
-            and "papers.source =" in normalized
-        ):
-            paper_select_ready.wait(timeout=5)
+        if normalized.startswith("INSERT INTO papers"):
+            try:
+                paper_writers_ready.wait(timeout=5)
+            except BrokenBarrierError as exc:
+                raise AssertionError(
+                    "both paper writers did not reach INSERT within 5 seconds"
+                ) from exc
 
     def create_for(user_id: str):
         return store.create_conversation(
@@ -136,8 +138,8 @@ def test_concurrent_conversation_creation_upserts_one_shared_paper(tmp_path):
 
     event.listen(
         store.engine,
-        "after_cursor_execute",
-        synchronize_old_select_before_insert,
+        "before_cursor_execute",
+        synchronize_paper_writers,
     )
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -147,8 +149,8 @@ def test_concurrent_conversation_creation_upserts_one_shared_paper(tmp_path):
     finally:
         event.remove(
             store.engine,
-            "after_cursor_execute",
-            synchronize_old_select_before_insert,
+            "before_cursor_execute",
+            synchronize_paper_writers,
         )
 
     assert len(conversations) == 2
