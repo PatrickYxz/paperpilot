@@ -13,6 +13,7 @@ from sqlalchemy import and_, delete, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from paperpilot.papers import PaperCandidate
 from paperpilot.web.database import (
     DEFAULT_TASK_DB_PATH,
     create_session_factory,
@@ -21,7 +22,10 @@ from paperpilot.web.database import (
 )
 from paperpilot.web.db_migrations import ensure_database_current
 from paperpilot.web.db_models import (
+    ConversationPaperRow,
+    ConversationRow,
     LoginSessionRow,
+    PaperRow,
     ResearchTaskRow,
     TaskArtifactRow,
     TaskEventRow,
@@ -148,6 +152,53 @@ class TaskUpdates:
     artifacts: TaskArtifactBatch
 
 
+@dataclass(frozen=True)
+class PaperRecord:
+    id: str
+    source: str
+    external_id: str
+    title: str
+    authors: list[str]
+    abstract: str | None
+    source_url: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class ConversationRecord:
+    id: str
+    user_id: str
+    primary_paper_id: str
+    title: str
+    head_message_id: str | None
+    head_checkpoint_id: str | None
+    created_at: str
+    updated_at: str
+    archived_at: str | None
+
+
+@dataclass(frozen=True)
+class ConversationPaperRecord:
+    conversation_id: str
+    paper_id: str
+    role: str
+    added_by: str
+    source_task_id: str | None
+    source_message_id: str | None
+    is_active: bool
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ConversationDetail:
+    conversation: ConversationRecord
+    primary_paper: PaperRecord
+    active_papers: list[PaperRecord]
+    paper_associations: list[ConversationPaperRecord]
+    active_task: ResearchTask | None
+
+
 class TaskStore:
     """Persist local research tasks in SQLite."""
 
@@ -232,6 +283,204 @@ class TaskStore:
             session.execute(
                 delete(LoginSessionRow).where(LoginSessionRow.token == token)
             )
+
+    def create_conversation(
+        self,
+        *,
+        user_id: str,
+        paper: PaperCandidate,
+        title: str | None = None,
+    ) -> ConversationRecord:
+        paper_title = paper.title.strip()
+        conversation_title = _validate_conversation_title(
+            paper_title if title is None else title
+        )
+        source = paper.source.strip()
+        external_id = paper.external_id.strip()
+        now = _utc_now()
+
+        with self._session_factory.begin() as session:
+            paper_row = session.scalar(
+                select(PaperRow).where(
+                    PaperRow.source == source,
+                    PaperRow.external_id == external_id,
+                )
+            )
+            if paper_row is None:
+                paper_row = PaperRow(
+                    id=f"paper_{uuid.uuid4().hex}",
+                    source=source,
+                    external_id=external_id,
+                    title=paper_title,
+                    authors_json=json.dumps(paper.authors, ensure_ascii=False),
+                    abstract=paper.abstract,
+                    source_url=paper.source_url.strip(),
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(paper_row)
+                session.flush()
+            else:
+                paper_row.title = paper_title
+                paper_row.authors_json = json.dumps(
+                    paper.authors,
+                    ensure_ascii=False,
+                )
+                paper_row.abstract = paper.abstract
+                paper_row.source_url = paper.source_url.strip()
+                paper_row.updated_at = now
+
+            conversation_row = ConversationRow(
+                id=f"conv_{uuid.uuid4().hex}",
+                user_id=user_id,
+                primary_paper_id=paper_row.id,
+                title=conversation_title,
+                head_message_id=None,
+                head_checkpoint_id=None,
+                created_at=now,
+                updated_at=now,
+                archived_at=None,
+            )
+            session.add(conversation_row)
+            session.flush()
+            session.add(
+                ConversationPaperRow(
+                    conversation_id=conversation_row.id,
+                    paper_id=paper_row.id,
+                    role="primary",
+                    added_by="user",
+                    source_task_id=None,
+                    source_message_id=None,
+                    is_active=True,
+                    created_at=now,
+                )
+            )
+            session.flush()
+            return _conversation_from_model(conversation_row)
+
+    def list_conversations(
+        self,
+        *,
+        user_id: str,
+        include_archived: bool = False,
+        limit: int = 100,
+    ) -> list[ConversationRecord]:
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        filters = [ConversationRow.user_id == user_id]
+        if not include_archived:
+            filters.append(ConversationRow.archived_at.is_(None))
+        statement = (
+            select(ConversationRow)
+            .where(*filters)
+            .order_by(
+                ConversationRow.updated_at.desc(),
+                ConversationRow.id.desc(),
+            )
+            .limit(limit)
+        )
+        with self._session_factory() as session:
+            rows = list(session.scalars(statement))
+        return [_conversation_from_model(row) for row in rows]
+
+    def get_conversation_detail(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str,
+    ) -> ConversationDetail | None:
+        with self._session_factory() as session:
+            conversation_row = _select_owned_conversation_model(
+                session,
+                conversation_id,
+                user_id,
+            )
+            if conversation_row is None:
+                return None
+
+            primary_paper_row = session.get(
+                PaperRow,
+                conversation_row.primary_paper_id,
+            )
+            if primary_paper_row is None:
+                raise RuntimeError("conversation primary paper is missing")
+
+            paper_rows = session.execute(
+                select(ConversationPaperRow, PaperRow)
+                .join(PaperRow, PaperRow.id == ConversationPaperRow.paper_id)
+                .where(
+                    ConversationPaperRow.conversation_id == conversation_id,
+                    ConversationPaperRow.is_active.is_(True),
+                )
+                .order_by(
+                    ConversationPaperRow.created_at.asc(),
+                    ConversationPaperRow.paper_id.asc(),
+                )
+            ).all()
+            active_task_row = session.scalar(
+                select(ResearchTaskRow).where(
+                    ResearchTaskRow.conversation_id == conversation_id,
+                    ResearchTaskRow.user_id == user_id,
+                    ResearchTaskRow.status.in_(("pending", "running")),
+                )
+            )
+
+            return ConversationDetail(
+                conversation=_conversation_from_model(conversation_row),
+                primary_paper=_paper_from_model(primary_paper_row),
+                active_papers=[_paper_from_model(row[1]) for row in paper_rows],
+                paper_associations=[
+                    _conversation_paper_from_model(row[0]) for row in paper_rows
+                ],
+                active_task=(
+                    _task_from_model(active_task_row)
+                    if active_task_row is not None
+                    else None
+                ),
+            )
+
+    def update_conversation(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str,
+        title: str | None = None,
+        archived: bool | None = None,
+    ) -> ConversationRecord | None:
+        with self._session_factory.begin() as session:
+            row = _select_owned_conversation_model(
+                session,
+                conversation_id,
+                user_id,
+            )
+            if row is None:
+                return None
+
+            cleaned_title = (
+                _validate_conversation_title(title) if title is not None else None
+            )
+            if archived:
+                active_task_id = session.scalar(
+                    select(ResearchTaskRow.id).where(
+                        ResearchTaskRow.conversation_id == conversation_id,
+                        ResearchTaskRow.user_id == user_id,
+                        ResearchTaskRow.status.in_(("pending", "running")),
+                    )
+                )
+                if active_task_id is not None:
+                    raise ValueError("cannot archive conversation with an active task")
+
+            changed = False
+            if cleaned_title is not None:
+                row.title = cleaned_title
+                changed = True
+            if archived is not None:
+                row.archived_at = _utc_now() if archived else None
+                changed = True
+            if changed:
+                row.updated_at = _utc_now()
+            session.flush()
+            return _conversation_from_model(row)
 
     def create_task(
         self,
@@ -588,6 +837,50 @@ def _user_from_model(row: UserRow) -> WebUser:
     )
 
 
+def _paper_from_model(row: PaperRow) -> PaperRecord:
+    authors = _decode_json_list(row.authors_json)
+    return PaperRecord(
+        id=row.id,
+        source=row.source,
+        external_id=row.external_id,
+        title=row.title,
+        authors=authors,
+        abstract=row.abstract,
+        source_url=row.source_url,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _conversation_from_model(row: ConversationRow) -> ConversationRecord:
+    return ConversationRecord(
+        id=row.id,
+        user_id=row.user_id,
+        primary_paper_id=row.primary_paper_id,
+        title=row.title,
+        head_message_id=row.head_message_id,
+        head_checkpoint_id=row.head_checkpoint_id,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        archived_at=row.archived_at,
+    )
+
+
+def _conversation_paper_from_model(
+    row: ConversationPaperRow,
+) -> ConversationPaperRecord:
+    return ConversationPaperRecord(
+        conversation_id=row.conversation_id,
+        paper_id=row.paper_id,
+        role=row.role,
+        added_by=row.added_by,
+        source_task_id=row.source_task_id,
+        source_message_id=row.source_message_id,
+        is_active=row.is_active,
+        created_at=row.created_at,
+    )
+
+
 def _event_from_model(row: TaskEventRow) -> TaskEvent:
     return TaskEvent(
         id=row.id,
@@ -621,6 +914,19 @@ def _select_owned_task_model(
     if user_id is not None:
         filters.append(ResearchTaskRow.user_id == user_id)
     return session.scalar(select(ResearchTaskRow).where(*filters))
+
+
+def _select_owned_conversation_model(
+    session: Session,
+    conversation_id: str,
+    user_id: str,
+) -> ConversationRow | None:
+    return session.scalar(
+        select(ConversationRow).where(
+            ConversationRow.id == conversation_id,
+            ConversationRow.user_id == user_id,
+        )
+    )
 
 
 def _read_event_batch(
@@ -692,6 +998,23 @@ def _decode_payload(value: object) -> dict:
     if isinstance(payload, dict):
         return payload
     return {}
+
+
+def _decode_json_list(value: object) -> list[str]:
+    try:
+        payload = json.loads(str(value))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [str(item) for item in payload]
+
+
+def _validate_conversation_title(title: str) -> str:
+    cleaned = title.strip()
+    if not 1 <= len(cleaned) <= 200:
+        raise ValueError("conversation title must be between 1 and 200 characters")
+    return cleaned
 
 
 def _utc_now() -> str:
