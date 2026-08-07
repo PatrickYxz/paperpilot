@@ -1,6 +1,8 @@
 """Web runtime configuration tests."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from paperpilot.web.config import WebRuntimeConfig
@@ -17,6 +19,7 @@ def test_runtime_config_defaults_are_local_and_bounded():
     assert config.log_format == "json"
     assert config.slow_request_ms == 1000
     assert config.environment == "development"
+    assert config.checkpoint_db_path == Path("data/langgraph/checkpoints.sqlite3")
 
 
 def test_runtime_config_accepts_explicit_overrides():
@@ -30,6 +33,7 @@ def test_runtime_config_accepts_explicit_overrides():
             "PAPERPILOT_LOG_FORMAT": "text",
             "PAPERPILOT_SLOW_REQUEST_MS": "250",
             "PAPERPILOT_ENV": "test",
+            "PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH": "/tmp/paperpilot-checkpoints.sqlite3",
         }
     )
 
@@ -41,6 +45,7 @@ def test_runtime_config_accepts_explicit_overrides():
     assert config.log_format == "text"
     assert config.slow_request_ms == 250
     assert config.environment == "test"
+    assert config.checkpoint_db_path == Path("/tmp/paperpilot-checkpoints.sqlite3")
 
 
 @pytest.mark.parametrize(

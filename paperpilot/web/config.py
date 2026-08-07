@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Mapping, cast
 
 TaskExecutorBackend = Literal["thread", "celery"]
@@ -20,6 +21,7 @@ class WebRuntimeConfig:
     log_format: LogFormat = "json"
     slow_request_ms: int = 1000
     environment: str = "development"
+    checkpoint_db_path: Path = Path("data/langgraph/checkpoints.sqlite3")
 
     @classmethod
     def from_env(
@@ -71,6 +73,12 @@ class WebRuntimeConfig:
                 values, "PAPERPILOT_SLOW_REQUEST_MS", default=1000, minimum=1
             ),
             environment=environment,
+            checkpoint_db_path=Path(
+                values.get(
+                    "PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH",
+                    "data/langgraph/checkpoints.sqlite3",
+                ).strip()
+            ),
         )
 
 
