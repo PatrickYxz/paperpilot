@@ -13,6 +13,7 @@ from sqlalchemy import (
     and_,
     delete,
     exists,
+    func,
     insert,
     literal,
     or_,
@@ -837,23 +838,43 @@ class TaskStore:
                 if conversation_row.head_message_id is None
                 else MessageRow.parent_message_id == conversation_row.head_message_id
             )
+            ownership_and_parent_filters = (
+                MessageRow.conversation_id == conversation_id,
+                MessageRow.role == "user",
+                parent_matches,
+                ResearchTaskRow.conversation_id == conversation_id,
+                ResearchTaskRow.user_id == user_id,
+            )
             result = session.execute(
                 select(MessageRow, ResearchTaskRow)
                 .join(ResearchTaskRow, ResearchTaskRow.id == MessageRow.task_id)
                 .where(
-                    MessageRow.conversation_id == conversation_id,
-                    MessageRow.role == "user",
-                    parent_matches,
-                    ResearchTaskRow.conversation_id == conversation_id,
-                    ResearchTaskRow.user_id == user_id,
-                    ResearchTaskRow.status.in_(("pending", "running", "failed")),
-                )
-                .order_by(
-                    ResearchTaskRow.created_at.desc(),
-                    ResearchTaskRow.id.desc(),
+                    *ownership_and_parent_filters,
+                    ResearchTaskRow.status.in_(("pending", "running")),
                 )
                 .limit(1)
             ).first()
+            if result is None:
+                queued_order = (
+                    select(
+                        TaskEventRow.task_id.label("task_id"),
+                        func.max(TaskEventRow.id).label("queued_event_id"),
+                    )
+                    .where(TaskEventRow.type == "queued")
+                    .group_by(TaskEventRow.task_id)
+                    .subquery()
+                )
+                result = session.execute(
+                    select(MessageRow, ResearchTaskRow)
+                    .join(ResearchTaskRow, ResearchTaskRow.id == MessageRow.task_id)
+                    .join(queued_order, queued_order.c.task_id == ResearchTaskRow.id)
+                    .where(
+                        *ownership_and_parent_filters,
+                        ResearchTaskRow.status == "failed",
+                    )
+                    .order_by(queued_order.c.queued_event_id.desc())
+                    .limit(1)
+                ).first()
             if result is None:
                 return None
             message_row, task_row = result

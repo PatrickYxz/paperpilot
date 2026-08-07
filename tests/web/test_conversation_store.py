@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, BrokenBarrierError
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import event
@@ -37,6 +38,30 @@ def _paper(**overrides: object) -> PaperCandidate:
 def _table_count(db_path, table: str) -> int:
     with sqlite3.connect(db_path) as connection:
         return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+def _queued_event_id(store: TaskStore, task_id: str) -> int:
+    with sqlite3.connect(store.db_path) as connection:
+        return int(
+            connection.execute(
+                "SELECT id FROM task_events WHERE task_id = ? AND type = 'queued'",
+                (task_id,),
+            ).fetchone()[0]
+        )
+
+
+def _fix_turn_ids_and_time(monkeypatch, *hex_values: str) -> None:
+    values = iter(hex_values)
+    monkeypatch.setattr(
+        task_store_module.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex=next(values)),
+    )
+    monkeypatch.setattr(
+        task_store_module,
+        "_utc_now",
+        lambda: "2026-08-07T09:00:00+00:00",
+    )
 
 
 def _insert_completed_turn(
@@ -802,6 +827,103 @@ def test_task_message_and_unstable_turn_keep_stable_head_unchanged(tmp_path):
     assert failed is not None
     assert failed.task.status == "failed"
     assert failed.user_message == turn.user_message
+
+
+def test_unstable_turn_prefers_active_retry_over_larger_same_second_failed_id(
+    tmp_path,
+    monkeypatch,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    alice = _create_test_user(store, "alice-active-retry-order")
+    conversation = store.create_conversation(
+        user_id=alice.id,
+        paper=_paper(external_id="2401.20027v1"),
+    )
+    _fix_turn_ids_and_time(
+        monkeypatch,
+        "f" * 32,
+        "1" * 32,
+        "0" * 32,
+        "2" * 32,
+    )
+    older_failed = store.create_conversation_turn(
+        user_id=alice.id,
+        conversation_id=conversation.id,
+        content="Older failed attempt",
+        depth="standard",
+        expected_head_message_id=None,
+    )
+    store.update_status(older_failed.task.id, "failed")
+    newer_active = store.create_conversation_turn(
+        user_id=alice.id,
+        conversation_id=conversation.id,
+        content="New active retry",
+        depth="standard",
+        expected_head_message_id=None,
+    )
+    store.update_status(newer_active.task.id, "running")
+
+    assert older_failed.task.id > newer_active.task.id
+    assert older_failed.task.created_at == newer_active.task.created_at
+    assert _queued_event_id(store, older_failed.task.id) < _queued_event_id(
+        store,
+        newer_active.task.id,
+    )
+    unstable = store.get_unstable_turn(conversation.id, user_id=alice.id)
+    assert unstable is not None
+    assert unstable.task.id == newer_active.task.id
+    assert unstable.task.status == "running"
+
+
+def test_unstable_turn_uses_queued_event_order_for_same_second_failed_tasks(
+    tmp_path,
+    monkeypatch,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    alice = _create_test_user(store, "alice-failed-retry-order")
+    conversation = store.create_conversation(
+        user_id=alice.id,
+        paper=_paper(external_id="2401.20028v1"),
+    )
+    _fix_turn_ids_and_time(
+        monkeypatch,
+        "f" * 32,
+        "3" * 32,
+        "0" * 32,
+        "4" * 32,
+    )
+    older_failed = store.create_conversation_turn(
+        user_id=alice.id,
+        conversation_id=conversation.id,
+        content="Older failed attempt",
+        depth="quick",
+        expected_head_message_id=None,
+    )
+    store.update_status(older_failed.task.id, "failed")
+    newer_failed = store.create_conversation_turn(
+        user_id=alice.id,
+        conversation_id=conversation.id,
+        content="Newer failed attempt",
+        depth="quick",
+        expected_head_message_id=None,
+    )
+    store.update_status(newer_failed.task.id, "failed")
+    later_old_diagnostic = store.add_event(
+        task_id=older_failed.task.id,
+        type="diagnostic",
+        message="A late diagnostic for the older failed turn.",
+    )
+
+    assert older_failed.task.id > newer_failed.task.id
+    assert older_failed.task.created_at == newer_failed.task.created_at
+    older_queued_id = _queued_event_id(store, older_failed.task.id)
+    newer_queued_id = _queued_event_id(store, newer_failed.task.id)
+    assert older_queued_id < newer_queued_id
+    assert newer_queued_id < later_old_diagnostic.id
+    unstable = store.get_unstable_turn(conversation.id, user_id=alice.id)
+    assert unstable is not None
+    assert unstable.task.id == newer_failed.task.id
+    assert unstable.task.status == "failed"
 
 
 def test_active_path_rejects_missing_parent_with_diagnostic_error(tmp_path):
