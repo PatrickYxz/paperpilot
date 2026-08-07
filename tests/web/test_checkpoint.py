@@ -38,9 +38,8 @@ def _build_counter_graph(saver):
     return builder.compile(checkpointer=saver)
 
 
-def _write_counter_states(path: str, thread_id: str, start_event) -> None:
-    if not start_event.wait(timeout=10):
-        raise RuntimeError("parent did not release checkpoint writers")
+def _write_counter_states(path: str, thread_id: str, start_barrier) -> None:
+    start_barrier.wait(timeout=10)
     runtime = SqliteCheckpointRuntime.open(path)
     try:
         graph = _build_counter_graph(runtime.saver)
@@ -237,23 +236,39 @@ def test_four_processes_can_write_independent_threads_to_one_database(
 ) -> None:
     path = tmp_path / "multiprocess-checkpoints.sqlite3"
     context = multiprocessing.get_context("spawn")
-    start_event = context.Event()
+    start_barrier = context.Barrier(5, timeout=10)
     processes = [
         context.Process(
             target=_write_counter_states,
-            args=(str(path), f"process-{index}", start_event),
+            args=(str(path), f"process-{index}", start_barrier),
         )
         for index in range(4)
     ]
+    started_processes = []
 
-    for process in processes:
-        process.start()
-    start_event.set()
-    for process in processes:
-        process.join(timeout=30)
+    try:
+        for process in processes:
+            process.start()
+            started_processes.append(process)
+        start_barrier.wait(timeout=10)
+        for process in started_processes:
+            process.join(timeout=30)
 
-    assert all(not process.is_alive() for process in processes)
-    assert [process.exitcode for process in processes] == [0, 0, 0, 0]
+        assert all(not process.is_alive() for process in started_processes)
+        assert [process.exitcode for process in started_processes] == [0, 0, 0, 0]
+    finally:
+        for process in started_processes:
+            if process.is_alive():
+                process.terminate()
+        for process in started_processes:
+            process.join(timeout=5)
+        survivors = [
+            process for process in started_processes if process.is_alive()
+        ]
+        for process in survivors:
+            process.kill()
+        for process in survivors:
+            process.join(timeout=5)
 
     runtime = SqliteCheckpointRuntime.open(path)
     try:
