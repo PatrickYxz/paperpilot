@@ -61,7 +61,7 @@ def initialize_turn(
         "graph_version": GRAPH_VERSION,
         "current_task_id": context.task_id,
         "current_user_message_id": context.current_user_message_id,
-        "evidence_items": [],
+        "research_result": None,
         "answer_draft": None,
         "published_message_id": None,
         "error": None,

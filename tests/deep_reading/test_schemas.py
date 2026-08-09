@@ -1,6 +1,8 @@
 """Validation contracts for deep-reading structured data."""
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -12,6 +14,7 @@ from paperpilot.deep_reading.schemas import (
     PaperUse,
     ResearchResult,
 )
+from paperpilot.deep_reading.state import DeepReadingState
 from paperpilot.papers import PaperCandidate
 
 
@@ -96,6 +99,26 @@ def test_research_result_rejects_evidence_owned_by_another_paper() -> None:
             ],
             limitations=[],
         )
+
+
+def test_full_research_result_round_trips_through_json_safe_state_payload() -> None:
+    result = ResearchResult(
+        evidence_items=[_evidence("ev-1")],
+        used_papers=[
+            PaperUse(
+                paper=_paper(),
+                role="comparison",
+                evidence_ids=["ev-1"],
+            )
+        ],
+        limitations=["Only one benchmark was reported."],
+    )
+
+    payload = result.model_dump(mode="json")
+    state: DeepReadingState = {"research_result": payload}
+
+    assert json.loads(json.dumps(state["research_result"])) == payload
+    assert ResearchResult.model_validate(state["research_result"]) == result
 
 
 def test_paper_use_rejects_duplicate_or_empty_evidence_references() -> None:

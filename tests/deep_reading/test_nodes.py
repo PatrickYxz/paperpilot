@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from typing import Any
+from typing import Any, get_type_hints
 
 import pytest
 from langchain.messages import AIMessage, HumanMessage, RemoveMessage
@@ -16,7 +16,11 @@ from paperpilot.deep_reading.nodes import (
     summarize_history,
 )
 from paperpilot.deep_reading.schemas import ConversationSummary
-from paperpilot.deep_reading.state import GRAPH_VERSION, SCHEMA_VERSION
+from paperpilot.deep_reading.state import (
+    GRAPH_VERSION,
+    SCHEMA_VERSION,
+    DeepReadingState,
+)
 
 
 SUMMARY = ConversationSummary(
@@ -91,6 +95,27 @@ def test_context_is_frozen_and_rejects_unbounded_configuration() -> None:
             _context(_FakeModel(), **overrides)
 
 
+def test_state_has_one_complete_research_result_field() -> None:
+    annotations = get_type_hints(DeepReadingState, include_extras=True)
+
+    assert set(annotations) == {
+        "schema_version",
+        "graph_version",
+        "messages",
+        "conversation_summary",
+        "current_task_id",
+        "current_user_message_id",
+        "primary_paper_id",
+        "active_paper_ids",
+        "research_result",
+        "answer_draft",
+        "published_message_id",
+        "error",
+    }
+    assert annotations["research_result"] == dict[str, object] | None
+    assert "evidence_items" not in annotations
+
+
 def test_initialize_turn_clears_only_per_turn_fields() -> None:
     messages = [HumanMessage(content="Earlier question", id="human-old")]
     old_summary = SUMMARY.model_dump(mode="json")
@@ -103,7 +128,11 @@ def test_initialize_turn_clears_only_per_turn_fields() -> None:
         "current_user_message_id": "message-old",
         "primary_paper_id": "paper-primary",
         "active_paper_ids": ["paper-primary", "paper-related"],
-        "evidence_items": [{"id": "old-evidence"}],
+        "research_result": {
+            "evidence_items": [{"id": "old-evidence"}],
+            "used_papers": [],
+            "limitations": [],
+        },
         "answer_draft": {"content": "old draft"},
         "published_message_id": "assistant-old",
         "error": {"message": "old error"},
@@ -116,7 +145,7 @@ def test_initialize_turn_clears_only_per_turn_fields() -> None:
         "graph_version": "conversation-v1",
         "current_task_id": "task-current",
         "current_user_message_id": "message-current",
-        "evidence_items": [],
+        "research_result": None,
         "answer_draft": None,
         "published_message_id": None,
         "error": None,

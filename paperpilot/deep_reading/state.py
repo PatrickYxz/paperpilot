@@ -21,7 +21,7 @@ class DeepReadingState(TypedDict, total=False):
     current_user_message_id: str
     primary_paper_id: str
     active_paper_ids: list[str]
-    evidence_items: list[dict[str, object]]
+    research_result: dict[str, object] | None
     answer_draft: dict[str, object] | None
     published_message_id: str | None
     error: dict[str, object] | None

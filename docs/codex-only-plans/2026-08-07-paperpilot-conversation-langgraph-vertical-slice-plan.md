@@ -27,6 +27,19 @@
 - 不引入 Ports、Adapters、Repository 或另一套自定义工作流框架。
 - 执行计划前使用 `superpowers:using-git-worktrees` 建立隔离工作树；不得触碰当前主工作树中用户已有的未跟踪文件 `docs/codex-only-plans/2026-08-05-architecture-audit-plan.md`。
 
+### 用户批准的 State 契约修正（2026-08-09）
+
+Task 9 实施前确认到原计划只持久化 `evidence_items`，会丢失 Task 10 发布所需的
+`ResearchResult.used_papers` 和 `limitations`。用户选择用一个完整业务对象替换分散字段：
+
+- `DeepReadingState` 使用 `research_result: dict[str, object] | None`，不再使用顶层
+  `evidence_items`。
+- `research_evidence()` 只写入 `ResearchResult.model_dump(mode="json")` 的完整结果。
+- `write_answer()` 从 `research_result.evidence_items` 校验引用；`publish_result()` 从
+  `research_result.used_papers` 构造 `UsedPaperInput`。
+- `initialize_turn()` 每轮把 `research_result` 清为 `None`。该切片尚未接入生产
+  checkpoint，因此仍视为首版 schema，`SCHEMA_VERSION` 保持 `1`。
+
 ---
 
 ## 文件职责总览
@@ -684,7 +697,7 @@ class ConversationSummary(BaseModel):
 
 - [ ] **Step 2: 写每轮字段清零和摘要条件测试**
 
-旧 State 预置上一轮 evidence、draft、published ID 和 error；`initialize_turn()` 后这些字段必须回到空值，但历史 messages、summary 和 active paper IDs 延续。摘要阈值以下不调用 fake model；超过阈值只保留配置的最近 6 轮，并写结构化 summary。
+旧 State 预置上一轮 research result、draft、published ID 和 error；`initialize_turn()` 后这些字段必须回到空值，但历史 messages、summary 和 active paper IDs 延续。摘要阈值以下不调用 fake model；超过阈值只保留配置的最近 6 轮，并写结构化 summary。
 
 - [ ] **Step 3: 运行测试确认模块缺失**
 
@@ -704,7 +717,7 @@ class DeepReadingState(TypedDict, total=False):
     current_user_message_id: str
     primary_paper_id: str
     active_paper_ids: list[str]
-    evidence_items: list[dict[str, object]]
+    research_result: dict[str, object] | None
     answer_draft: dict[str, object] | None
     published_message_id: str | None
     error: dict[str, object] | None
@@ -792,6 +805,9 @@ Expected: FAIL on missing research agent and node。
 
 `run_research_agent()` 内维护三个局部 dict：search 返回的 `PaperCandidate`、已准备 external IDs、MCP 返回的 EvidenceItems。Agent 的 `AgentResearchDecision` 只选择 external/evidence IDs；函数用账本中的权威 metadata 重建最终 `ResearchResult`，拒绝模型凭空生成 Paper 或 Evidence。该账本只活在单次调用，不进入 checkpoint，也不形成新的持久化层。
 
+`research_evidence()` 将完整 `ResearchResult.model_dump(mode="json")` 写入 State 的
+`research_result` 字段；不得只保存 evidence 而丢失 `used_papers` 或 `limitations`。
+
 - [ ] **Step 6: 包装现有 MCP 工具**
 
 准备论文依次调用 `mcp__arxiv__download_paper` 与 `mcp__colbert__build_index`；检索调用 `mcp__colbert__planned_retrieval`。custom Tool handler 的文本结果用 `json.loads` 解码。工具调用事件通过 `context.event_sink` 写为 `prepare/research/tool_call/tool_result` 阶段。
@@ -860,11 +876,11 @@ Fake nodes 记录执行顺序，断言短上下文为：
 
 - [ ] **Step 2: 写真实 `InMemorySaver` 两轮 State 测试**
 
-同一 `thread_id="conv-two-turn"` 调用两轮不同 `DeepReadingContext`；第二轮 fake writer 必须看到第一轮 Human/AI 消息和 summary/active papers，但 evidence、draft、published ID 已清零后重新生成。该测试只验证 Graph 语义，不声称进程重启能力。
+同一 `thread_id="conv-two-turn"` 调用两轮不同 `DeepReadingContext`；第二轮 fake writer 必须看到第一轮 Human/AI 消息和 summary/active papers，但 research result、draft、published ID 已清零后重新生成。该测试只验证 Graph 语义，不声称进程重启能力。
 
 - [ ] **Step 3: 写节点边界测试**
 
-`prepare_primary_paper` 必须调用 download/build，且重复准备不改变业务数据；`write_answer` 必须拒绝引用不存在 evidence ID；`publish_result` 必须把 Agent 实际使用 Paper 转成 `UsedPaperInput` 并把 Store 返回的内部 Paper IDs 写回 `active_paper_ids`。
+`prepare_primary_paper` 必须调用 download/build，且重复准备不改变业务数据；`write_answer` 必须拒绝引用不存在于 `research_result.evidence_items` 的 evidence ID；`publish_result` 必须把 `research_result.used_papers` 中 Agent 实际使用的 Paper 转成 `UsedPaperInput` 并把 Store 返回的内部 Paper IDs 写回 `active_paper_ids`。
 
 - [ ] **Step 4: 运行 Graph 测试确认失败**
 
