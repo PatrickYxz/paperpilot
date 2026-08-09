@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from paperpilot.core.adapter import Tool
 from paperpilot.papers import PaperCandidate, normalize_arxiv_id
 from paperpilot.web.task_store import (
+    ConversationDetail,
     MessageRecord,
     ResearchTask,
     TaskStore,
@@ -155,8 +156,7 @@ def prepare_primary_paper(
 ) -> DeepReadingState:
     """Prepare the business-authoritative primary paper for bounded retrieval."""
     context = runtime.context
-    _validate_runtime_binding(state, context)
-    detail = _conversation_detail(context)
+    _task, _user_message, detail = _validate_runtime_binding(state, context)
     primary = detail.primary_paper
     state_primary_id = _required_text(
         state.get("primary_paper_id"),
@@ -217,9 +217,8 @@ def write_answer(
 ) -> DeepReadingState:
     """Create and validate a structured answer from checkpoint-safe inputs."""
     context = runtime.context
-    _validate_runtime_binding(state, context)
+    _task, _user_message, detail = _validate_runtime_binding(state, context)
     result = _validated_research_result(state.get("research_result"))
-    detail = _conversation_detail(context)
     primary_id = _required_text(state.get("primary_paper_id"), "primary_paper_id")
     if detail.primary_paper.id != primary_id:
         raise ResearchContractError(
@@ -283,7 +282,7 @@ def publish_result(
 ) -> DeepReadingState:
     """Idempotently publish one validated answer and its actually used papers."""
     context = runtime.context
-    task, user_message = _validate_runtime_binding(state, context)
+    task, user_message, _detail = _validate_runtime_binding(state, context)
     candidate_result = _validated_research_result(state.get("research_result"))
     candidate_draft = _validated_answer_draft(state.get("answer_draft"))
     _validate_answer_citations(candidate_draft, candidate_result)
@@ -369,27 +368,31 @@ def _recent_turns(messages: list[AnyMessage], turn_count: int) -> list[AnyMessag
     return list(messages)
 
 
-def _conversation_detail(context: DeepReadingContext) -> Any:
-    detail = context.task_store.get_conversation_detail(
-        context.conversation_id,
-        user_id=context.user_id,
-    )
-    if detail is None:
-        raise ResearchContractError("conversation paper catalog is unavailable")
-    return detail
-
-
 def _validate_runtime_binding(
     state: DeepReadingState,
     context: DeepReadingContext,
-) -> tuple[ResearchTask, MessageRecord]:
+) -> tuple[ResearchTask, MessageRecord, ConversationDetail]:
     task_id = _required_text(context.task_id, "runtime task_id")
     task = context.task_store.get_task(task_id, user_id=context.user_id)
     if task is None:
         raise ResearchContractError("runtime task is unavailable for the owner")
     if task.id != task_id or task.user_id != context.user_id:
         raise ResearchContractError("runtime task does not match the requested owner")
-    if task.conversation_id != context.conversation_id:
+
+    detail = context.task_store.get_conversation_detail(
+        context.conversation_id,
+        user_id=context.user_id,
+    )
+    if detail is None:
+        raise ResearchContractError("conversation is unavailable for the owner")
+    conversation = detail.conversation
+    if conversation.id != context.conversation_id:
+        raise ResearchContractError(
+            "conversation detail does not match runtime context"
+        )
+    if conversation.user_id != context.user_id:
+        raise ResearchContractError("conversation detail does not match runtime owner")
+    if task.conversation_id != conversation.id:
         raise ResearchContractError("runtime task belongs to another conversation")
     if task.base_checkpoint_id != context.base_checkpoint_id:
         raise ResearchContractError(
@@ -412,6 +415,8 @@ def _validate_runtime_binding(
         )
     if message.task_id != task.id:
         raise ResearchContractError("runtime user message belongs to another task")
+    if task.question != message.content:
+        raise ResearchContractError("runtime task question does not match user message")
     state_message_id = _required_text(
         state.get("current_user_message_id"),
         "current_user_message_id",
@@ -420,7 +425,30 @@ def _validate_runtime_binding(
         raise ResearchContractError(
             "state current_user_message_id does not match runtime user message"
         )
-    return task, message
+
+    state_messages = state.get("messages")
+    if not isinstance(state_messages, list):
+        raise ResearchContractError("state messages must be a list")
+    matching_messages = [
+        item for item in state_messages if getattr(item, "id", None) == message.id
+    ]
+    if len(matching_messages) != 1:
+        raise ResearchContractError(
+            "state must contain exactly one current user message"
+        )
+    current_human = matching_messages[0]
+    if getattr(current_human, "type", None) != "human":
+        raise ResearchContractError("state current user message must be human")
+    if current_human.content != message.content:
+        raise ResearchContractError(
+            "state current user message content does not match business message"
+        )
+    human_messages = [
+        item for item in state_messages if getattr(item, "type", None) == "human"
+    ]
+    if not human_messages or human_messages[-1] is not current_human:
+        raise ResearchContractError("state current user message must be the last human")
+    return task, message, detail
 
 
 def _required_text(value: object, field_name: str) -> str:

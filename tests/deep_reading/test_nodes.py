@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
+from threading import Barrier
 from types import SimpleNamespace
 from typing import Any, get_type_hints
 
@@ -34,7 +36,7 @@ from paperpilot.deep_reading.schemas import (
 )
 from paperpilot.core.adapter import Tool
 from paperpilot.papers import PaperCandidate
-from paperpilot.web.task_store import UsedPaperInput
+from paperpilot.web.task_store import TaskStore, UsedPaperInput
 from paperpilot.deep_reading.state import (
     GRAPH_VERSION,
     SCHEMA_VERSION,
@@ -96,6 +98,7 @@ class _NodeStore:
     def __init__(self) -> None:
         self.task = SimpleNamespace(
             id="task-current",
+            question="Current question",
             user_id="user-1",
             conversation_id="conversation-1",
             base_checkpoint_id="checkpoint-base",
@@ -112,6 +115,10 @@ class _NodeStore:
         )
         self.assistant_message: SimpleNamespace | None = None
         self.detail = SimpleNamespace(
+            conversation=SimpleNamespace(
+                id="conversation-1",
+                user_id="user-1",
+            ),
             primary_paper=_paper(),
             active_papers=[
                 _paper(),
@@ -215,6 +222,9 @@ def _bound_state(**updates: object) -> dict[str, object]:
         "current_task_id": "task-current",
         "current_user_message_id": "message-current",
         "primary_paper_id": "paper-primary",
+        "messages": [
+            HumanMessage(content="Current question", id="message-current")
+        ],
     }
     state.update(updates)
     return state
@@ -360,7 +370,7 @@ def test_needs_summary_uses_exact_character_estimate_boundary() -> None:
 
 def test_summarize_history_below_threshold_does_not_call_model() -> None:
     model = _FakeModel()
-    state = {"messages": [HumanMessage(content="short", id="human-1")]}
+    state = _bound_state()
 
     update = summarize_history(
         state,
@@ -393,6 +403,9 @@ def test_summarize_history_writes_json_and_retains_recent_six_turns() -> None:
             "open_questions": [],
         },
     }
+    state["messages"].append(
+        HumanMessage(content="Current question", id="message-current")
+    )
 
     update = summarize_history(
         state,
@@ -405,8 +418,6 @@ def test_summarize_history_writes_json_and_retains_recent_six_turns() -> None:
     assert isinstance(message_update[0], RemoveMessage)
     assert message_update[0].id == REMOVE_ALL_MESSAGES
     assert [message.id for message in message_update[1:]] == [
-        "h-2",
-        "a-2",
         "h-3",
         "a-3",
         "h-4",
@@ -417,10 +428,9 @@ def test_summarize_history_writes_json_and_retains_recent_six_turns() -> None:
         "a-6",
         "h-7",
         "a-7",
+        "message-current",
     ]
     assert [message.id for message in add_messages(messages, message_update)] == [
-        "h-2",
-        "a-2",
         "h-3",
         "a-3",
         "h-4",
@@ -431,6 +441,7 @@ def test_summarize_history_writes_json_and_retains_recent_six_turns() -> None:
         "a-6",
         "h-7",
         "a-7",
+        "message-current",
     ]
 
 
@@ -469,9 +480,7 @@ def test_research_evidence_writes_complete_json_research_result(monkeypatch) -> 
         return result
 
     monkeypatch.setattr(nodes_module, "run_research_agent", fake_run)
-    state = _bound_state(
-        messages=[HumanMessage(content="Compare", id="human-1")]
-    )
+    state = _bound_state()
     context = _context(_FakeModel())
 
     update = research_evidence(state, Runtime(context=context))
@@ -613,6 +622,7 @@ def test_write_answer_uses_bounded_trusted_context_and_writes_json_draft() -> No
                 AIMessage(content=f"answer-{index}", id=f"assistant-{index}"),
             ]
         )
+    messages.append(HumanMessage(content="Current question", id="message-current"))
     state = _bound_state(
         messages=messages,
         conversation_summary=SUMMARY.model_dump(mode="json"),
@@ -628,15 +638,15 @@ def test_write_answer_uses_bounded_trusted_context_and_writes_json_draft() -> No
     assert update == {"answer_draft": draft.model_dump(mode="json")}
     prompt_messages = model.structured.invocations[0]
     assert [message.id for message in prompt_messages if message.id] == [
-        "human-2",
-        "assistant-2",
         "human-3",
         "assistant-3",
+        "message-current",
     ]
     rendered = "\n".join(str(message.content) for message in prompt_messages)
     assert "question-0" not in rendered
     assert "answer-1" not in rendered
-    assert "question-2" in rendered
+    assert "question-3" in rendered
+    assert "Current question" in rendered
     assert "Primary evidence" in rendered
     assert "Only one related paper was used." in rendered
     assert "Primary paper" in rendered
@@ -655,7 +665,6 @@ def test_write_answer_rejects_citation_outside_research_result() -> None:
     with pytest.raises(ResearchContractError, match="unknown evidence"):
         write_answer(
             _bound_state(
-                messages=[HumanMessage(content="Question", id="human-current")],
                 research_result=_research_result().model_dump(mode="json"),
             ),
             Runtime(context=_node_context(store=store, model=model)),
@@ -675,12 +684,10 @@ def test_publish_result_publishes_only_validated_used_papers() -> None:
     )
 
     update = publish_result(
-        {
-            "current_task_id": "task-current",
-            "current_user_message_id": "message-current",
-            "research_result": result.model_dump(mode="json"),
-            "answer_draft": draft.model_dump(mode="json"),
-        },
+        _bound_state(
+            research_result=result.model_dump(mode="json"),
+            answer_draft=draft.model_dump(mode="json"),
+        ),
         Runtime(context=_node_context(store=store, model=_FakeModel())),
     )
 
@@ -735,12 +742,10 @@ def test_publish_result_rejects_dangling_citation_without_store_write() -> None:
 
     with pytest.raises(ResearchContractError, match="unknown evidence"):
         publish_result(
-            {
-                "current_task_id": "task-current",
-                "current_user_message_id": "message-current",
-                "research_result": result.model_dump(mode="json"),
-                "answer_draft": invalid_draft.model_dump(mode="json"),
-            },
+            _bound_state(
+                research_result=result.model_dump(mode="json"),
+                answer_draft=invalid_draft.model_dump(mode="json"),
+            ),
             Runtime(context=_node_context(store=store, model=_FakeModel())),
         )
 
@@ -793,7 +798,7 @@ def test_external_and_publish_nodes_validate_binding_before_side_effect(
     state = _bound_state(
         messages=[
             HumanMessage(
-                content="long enough to summarize",
+                content="Current question",
                 id="message-current",
             )
         ],
@@ -839,7 +844,7 @@ def test_runtime_binding_rejects_mismatched_trusted_entities(
     monkeypatch,
 ) -> None:
     store = _NodeStore()
-    state = _bound_state(messages=[])
+    state = _bound_state()
     context = _node_context(store=store, model=_FakeModel())
     if broken_binding == "cross_owner":
         store.task.user_id = "user-other"
@@ -891,3 +896,383 @@ def test_publish_result_rejects_malformed_persisted_metadata() -> None:
         )
 
     assert store.publish_calls == []
+
+
+@pytest.mark.parametrize(
+    "bad_messages",
+    [
+        [],
+        [
+            HumanMessage(content="Current question", id="message-current"),
+            HumanMessage(content="Current question", id="message-current"),
+        ],
+        [HumanMessage(content="Current question", id="message-other")],
+        [HumanMessage(content="Forged question", id="message-current")],
+        [AIMessage(content="Current question", id="message-current")],
+        [
+            HumanMessage(content="Current question", id="message-current"),
+            HumanMessage(content="Rogue question", id="message-rogue"),
+        ],
+    ],
+    ids=[
+        "missing",
+        "duplicate",
+        "wrong-id",
+        "wrong-content",
+        "wrong-type",
+        "rogue-human-after-current",
+    ],
+)
+def test_runtime_binding_rejects_untrusted_current_human_before_agent(
+    bad_messages: list[object],
+    monkeypatch,
+) -> None:
+    store = _NodeStore()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        nodes_module,
+        "run_research_agent",
+        lambda _state, _context: calls.append("agent"),
+    )
+
+    with pytest.raises(ResearchContractError):
+        research_evidence(
+            _bound_state(messages=bad_messages),
+            Runtime(context=_node_context(store=store, model=_FakeModel())),
+        )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "broken_binding",
+    [
+        "conversation_detail_owner",
+        "conversation_detail_id",
+        "task_question",
+    ],
+)
+def test_runtime_binding_rejects_invalid_conversation_or_task_question(
+    broken_binding: str,
+    monkeypatch,
+) -> None:
+    store = _NodeStore()
+    if broken_binding == "conversation_detail_owner":
+        store.detail.conversation.user_id = "user-other"
+    elif broken_binding == "conversation_detail_id":
+        store.detail.conversation.id = "conversation-other"
+    else:
+        store.task.question = "Another question"
+    calls: list[str] = []
+    monkeypatch.setattr(
+        nodes_module,
+        "run_research_agent",
+        lambda _state, _context: calls.append("agent"),
+    )
+
+    with pytest.raises(ResearchContractError):
+        research_evidence(
+            _bound_state(),
+            Runtime(context=_node_context(store=store, model=_FakeModel())),
+        )
+
+    assert calls == []
+
+
+def _real_node_case(tmp_path, *, suffix: str):
+    store = TaskStore(tmp_path / f"binding-{suffix}.sqlite3")
+    user = store.create_user(
+        username=f"binding-{suffix}",
+        password_hash="hash",
+        password_salt="salt",
+    )
+    conversation = store.create_conversation(
+        user_id=user.id,
+        paper=PaperCandidate(
+            external_id="2401.92000v1",
+            title=f"Primary {suffix}",
+            authors=["Ada"],
+            abstract="Abstract",
+            source_url="https://arxiv.org/abs/2401.92000v1",
+        ),
+    )
+    turn = store.create_conversation_turn(
+        user_id=user.id,
+        conversation_id=conversation.id,
+        content="Current SQLite question",
+        depth="deep",
+        expected_head_message_id=None,
+    )
+    assert store.claim_task(turn.task.id) is not None
+    return store, user, conversation, turn
+
+
+@pytest.mark.parametrize(
+    "node_name",
+    [
+        "summarize_history",
+        "prepare_primary_paper",
+        "research_evidence",
+        "write_answer",
+        "publish_result",
+    ],
+)
+@pytest.mark.parametrize(
+    "tampering",
+    ["cross_owner_conversation", "wrong_human_content", "rogue_human"],
+)
+def test_real_sqlite_binding_fails_before_node_side_effect(
+    node_name: str,
+    tampering: str,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, user, conversation, turn = _real_node_case(
+        tmp_path,
+        suffix=f"{node_name[:2]}-{tampering[:2]}",
+    )
+    context_conversation_id = conversation.id
+    if tampering == "cross_owner_conversation":
+        other_user = store.create_user(
+            username=f"other-{node_name}-{tampering}",
+            password_hash="hash",
+            password_salt="salt",
+        )
+        other_conversation = store.create_conversation(
+            user_id=other_user.id,
+            paper=PaperCandidate(
+                external_id="2401.92999v1",
+                title="Other owner's paper",
+                authors=["Grace"],
+                abstract="Other abstract",
+                source_url="https://arxiv.org/abs/2401.92999v1",
+            ),
+        )
+        context_conversation_id = other_conversation.id
+
+    current_human = HumanMessage(
+        content=turn.user_message.content,
+        id=turn.user_message.id,
+    )
+    messages = [current_human]
+    if tampering == "wrong_human_content":
+        messages = [HumanMessage(content="Forged question", id=turn.user_message.id)]
+    elif tampering == "rogue_human":
+        messages.append(HumanMessage(content="Rogue question", id="message-rogue"))
+
+    result = _research_result()
+    draft = AnswerDraft(
+        content="Answer that must not publish",
+        citations=[AnswerCitation(evidence_id="ev-primary", label="Primary")],
+        result_quality="complete",
+    )
+    state = {
+        "current_task_id": turn.task.id,
+        "current_user_message_id": turn.user_message.id,
+        "primary_paper_id": conversation.primary_paper_id,
+        "messages": messages,
+        "research_result": result.model_dump(mode="json"),
+        "answer_draft": draft.model_dump(mode="json"),
+    }
+    model = _FakeModel(
+        SUMMARY.model_dump(mode="json")
+        if node_name == "summarize_history"
+        else draft.model_dump(mode="json")
+    )
+    side_effects: list[str] = []
+
+    def external_tool(arguments: dict[str, object]) -> str:
+        side_effects.append("mcp")
+        if "arxiv_id" in arguments:
+            return json.dumps(
+                {
+                    "paper_id": "2401.92000v1",
+                    "text": "Paper text",
+                }
+            )
+        return json.dumps({"cached_papers": ["2401.92000v1"]})
+
+    monkeypatch.setattr(
+        nodes_module,
+        "run_research_agent",
+        lambda _state, _context: side_effects.append("agent"),
+    )
+    context = DeepReadingContext(
+        user_id=user.id,
+        conversation_id=context_conversation_id,
+        task_id=turn.task.id,
+        current_user_message_id=turn.user_message.id,
+        base_checkpoint_id=None,
+        task_store=store,
+        model=model,
+        mcp_tools={
+            "mcp__arxiv__download_paper": _tool(
+                "mcp__arxiv__download_paper", external_tool
+            ),
+            "mcp__colbert__build_index": _tool(
+                "mcp__colbert__build_index", external_tool
+            ),
+        },
+        paper_search=lambda _query, _limit: [],
+        event_sink=lambda _event, _payload: None,
+        summary_token_threshold=1,
+    )
+    selected = {
+        "summarize_history": summarize_history,
+        "prepare_primary_paper": prepare_primary_paper,
+        "research_evidence": research_evidence,
+        "write_answer": write_answer,
+        "publish_result": publish_result,
+    }[node_name]
+
+    with pytest.raises(ResearchContractError):
+        selected(state, Runtime(context=context))
+
+    assert side_effects == []
+    assert model.schemas == []
+    assert store.get_task_message(turn.task.id, "assistant") is None
+
+
+def _concurrent_result(suffix: str) -> tuple[ResearchResult, AnswerDraft]:
+    paper = PaperCandidate(
+        external_id=f"2401.93{suffix.zfill(3)}v1",
+        title=f"Concurrent paper {suffix}",
+        authors=[f"Author {suffix}"],
+        abstract=f"Abstract {suffix}",
+        source_url=f"https://arxiv.org/abs/2401.93{suffix.zfill(3)}v1",
+    )
+    evidence_id = f"ev-concurrent-{suffix}"
+    result = ResearchResult(
+        evidence_items=[
+            EvidenceItem(
+                id=evidence_id,
+                paper_external_id=paper.external_id,
+                paper_title=paper.title,
+                chunk_text=f"Evidence {suffix}",
+                score=0.7,
+                supports=[f"claim {suffix}"],
+            )
+        ],
+        used_papers=[
+            PaperUse(
+                paper=paper,
+                role="comparison",
+                evidence_ids=[evidence_id],
+            )
+        ],
+        limitations=[f"limitation-{suffix}"],
+    )
+    draft = AnswerDraft(
+        content=f"concurrent-answer-{suffix}",
+        citations=[AnswerCitation(evidence_id=evidence_id, label=f"result-{suffix}")],
+        result_quality="complete" if suffix == "1" else "partial",
+    )
+    return result, draft
+
+
+def test_two_sqlite_stores_concurrently_publish_only_one_authoritative_result(
+    tmp_path,
+) -> None:
+    prepublish_barrier = Barrier(2)
+
+    class BarrierTaskStore(TaskStore):
+        def get_task_message(self, task_id: str, role: str):
+            message = super().get_task_message(task_id, role)
+            if role == "assistant" and message is None:
+                prepublish_barrier.wait(timeout=5)
+            return message
+
+    db_path = tmp_path / "concurrent-publication.sqlite3"
+    first_store = BarrierTaskStore(db_path)
+    user = first_store.create_user(
+        username="concurrent-node",
+        password_hash="hash",
+        password_salt="salt",
+    )
+    conversation = first_store.create_conversation(
+        user_id=user.id,
+        paper=PaperCandidate(
+            external_id="2401.93000v1",
+            title="Concurrent primary",
+            authors=["Primary"],
+            abstract="Primary abstract",
+            source_url="https://arxiv.org/abs/2401.93000v1",
+        ),
+    )
+    turn = first_store.create_conversation_turn(
+        user_id=user.id,
+        conversation_id=conversation.id,
+        content="Concurrent question",
+        depth="deep",
+        expected_head_message_id=None,
+    )
+    assert first_store.claim_task(turn.task.id) is not None
+    second_store = BarrierTaskStore(db_path)
+    candidates = [_concurrent_result("1"), _concurrent_result("2")]
+
+    def publish(store: TaskStore, candidate: tuple[ResearchResult, AnswerDraft]):
+        result, draft = candidate
+        state = {
+            "current_task_id": turn.task.id,
+            "current_user_message_id": turn.user_message.id,
+            "primary_paper_id": conversation.primary_paper_id,
+            "messages": [
+                HumanMessage(
+                    content=turn.user_message.content,
+                    id=turn.user_message.id,
+                )
+            ],
+            "research_result": result.model_dump(mode="json"),
+            "answer_draft": draft.model_dump(mode="json"),
+        }
+        context = DeepReadingContext(
+            user_id=user.id,
+            conversation_id=conversation.id,
+            task_id=turn.task.id,
+            current_user_message_id=turn.user_message.id,
+            base_checkpoint_id=None,
+            task_store=store,
+            model=object(),
+            mcp_tools={},
+            paper_search=lambda _query, _limit: [],
+            event_sink=lambda _event, _payload: None,
+        )
+        return publish_result(state, Runtime(context=context))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(publish, first_store, candidates[0]),
+            executor.submit(publish, second_store, candidates[1]),
+        ]
+        outputs = [future.result() for future in futures]
+
+    assert outputs[0]["published_message_id"] == outputs[1]["published_message_id"]
+    assert outputs[0]["research_result"] == outputs[1]["research_result"]
+    assert outputs[0]["answer_draft"] == outputs[1]["answer_draft"]
+    assert outputs[0]["messages"] == outputs[1]["messages"]
+    assistant = first_store.get_task_message(turn.task.id, "assistant")
+    assert assistant is not None
+    winning_suffix = "1" if assistant.content == "concurrent-answer-1" else "2"
+    losing_suffix = "2" if winning_suffix == "1" else "1"
+    winning_result, winning_draft = candidates[int(winning_suffix) - 1]
+    assert outputs[0]["research_result"] == winning_result.model_dump(mode="json")
+    assert outputs[0]["answer_draft"] == winning_draft.model_dump(mode="json")
+    assert assistant.metadata["result_quality"] == winning_draft.result_quality
+
+    with first_store.engine.connect() as connection:
+        associated_external_ids = set(
+            connection.exec_driver_sql(
+                """
+                SELECT papers.external_id
+                FROM conversation_papers
+                JOIN papers ON papers.id = conversation_papers.paper_id
+                WHERE conversation_papers.conversation_id = ?
+                """,
+                (conversation.id,),
+            ).scalars()
+        )
+    assert winning_result.used_papers[0].paper.external_id in associated_external_ids
+    assert (
+        candidates[int(losing_suffix) - 1][0].used_papers[0].paper.external_id
+        not in associated_external_ids
+    )
