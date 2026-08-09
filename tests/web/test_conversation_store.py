@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from threading import Barrier, BrokenBarrierError, Event
 from types import SimpleNamespace
 
@@ -1043,6 +1044,77 @@ def _publish_turn(
     )
 
 
+@contextmanager
+def _synchronize_reservation_or_legacy_read(
+    stores: tuple[TaskStore, TaskStore],
+    *,
+    reservation_prefix: str,
+    legacy_read_fragment: str,
+):
+    """Synchronize the real reservation SQL, with a RED-only legacy fallback."""
+    reservation_seen = Event()
+    reservation_writers_ready = Barrier(2)
+    legacy_readers_ready = Barrier(2)
+
+    def synchronize_reservation(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = " ".join(statement.split())
+        if not normalized.startswith(reservation_prefix):
+            return
+        reservation_seen.set()
+        try:
+            reservation_writers_ready.wait(timeout=5)
+        except BrokenBarrierError as exc:
+            raise AssertionError("both writers did not reach reservation SQL") from exc
+
+    def synchronize_legacy_read(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = " ".join(statement.split())
+        if reservation_seen.is_set() or legacy_read_fragment not in normalized:
+            return
+        try:
+            legacy_readers_ready.wait(timeout=5)
+        except BrokenBarrierError as exc:
+            raise AssertionError("both legacy writers did not complete first read") from exc
+
+    for store in stores:
+        event.listen(store.engine, "before_cursor_execute", synchronize_reservation)
+        event.listen(store.engine, "after_cursor_execute", synchronize_legacy_read)
+    try:
+        yield
+    finally:
+        for store in stores:
+            event.remove(
+                store.engine,
+                "before_cursor_execute",
+                synchronize_reservation,
+            )
+            event.remove(
+                store.engine,
+                "after_cursor_execute",
+                synchronize_legacy_read,
+            )
+
+
+def _call_or_exception(callable_):
+    try:
+        return callable_()
+    except Exception as exc:  # preserve both real transaction outcomes
+        return exc
+
+
 def test_publish_conversation_result_is_task_idempotent_and_keeps_head_stable(
     tmp_path,
 ):
@@ -1208,6 +1280,310 @@ def test_concurrent_publish_serializes_one_assistant_and_result_artifact(tmp_pat
     assert _table_count(db_path, "messages") == 2
     assert _table_count(db_path, "task_artifacts") == 1
     assert _table_count(db_path, "conversation_papers") == 2
+
+
+def test_concurrent_identical_finalize_is_idempotent_with_one_completed_event(
+    tmp_path,
+):
+    db_path = tmp_path / "tasks.sqlite3"
+    first_store = TaskStore(db_path)
+    alice = _create_test_user(first_store, "alice-concurrent-finalize")
+    conversation = first_store.create_conversation(
+        user_id=alice.id,
+        paper=_paper(external_id="2401.30018v1"),
+    )
+    turn = first_store.create_conversation_turn(
+        user_id=alice.id,
+        conversation_id=conversation.id,
+        content="Finalize once under redelivery.",
+        depth="deep",
+        expected_head_message_id=None,
+    )
+    first_store.claim_task(turn.task.id)
+    published = _publish_turn(
+        first_store,
+        turn.task.id,
+        used_papers=[_used_paper(external_id="2401.30019v1")],
+    )
+    second_store = TaskStore(db_path)
+    stores = (first_store, second_store)
+
+    def finalize(store: TaskStore):
+        return store.finalize_conversation_task(
+            task_id=turn.task.id,
+            assistant_message_id=published.message.id,
+            final_checkpoint_id="cp-concurrent-finalize",
+            result_quality="complete",
+            active_paper_ids=published.active_paper_ids,
+        )
+
+    with _synchronize_reservation_or_legacy_read(
+        stores,
+        reservation_prefix=(
+            "UPDATE research_tasks SET updated_at=research_tasks.updated_at"
+        ),
+        legacy_read_fragment=(
+            "FROM research_tasks WHERE research_tasks.id = ?"
+        ),
+    ):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(finalize, store) for store in stores]
+            results = [future.result() for future in futures]
+
+    assert all(
+        isinstance(result, task_store_module.FinalizedConversationTask)
+        for result in results
+    )
+    assert results[0] == results[1]
+    assert results[0].task.status == "completed"
+    assert results[0].conversation.head_message_id == published.message.id
+    with sqlite3.connect(db_path) as connection:
+        completed_events = connection.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND type = 'completed'",
+            (turn.task.id,),
+        ).fetchone()[0]
+    assert completed_events == 1
+
+
+def test_concurrent_identical_fail_is_idempotent_with_one_failed_event(tmp_path):
+    db_path = tmp_path / "tasks.sqlite3"
+    first_store = TaskStore(db_path)
+    alice = _create_test_user(first_store, "alice-concurrent-fail")
+    conversation = first_store.create_conversation(
+        user_id=alice.id,
+        paper=_paper(external_id="2401.30020v1"),
+    )
+    turn = first_store.create_conversation_turn(
+        user_id=alice.id,
+        conversation_id=conversation.id,
+        content="Fail once under redelivery.",
+        depth="standard",
+        expected_head_message_id=None,
+    )
+    first_store.claim_task(turn.task.id)
+    second_store = TaskStore(db_path)
+    stores = (first_store, second_store)
+
+    def fail(store: TaskStore):
+        return store.fail_conversation_task(
+            task_id=turn.task.id,
+            message="One stable failure.",
+            stage="research",
+            payload={"retryable": True},
+        )
+
+    with _synchronize_reservation_or_legacy_read(
+        stores,
+        reservation_prefix=(
+            "UPDATE research_tasks SET updated_at=research_tasks.updated_at"
+        ),
+        legacy_read_fragment=(
+            "FROM research_tasks WHERE research_tasks.id = ?"
+        ),
+    ):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(fail, store) for store in stores]
+            results = [future.result() for future in futures]
+
+    assert all(isinstance(result, task_store_module.ResearchTask) for result in results)
+    assert results[0] == results[1]
+    assert results[0].status == "failed"
+    with sqlite3.connect(db_path) as connection:
+        failed_events = connection.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND type = 'failed'",
+            (turn.task.id,),
+        ).fetchone()[0]
+    assert failed_events == 1
+
+
+def test_concurrent_finalize_and_fail_have_one_semantic_terminal_winner(tmp_path):
+    db_path = tmp_path / "tasks.sqlite3"
+    first_store = TaskStore(db_path)
+    alice = _create_test_user(first_store, "alice-terminal-race")
+    conversation = first_store.create_conversation(
+        user_id=alice.id,
+        paper=_paper(external_id="2401.30021v1"),
+    )
+    turn = first_store.create_conversation_turn(
+        user_id=alice.id,
+        conversation_id=conversation.id,
+        content="Only one terminal outcome may win.",
+        depth="deep",
+        expected_head_message_id=None,
+    )
+    first_store.claim_task(turn.task.id)
+    published = _publish_turn(
+        first_store,
+        turn.task.id,
+        used_papers=[_used_paper(external_id="2401.30022v1")],
+    )
+    second_store = TaskStore(db_path)
+    stores = (first_store, second_store)
+
+    finalize = lambda: first_store.finalize_conversation_task(
+        task_id=turn.task.id,
+        assistant_message_id=published.message.id,
+        final_checkpoint_id="cp-terminal-race",
+        result_quality="complete",
+        active_paper_ids=published.active_paper_ids,
+    )
+    fail = lambda: second_store.fail_conversation_task(
+        task_id=turn.task.id,
+        message="Concurrent terminal failure.",
+        stage="finalize",
+    )
+
+    with _synchronize_reservation_or_legacy_read(
+        stores,
+        reservation_prefix=(
+            "UPDATE research_tasks SET updated_at=research_tasks.updated_at"
+        ),
+        legacy_read_fragment=(
+            "FROM research_tasks WHERE research_tasks.id = ?"
+        ),
+    ):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(_call_or_exception, finalize),
+                executor.submit(_call_or_exception, fail),
+            ]
+            results = [future.result() for future in futures]
+
+    successes = [result for result in results if not isinstance(result, Exception)]
+    failures = [result for result in results if isinstance(result, Exception)]
+    assert len(successes) == 1, results
+    assert len(failures) == 1, results
+    assert isinstance(failures[0], ValueError), results
+
+    persisted_task = first_store.get_task(turn.task.id)
+    detail = first_store.get_conversation_detail(conversation.id, user_id=alice.id)
+    assert persisted_task is not None
+    assert detail is not None
+    with sqlite3.connect(db_path) as connection:
+        terminal_events = connection.execute(
+            """
+            SELECT type FROM task_events
+            WHERE task_id = ? AND type IN ('completed', 'failed')
+            ORDER BY id
+            """,
+            (turn.task.id,),
+        ).fetchall()
+    assert len(terminal_events) == 1
+    if persisted_task.status == "completed":
+        assert isinstance(
+            successes[0],
+            task_store_module.FinalizedConversationTask,
+        )
+        assert terminal_events == [("completed",)]
+        assert persisted_task.final_checkpoint_id == "cp-terminal-race"
+        assert detail.conversation.head_message_id == published.message.id
+        assert {paper.id for paper in detail.active_papers} == set(
+            published.active_paper_ids
+        )
+    else:
+        assert isinstance(successes[0], task_store_module.ResearchTask)
+        assert persisted_task.status == "failed"
+        assert terminal_events == [("failed",)]
+        assert persisted_task.final_checkpoint_id is None
+        assert persisted_task.result_quality is None
+        assert detail.conversation.head_message_id is None
+        assert [paper.id for paper in detail.active_papers] == [
+            conversation.primary_paper_id
+        ]
+
+
+def test_concurrent_identical_head_switch_has_one_stale_loser_and_coherent_state(
+    tmp_path,
+):
+    db_path = tmp_path / "tasks.sqlite3"
+    first_store = TaskStore(db_path)
+    alice = _create_test_user(first_store, "alice-concurrent-switch")
+    conversation = first_store.create_conversation(
+        user_id=alice.id,
+        paper=_paper(external_id="2401.30023v1"),
+    )
+    first_turn = first_store.create_conversation_turn(
+        user_id=alice.id,
+        conversation_id=conversation.id,
+        content="First stable branch.",
+        depth="standard",
+        expected_head_message_id=None,
+    )
+    first_store.claim_task(first_turn.task.id)
+    first_published = _publish_turn(
+        first_store,
+        first_turn.task.id,
+        used_papers=[_used_paper(external_id="2401.30024v1")],
+    )
+    first_final = first_store.finalize_conversation_task(
+        task_id=first_turn.task.id,
+        assistant_message_id=first_published.message.id,
+        final_checkpoint_id="cp-concurrent-switch-target",
+        result_quality="complete",
+        active_paper_ids=first_published.active_paper_ids,
+    )
+    second_turn = first_store.create_conversation_turn(
+        user_id=alice.id,
+        conversation_id=conversation.id,
+        content="Current stable branch.",
+        depth="standard",
+        expected_head_message_id=first_final.conversation.head_message_id,
+    )
+    first_store.claim_task(second_turn.task.id)
+    second_published = _publish_turn(
+        first_store,
+        second_turn.task.id,
+        used_papers=[_used_paper(external_id="2401.30025v1")],
+    )
+    second_final = first_store.finalize_conversation_task(
+        task_id=second_turn.task.id,
+        assistant_message_id=second_published.message.id,
+        final_checkpoint_id="cp-concurrent-switch-current",
+        result_quality="complete",
+        active_paper_ids=second_published.active_paper_ids,
+    )
+    second_store = TaskStore(db_path)
+    stores = (first_store, second_store)
+
+    def switch(store: TaskStore):
+        return store.switch_conversation_head(
+            conversation.id,
+            user_id=alice.id,
+            expected_head_message_id=second_final.conversation.head_message_id,
+            target_message_id=first_published.message.id,
+            target_checkpoint_id="cp-concurrent-switch-target",
+            active_paper_ids=first_published.active_paper_ids,
+        )
+
+    with _synchronize_reservation_or_legacy_read(
+        stores,
+        reservation_prefix=(
+            "UPDATE conversations SET updated_at=conversations.updated_at"
+        ),
+        legacy_read_fragment=(
+            "FROM conversations WHERE conversations.id = ?"
+        ),
+    ):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(_call_or_exception, lambda store=store: switch(store))
+                for store in stores
+            ]
+            results = [future.result() for future in futures]
+
+    successes = [result for result in results if not isinstance(result, Exception)]
+    failures = [result for result in results if isinstance(result, Exception)]
+    assert len(successes) == 1, results
+    assert len(failures) == 1, results
+    assert isinstance(successes[0], task_store_module.ConversationRecord)
+    assert isinstance(failures[0], task_store_module.StaleConversationHeadError)
+    detail = first_store.get_conversation_detail(conversation.id, user_id=alice.id)
+    assert detail is not None
+    assert detail.conversation.head_message_id == first_published.message.id
+    assert detail.conversation.head_checkpoint_id == "cp-concurrent-switch-target"
+    assert {paper.id for paper in detail.active_papers} == set(
+        first_published.active_paper_ids
+    )
 
 
 def test_finalize_conversation_task_atomically_completes_and_is_idempotent(tmp_path):

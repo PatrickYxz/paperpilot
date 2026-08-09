@@ -896,9 +896,16 @@ class TaskStore:
             raise ValueError(f"invalid result quality: {result_quality!r}")
 
         with self._session_factory.begin() as session:
+            reservation = session.execute(
+                update(ResearchTaskRow)
+                .where(ResearchTaskRow.id == task_id)
+                .values(updated_at=ResearchTaskRow.updated_at)
+            )
+            if reservation.rowcount != 1:
+                raise ValueError(f"task not found: {task_id}")
             task_row = session.get(ResearchTaskRow, task_id)
             if task_row is None:
-                raise ValueError(f"task not found: {task_id}")
+                raise RuntimeError("reserved task disappeared within transaction")
             if task_row.conversation_id is None:
                 raise ValueError("task is not attached to a conversation")
             conversation_row = session.get(ConversationRow, task_row.conversation_id)
@@ -991,9 +998,16 @@ class TaskStore:
         if not cleaned_message:
             raise ValueError("failure message is required")
         with self._session_factory.begin() as session:
+            reservation = session.execute(
+                update(ResearchTaskRow)
+                .where(ResearchTaskRow.id == task_id)
+                .values(updated_at=ResearchTaskRow.updated_at)
+            )
+            if reservation.rowcount != 1:
+                return None
             task_row = session.get(ResearchTaskRow, task_id)
             if task_row is None:
-                return None
+                raise RuntimeError("reserved task disappeared within transaction")
             if task_row.conversation_id is None:
                 raise ValueError("task is not attached to a conversation")
             if task_row.status == "completed":
@@ -1042,13 +1056,21 @@ class TaskStore:
         if not checkpoint_id:
             raise ValueError("target checkpoint id is required")
         with self._session_factory.begin() as session:
-            conversation_row = _select_owned_conversation_model(
-                session,
-                conversation_id,
-                user_id,
+            reservation = session.execute(
+                update(ConversationRow)
+                .where(
+                    ConversationRow.id == conversation_id,
+                    ConversationRow.user_id == user_id,
+                )
+                .values(updated_at=ConversationRow.updated_at)
             )
-            if conversation_row is None:
+            if reservation.rowcount != 1:
                 return None
+            conversation_row = session.get(ConversationRow, conversation_id)
+            if conversation_row is None:
+                raise RuntimeError(
+                    "reserved conversation disappeared within transaction"
+                )
             if conversation_row.archived_at is not None:
                 raise ValueError("conversation is archived")
             active_task_id = session.scalar(
