@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from langchain.messages import HumanMessage
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
 import paperpilot.deep_reading.graph as graph_module
@@ -36,11 +37,13 @@ class _FakeMCPClient:
     def __init__(self) -> None:
         self.start_count = 0
         self.close_count = 0
+        self.list_tools_count = 0
 
     def start(self) -> None:
         self.start_count += 1
 
     def list_tools(self) -> list[Tool]:
+        self.list_tools_count += 1
         return [
             Tool(
                 name="mcp__arxiv__download_paper",
@@ -166,6 +169,15 @@ def _artifact_count(store: TaskStore, task_id: str, user_id: str) -> int:
     )
     assert batch is not None
     return len(batch.items)
+
+
+def _execute_business_sql(
+    store: TaskStore,
+    statement: str,
+    parameters: dict[str, object],
+) -> None:
+    with store.engine.begin() as connection:
+        connection.execute(text(statement), parameters)
 
 
 def test_success_finalizes_business_head_and_exposes_frozen_checkpoint(tmp_path) -> None:
@@ -469,6 +481,7 @@ def test_redelivery_after_finalization_failure_uses_only_trusted_complete_snapsh
         ("current_task_id", "another-task"),
         ("current_user_message_id", "another-message"),
         ("graph_version", "another-version"),
+        ("schema_version", 999),
         ("published_message_id", "another-assistant"),
     ],
 )
@@ -481,7 +494,8 @@ def test_untrusted_recovery_snapshot_is_not_finalized(
     checkpoint_runtime = SqliteCheckpointRuntime.open(
         tmp_path / "checkpoints.sqlite3"
     )
-    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    mcp_client = _FakeMCPClient()
+    mcp_runtime = MCPRuntime(lambda: mcp_client)
     model_factory = _ModelFactory([])
     runner = _runner(store, checkpoint_runtime, mcp_runtime, model_factory)
     turn = _new_turn(store, user, conversation, "do not trust this snapshot")
@@ -507,11 +521,175 @@ def test_untrusted_recovery_snapshot_is_not_finalized(
         graph.update_state(snapshot.config, values)
         monkeypatch.setattr(store, "finalize_conversation_task", real_finalize)
         calls_before = model_factory.factory_calls
+        leases_before = mcp_client.list_tools_count
 
         runner.run(turn.task.id)
 
         assert model_factory.factory_calls == calls_before + 1
+        assert mcp_client.list_tools_count == leases_before + 1
         assert store.get_task(turn.task.id, user_id=user.id).status == "completed"
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "nonexistent_base",
+        "cross_thread_base",
+        "task_base_mismatch",
+        "user_parent_mismatch",
+        "unpaired_business_head",
+        "incomplete_base",
+        "base_graph_version",
+        "base_schema_version",
+        "base_published_head",
+    ],
+)
+def test_active_task_rejects_untrusted_business_base_before_model_or_mcp(
+    tmp_path, corruption
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    seed_mcp_runtime = MCPRuntime(_FakeMCPClient)
+    seed_runner = _runner(
+        store,
+        checkpoint_runtime,
+        seed_mcp_runtime,
+        _ModelFactory([]),
+    )
+    seed_turn = _new_turn(store, user, conversation, "trusted seed")
+    seed_runner.run(seed_turn.task.id)
+    seed_task = store.get_task(seed_turn.task.id, user_id=user.id)
+    seed_assistant = store.get_task_message(seed_turn.task.id, "assistant")
+    assert seed_task is not None and seed_task.final_checkpoint_id is not None
+    assert seed_assistant is not None
+
+    other_checkpoint_id: str | None = None
+    if corruption == "cross_thread_base":
+        other_conversation = store.create_conversation(user_id=user.id, paper=PRIMARY)
+        other_turn = _new_turn(store, user, other_conversation, "other thread")
+        seed_runner.run(other_turn.task.id)
+        other_task = store.get_task(other_turn.task.id, user_id=user.id)
+        assert other_task is not None and other_task.final_checkpoint_id is not None
+        other_checkpoint_id = other_task.final_checkpoint_id
+    seed_mcp_runtime.close()
+
+    turn = _new_turn(store, user, conversation, "must validate base")
+    graph = build_deep_reading_graph(checkpoint_runtime.saver)
+    seed_snapshot = graph.get_state(
+        {
+            "configurable": {
+                "thread_id": conversation.id,
+                "checkpoint_id": seed_task.final_checkpoint_id,
+            }
+        }
+    )
+    seed_update_config = {
+        "configurable": dict(seed_snapshot.config["configurable"])
+    }
+    seed_update_config["configurable"].setdefault("checkpoint_ns", "")
+    replacement_base: str | None = None
+    if corruption == "nonexistent_base":
+        replacement_base = "checkpoint-does-not-exist"
+    elif corruption == "cross_thread_base":
+        replacement_base = other_checkpoint_id
+    elif corruption == "incomplete_base":
+        incomplete_config = graph.update_state(
+            seed_update_config,
+            {},
+            as_node="write_answer",
+        )
+        replacement_base = incomplete_config["configurable"]["checkpoint_id"]
+        assert graph.get_state(incomplete_config).next == ("publish_result",)
+    elif corruption in {
+        "base_graph_version",
+        "base_schema_version",
+        "base_published_head",
+    }:
+        field, value = {
+            "base_graph_version": ("graph_version", "conversation-v999"),
+            "base_schema_version": ("schema_version", 999),
+            "base_published_head": (
+                "published_message_id",
+                "another-assistant-message",
+            ),
+        }[corruption]
+        corrupt_config = graph.update_state(
+            seed_update_config,
+            {field: value},
+        )
+        replacement_base = corrupt_config["configurable"]["checkpoint_id"]
+        assert graph.get_state(corrupt_config).next == ()
+
+    if replacement_base is not None:
+        _execute_business_sql(
+            store,
+            "UPDATE research_tasks SET base_checkpoint_id = :checkpoint_id "
+            "WHERE id = :task_id",
+            {"checkpoint_id": replacement_base, "task_id": turn.task.id},
+        )
+        _execute_business_sql(
+            store,
+            "UPDATE conversations SET head_checkpoint_id = :checkpoint_id "
+            "WHERE id = :conversation_id",
+            {
+                "checkpoint_id": replacement_base,
+                "conversation_id": conversation.id,
+            },
+        )
+    elif corruption == "task_base_mismatch":
+        _execute_business_sql(
+            store,
+            "UPDATE research_tasks SET base_checkpoint_id = :checkpoint_id "
+            "WHERE id = :task_id",
+            {"checkpoint_id": "mismatched-task-base", "task_id": turn.task.id},
+        )
+    elif corruption == "user_parent_mismatch":
+        _execute_business_sql(
+            store,
+            "UPDATE messages SET parent_message_id = NULL WHERE id = :message_id",
+            {"message_id": turn.user_message.id},
+        )
+    elif corruption == "unpaired_business_head":
+        _execute_business_sql(
+            store,
+            "UPDATE research_tasks SET base_checkpoint_id = NULL WHERE id = :task_id",
+            {"task_id": turn.task.id},
+        )
+        _execute_business_sql(
+            store,
+            "UPDATE conversations SET head_checkpoint_id = NULL "
+            "WHERE id = :conversation_id",
+            {"conversation_id": conversation.id},
+        )
+
+    mcp_client = _FakeMCPClient()
+    mcp_runtime = MCPRuntime(lambda: mcp_client)
+    model_factory = _ModelFactory([])
+    runner = _runner(
+        store,
+        checkpoint_runtime,
+        mcp_runtime,
+        model_factory,
+    )
+    try:
+        with pytest.raises((ValueError, RuntimeError)) as exc_info:
+            runner.run(turn.task.id)
+
+        assert not isinstance(exc_info.value, DeepReadingTaskError)
+        task = store.get_task(turn.task.id, user_id=user.id)
+        assert task is not None and task.status == "pending"
+        assert store.get_task_message(turn.task.id, "assistant") is None
+        assert model_factory.factory_calls == 0
+        assert mcp_client.start_count == 0
+        assert mcp_client.list_tools_count == 0
     finally:
         mcp_runtime.close()
         checkpoint_runtime.close()
