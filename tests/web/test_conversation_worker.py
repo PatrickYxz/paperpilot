@@ -15,6 +15,7 @@ from paperpilot.web import worker_tasks
 from paperpilot.web.app import create_app
 from paperpilot.web.config import WebRuntimeConfig
 from paperpilot.web.task_store import TaskStore
+from paperpilot.web.workflow import WorkflowRunner
 
 
 PRIMARY_PAPER = PaperCandidate(
@@ -243,6 +244,34 @@ def test_worker_recovers_redelivered_running_conversation_but_skips_completed(
 
     assert deep_runner.calls == [running.id]
     assert builds == ["running"]
+
+
+def test_late_retry_exhaustion_preserves_completed_conversation_without_event(
+    tmp_path,
+):
+    store = TaskStore(tmp_path / "completed-race.sqlite3")
+    task = _new_conversation_task(store, suffix="9")
+    store.update_status(task.id, "completed")
+    runner = WorkflowRunner(store)
+
+    runner.fail_conversation_execution(
+        task.id,
+        backend="celery",
+        attempts=4,
+        max_retries=3,
+        exc=ConnectionError("late secret failure"),
+    )
+
+    assert store.get_task(task.id).status == "completed"
+    events = store.list_events_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    )
+    assert events is not None
+    assert [event for event in events.items if event.type == "failed"] == []
+    store.close()
 
 
 def test_legacy_real_worker_does_not_create_checkpoint_runtime(tmp_path, monkeypatch):

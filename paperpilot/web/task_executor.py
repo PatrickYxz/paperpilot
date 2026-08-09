@@ -1,6 +1,8 @@
 """Background execution boundary for Web research tasks."""
 from __future__ import annotations
 
+import logging
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import BoundedSemaphore, Lock
 from typing import Callable, Literal, Protocol, cast
@@ -12,12 +14,23 @@ from paperpilot.web.celery_app import (
 from paperpilot.web.config import WebRuntimeConfig
 
 ExecutionMode = Literal["simulated", "real"]
+_LOGGER = logging.getLogger("paperpilot.web.runtime")
 
 
 class WorkflowRunnerLike(Protocol):
     def run_simulated(self, task_id: str) -> None: ...
 
     def run_real(self, task_id: str) -> None: ...
+
+    def fail_conversation_execution(
+        self,
+        task_id: str,
+        *,
+        backend: str,
+        attempts: int,
+        max_retries: int,
+        exc: Exception,
+    ) -> None: ...
 
 
 class TaskExecutorAtCapacityError(RuntimeError):
@@ -81,7 +94,31 @@ class TaskSubmissionReservation:
         self._release_once("submitting")
 
     def _release_after_future(self, future: Future[None]) -> None:
-        self._release_once("submitted")
+        try:
+            if future.done() and not future.cancelled():
+                exc = future.exception()
+                if exc is not None:
+                    _LOGGER.error(
+                        "Background task execution failed",
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                        extra={
+                            "event": "task.execution_failed",
+                            "executor": "thread",
+                            "reason": "future_exception",
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
+        except BaseException:
+            _LOGGER.exception(
+                "Background task Future inspection failed",
+                extra={
+                    "event": "task.future_inspection_failed",
+                    "executor": "thread",
+                    "reason": "callback_exception",
+                },
+            )
+        finally:
+            self._release_once("submitted")
 
     def _release_once(self, expected_state: str) -> None:
         callback = None
@@ -123,14 +160,32 @@ class TaskExecutor:
         *,
         max_workers: int = 2,
         queue_capacity: int = 4,
+        max_retries: int = 3,
+        retry_backoff_seconds: int = 1,
+        retry_backoff_max_seconds: int = 30,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be at least 1")
         if queue_capacity < 0:
             raise ValueError("queue_capacity must be at least 0")
+        if max_retries < 0:
+            raise ValueError("max_retries must be at least 0")
+        if retry_backoff_seconds < 1:
+            raise ValueError("retry_backoff_seconds must be at least 1")
+        if retry_backoff_max_seconds < 1:
+            raise ValueError("retry_backoff_max_seconds must be at least 1")
+        if retry_backoff_seconds > retry_backoff_max_seconds:
+            raise ValueError(
+                "retry_backoff_seconds must not exceed retry_backoff_max_seconds"
+            )
         self.runner = runner
         self.max_workers = max_workers
         self.queue_capacity = queue_capacity
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self.retry_backoff_max_seconds = retry_backoff_max_seconds
+        self._sleeper = sleeper
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
         self._capacity = BoundedSemaphore(max_workers + queue_capacity)
         self._state_lock = Lock()
@@ -168,12 +223,59 @@ class TaskExecutor:
 
     def _run(self, task_id: str, execution_mode: ExecutionMode) -> None:
         if execution_mode == "real":
-            self.runner.run_real(task_id)
+            self._run_real_with_retries(task_id)
             return
         if execution_mode == "simulated":
             self.runner.run_simulated(task_id)
             return
         raise ValueError(f"invalid execution mode: {execution_mode!r}")
+
+    def _run_real_with_retries(self, task_id: str) -> None:
+        for attempt_index in range(self.max_retries + 1):
+            try:
+                self.runner.run_real(task_id)
+                return
+            except Exception as exc:
+                if attempt_index < self.max_retries:
+                    countdown = task_retry_countdown_seconds(
+                        attempt_index,
+                        initial_seconds=self.retry_backoff_seconds,
+                        max_seconds=self.retry_backoff_max_seconds,
+                    )
+                    _LOGGER.warning(
+                        "Conversation execution retry %d/%d in %d seconds",
+                        attempt_index + 1,
+                        self.max_retries,
+                        countdown,
+                        exc_info=True,
+                        extra={
+                            "event": "task.execution_retry",
+                            "executor": "thread",
+                            "reason": "workflow_exception",
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
+                    self._sleeper(countdown)
+                    continue
+
+                try:
+                    self.runner.fail_conversation_execution(
+                        task_id,
+                        backend="thread",
+                        attempts=attempt_index + 1,
+                        max_retries=self.max_retries,
+                        exc=exc,
+                    )
+                except Exception:
+                    _LOGGER.exception(
+                        "Conversation retry exhaustion finalization failed",
+                        extra={
+                            "event": "task.execution_failure_finalize_failed",
+                            "executor": "thread",
+                            "reason": "store_exception",
+                        },
+                    )
+                raise
 
 
 class SynchronousTaskExecutor:
@@ -269,5 +371,20 @@ def build_task_executor(
             runner,
             max_workers=runtime.thread_workers,
             queue_capacity=runtime.thread_queue_capacity,
+            max_retries=runtime.task_max_retries,
+            retry_backoff_seconds=runtime.task_retry_backoff_seconds,
+            retry_backoff_max_seconds=runtime.task_retry_backoff_max_seconds,
         )
     return CeleryTaskExecutor()
+
+
+def task_retry_countdown_seconds(
+    retry_index: int,
+    *,
+    initial_seconds: int,
+    max_seconds: int,
+) -> int:
+    """Return the bounded delay before the zero-based retry attempt."""
+    if retry_index < 0:
+        raise ValueError("retry_index must be at least 0")
+    return min(initial_seconds * (2**retry_index), max_seconds)

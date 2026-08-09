@@ -17,6 +17,9 @@ class WebRuntimeConfig:
     thread_workers: int = 2
     thread_queue_capacity: int = 4
     overload_retry_after_seconds: int = 1
+    task_max_retries: int = 3
+    task_retry_backoff_seconds: int = 1
+    task_retry_backoff_max_seconds: int = 30
     log_level: str = "INFO"
     log_format: LogFormat = "json"
     slow_request_ms: int = 1000
@@ -53,6 +56,24 @@ class WebRuntimeConfig:
         if not environment:
             raise ValueError("PAPERPILOT_ENV must not be empty")
 
+        task_retry_backoff_seconds = _read_int(
+            values,
+            "PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS",
+            default=1,
+            minimum=1,
+        )
+        task_retry_backoff_max_seconds = _read_int(
+            values,
+            "PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS",
+            default=30,
+            minimum=1,
+        )
+        if task_retry_backoff_seconds > task_retry_backoff_max_seconds:
+            raise ValueError(
+                "PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS must not exceed "
+                "PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS"
+            )
+
         return cls(
             task_executor=cast(TaskExecutorBackend, task_executor),
             thread_workers=_read_int(
@@ -70,6 +91,14 @@ class WebRuntimeConfig:
                 default=1,
                 minimum=1,
             ),
+            task_max_retries=_read_int(
+                values,
+                "PAPERPILOT_TASK_MAX_RETRIES",
+                default=3,
+                minimum=0,
+            ),
+            task_retry_backoff_seconds=task_retry_backoff_seconds,
+            task_retry_backoff_max_seconds=task_retry_backoff_max_seconds,
             log_level=log_level,
             log_format=cast(LogFormat, log_format),
             slow_request_ms=_read_int(

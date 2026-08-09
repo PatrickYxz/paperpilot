@@ -1,6 +1,7 @@
 """Celery worker tasks with one lazy MCP runtime per worker process."""
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -16,7 +17,10 @@ from paperpilot.web.celery_app import (
 )
 from paperpilot.web.checkpoint import SqliteCheckpointRuntime
 from paperpilot.web.config import WebRuntimeConfig
-from paperpilot.web.task_executor import ExecutionMode
+from paperpilot.web.task_executor import (
+    ExecutionMode,
+    task_retry_countdown_seconds,
+)
 from paperpilot.web.task_store import TaskStore
 from paperpilot.web.workflow import WorkflowRunner
 
@@ -28,6 +32,7 @@ _checkpoint_runtime_factory: Callable[[Path], SqliteCheckpointRuntime] = (
     SqliteCheckpointRuntime.open
 )
 _store_factory: Callable[[], TaskStore] = TaskStore
+_LOGGER = logging.getLogger("paperpilot.web.runtime")
 
 
 def _get_runtime() -> MCPRuntime:
@@ -50,20 +55,21 @@ def _build_deep_reading_runner(
     store: TaskStore,
     mcp_runtime: MCPRuntime,
     checkpoint_runtime: SqliteCheckpointRuntime | None = None,
+    config: WebRuntimeConfig | None = None,
 ) -> DeepReadingRunner:
-    config = WebRuntimeConfig.from_env()
+    runtime_config = config or WebRuntimeConfig.from_env()
     checkpoint = (
         checkpoint_runtime
         if checkpoint_runtime is not None
-        else _get_checkpoint_runtime(config.checkpoint_db_path)
+        else _get_checkpoint_runtime(runtime_config.checkpoint_db_path)
     )
     return DeepReadingRunner(
         task_store=store,
         checkpointer=checkpoint.saver,
         mcp_runtime=mcp_runtime,
-        summary_token_threshold=config.summary_token_threshold,
-        summary_recent_turns=config.summary_recent_turns,
-        research_recursion_limit=config.research_recursion_limit,
+        summary_token_threshold=runtime_config.summary_token_threshold,
+        summary_recent_turns=runtime_config.summary_recent_turns,
+        research_recursion_limit=runtime_config.research_recursion_limit,
     )
 
 
@@ -72,6 +78,7 @@ def _execute_research_task(
     execution_mode: ExecutionMode,
     *,
     redelivered: bool = False,
+    config: WebRuntimeConfig | None = None,
 ) -> None:
     if execution_mode not in {"simulated", "real"}:
         raise ValueError(f"invalid execution mode: {execution_mode!r}")
@@ -92,6 +99,7 @@ def _execute_research_task(
             deep_reading_runner = _build_deep_reading_runner(
                 store,
                 runtime,
+                config=config,
             )
             WorkflowRunner(
                 store,
@@ -121,12 +129,81 @@ def execute_research_task(
     task_id: str,
     execution_mode: ExecutionMode,
 ) -> None:
+    config = WebRuntimeConfig.from_env()
     delivery_info = self.request.delivery_info or {}
-    _execute_research_task(
-        task_id,
-        execution_mode,
-        redelivered=bool(delivery_info.get("redelivered")),
-    )
+    retries = int(self.request.retries or 0)
+    try:
+        _execute_research_task(
+            task_id,
+            execution_mode,
+            redelivered=(
+                bool(delivery_info.get("redelivered")) or retries > 0
+            ),
+            config=config,
+        )
+    except Exception as exc:
+        if retries < config.task_max_retries:
+            countdown = task_retry_countdown_seconds(
+                retries,
+                initial_seconds=config.task_retry_backoff_seconds,
+                max_seconds=config.task_retry_backoff_max_seconds,
+            )
+            _LOGGER.warning(
+                "Conversation execution retry %d/%d in %d seconds",
+                retries + 1,
+                config.task_max_retries,
+                countdown,
+                exc_info=True,
+                extra={
+                    "event": "task.execution_retry",
+                    "executor": "celery",
+                    "reason": "workflow_exception",
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            raise self.retry(
+                exc=exc,
+                countdown=countdown,
+                max_retries=config.task_max_retries,
+            )
+
+        try:
+            _fail_conversation_execution(
+                task_id,
+                attempts=retries + 1,
+                max_retries=config.task_max_retries,
+                exc=exc,
+            )
+        except Exception:
+            _LOGGER.exception(
+                "Conversation retry exhaustion finalization failed",
+                extra={
+                    "event": "task.execution_failure_finalize_failed",
+                    "executor": "celery",
+                    "reason": "store_exception",
+                },
+            )
+        raise
+
+
+def _fail_conversation_execution(
+    task_id: str,
+    *,
+    attempts: int,
+    max_retries: int,
+    exc: Exception,
+) -> None:
+    store = _store_factory()
+    try:
+        WorkflowRunner(store).fail_conversation_execution(
+            task_id,
+            backend="celery",
+            attempts=attempts,
+            max_retries=max_retries,
+            exc=exc,
+        )
+    finally:
+        store.close()
 
 
 @worker_process_init.connect

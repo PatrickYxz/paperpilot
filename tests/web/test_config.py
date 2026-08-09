@@ -15,6 +15,9 @@ def test_runtime_config_defaults_are_local_and_bounded():
     assert config.thread_workers == 2
     assert config.thread_queue_capacity == 4
     assert config.overload_retry_after_seconds == 1
+    assert config.task_max_retries == 3
+    assert config.task_retry_backoff_seconds == 1
+    assert config.task_retry_backoff_max_seconds == 30
     assert config.log_level == "INFO"
     assert config.log_format == "json"
     assert config.slow_request_ms == 1000
@@ -32,6 +35,9 @@ def test_runtime_config_accepts_explicit_overrides():
             "PAPERPILOT_THREAD_WORKERS": "3",
             "PAPERPILOT_THREAD_QUEUE_CAPACITY": "0",
             "PAPERPILOT_OVERLOAD_RETRY_AFTER_SECONDS": "5",
+            "PAPERPILOT_TASK_MAX_RETRIES": "5",
+            "PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS": "3",
+            "PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS": "12",
             "PAPERPILOT_LOG_LEVEL": "debug",
             "PAPERPILOT_LOG_FORMAT": "text",
             "PAPERPILOT_SLOW_REQUEST_MS": "250",
@@ -47,6 +53,9 @@ def test_runtime_config_accepts_explicit_overrides():
     assert config.thread_workers == 3
     assert config.thread_queue_capacity == 0
     assert config.overload_retry_after_seconds == 5
+    assert config.task_max_retries == 5
+    assert config.task_retry_backoff_seconds == 3
+    assert config.task_retry_backoff_max_seconds == 12
     assert config.log_level == "DEBUG"
     assert config.log_format == "text"
     assert config.slow_request_ms == 250
@@ -65,6 +74,18 @@ def test_runtime_config_accepts_explicit_overrides():
         ("PAPERPILOT_THREAD_WORKERS", "many", "PAPERPILOT_THREAD_WORKERS"),
         ("PAPERPILOT_THREAD_QUEUE_CAPACITY", "-1", "PAPERPILOT_THREAD_QUEUE_CAPACITY"),
         ("PAPERPILOT_OVERLOAD_RETRY_AFTER_SECONDS", "0", "PAPERPILOT_OVERLOAD_RETRY_AFTER_SECONDS"),
+        ("PAPERPILOT_TASK_MAX_RETRIES", "-1", "PAPERPILOT_TASK_MAX_RETRIES"),
+        ("PAPERPILOT_TASK_MAX_RETRIES", "many", "PAPERPILOT_TASK_MAX_RETRIES"),
+        (
+            "PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS",
+            "0",
+            "PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS",
+        ),
+        (
+            "PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS",
+            "0",
+            "PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS",
+        ),
         ("PAPERPILOT_LOG_LEVEL", "verbose", "PAPERPILOT_LOG_LEVEL"),
         ("PAPERPILOT_LOG_FORMAT", "yaml", "PAPERPILOT_LOG_FORMAT"),
         ("PAPERPILOT_SLOW_REQUEST_MS", "0", "PAPERPILOT_SLOW_REQUEST_MS"),
@@ -90,3 +111,16 @@ def test_runtime_config_accepts_explicit_overrides():
 def test_runtime_config_rejects_invalid_values(name, value, message):
     with pytest.raises(ValueError, match=message):
         WebRuntimeConfig.from_env({name: value})
+
+
+def test_runtime_config_rejects_retry_backoff_above_cap():
+    with pytest.raises(
+        ValueError,
+        match="PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS",
+    ):
+        WebRuntimeConfig.from_env(
+            {
+                "PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS": "31",
+                "PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS": "30",
+            }
+        )

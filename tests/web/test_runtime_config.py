@@ -62,6 +62,9 @@ def test_env_example_declares_both_sqlite_paths_and_executor_examples():
         "PAPERPILOT_TASK_EXECUTOR=thread",
         "PAPERPILOT_TASK_EXECUTOR=celery",
         "PAPERPILOT_CELERY_BROKER_URL=redis://127.0.0.1:6379/0",
+        "PAPERPILOT_TASK_MAX_RETRIES=3",
+        "PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS=1",
+        "PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS=30",
     ):
         assert value in text
 

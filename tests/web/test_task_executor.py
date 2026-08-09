@@ -7,6 +7,8 @@ from concurrent.futures import Future
 
 import pytest
 
+from paperpilot.papers import PaperCandidate
+from paperpilot.web import task_executor as task_executor_module
 from paperpilot.web.config import WebRuntimeConfig
 from paperpilot.web.task_executor import (
     CeleryTaskExecutor,
@@ -65,6 +67,31 @@ def _reserve_eventually(executor):
     raise AssertionError("executor capacity was not restored")
 
 
+def _new_conversation_task(store: TaskStore):
+    user = store.create_user(
+        username="retry-user",
+        password_hash="hash",
+        password_salt="salt",
+    )
+    conversation = store.create_conversation(
+        user_id=user.id,
+        paper=PaperCandidate(
+            external_id="2401.99991v1",
+            title="Retry paper",
+            authors=["Ada Lovelace"],
+            abstract="Retry abstract.",
+            source_url="https://arxiv.org/abs/2401.99991v1",
+        ),
+    )
+    return store.create_conversation_turn(
+        user_id=user.id,
+        conversation_id=conversation.id,
+        content="Retry this conversation safely.",
+        depth="standard",
+        expected_head_message_id=None,
+    ).task
+
+
 def test_synchronous_executor_runs_simulated_task(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
     user = store.create_user(
@@ -92,6 +119,103 @@ def test_threaded_executor_submits_work_to_runner():
     assert runner.calls == [("real", "task_1")]
     assert executor.max_workers == 2
     executor.shutdown()
+
+
+def test_retry_countdown_uses_exponential_backoff_with_cap():
+    assert [
+        task_executor_module.task_retry_countdown_seconds(
+            retry_index,
+            initial_seconds=3,
+            max_seconds=10,
+        )
+        for retry_index in range(5)
+    ] == [3, 6, 10, 10, 10]
+
+
+@pytest.mark.parametrize("failures_before_success", [1, 2])
+def test_thread_executor_retries_real_work_until_second_or_third_attempt(
+    failures_before_success,
+):
+    class FlakyRunner(FakeRunner):
+        def run_real(self, task_id: str) -> None:
+            self.calls.append(("real", task_id))
+            if len(self.calls) <= failures_before_success:
+                raise ConnectionError("temporary checkpoint outage")
+
+    runner = FlakyRunner()
+    sleeps: list[float] = []
+    executor = TaskExecutor(
+        runner,
+        max_workers=1,
+        max_retries=3,
+        retry_backoff_seconds=2,
+        retry_backoff_max_seconds=30,
+        sleeper=sleeps.append,
+    )
+    try:
+        future = executor.submit("task_retry", "real")
+
+        assert future.result(timeout=1) is None
+        assert runner.calls == [
+            ("real", "task_retry")
+        ] * (failures_before_success + 1)
+        assert sleeps == [2, 4][:failures_before_success]
+    finally:
+        executor.shutdown()
+
+
+def test_thread_executor_exhaustion_fails_conversation_once_without_leaking(
+    tmp_path,
+):
+    store = TaskStore(tmp_path / "thread-retry.sqlite3")
+    task = _new_conversation_task(store)
+
+    class FailingDeepRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, task_id: str) -> None:
+            self.calls += 1
+            raise ConnectionError("secret-token paper-content")
+
+    deep_runner = FailingDeepRunner()
+    runner = WorkflowRunner(store, deep_reading_runner=deep_runner)
+    sleeps: list[float] = []
+    executor = TaskExecutor(runner, max_workers=1, sleeper=sleeps.append)
+    try:
+        future = executor.submit(task.id, "real")
+
+        with pytest.raises(ConnectionError, match="secret-token paper-content"):
+            future.result(timeout=1)
+        recovered = _reserve_eventually(executor)
+        recovered.release()
+    finally:
+        executor.shutdown()
+
+    assert deep_runner.calls == 4
+    assert sleeps == [1, 2, 4]
+    assert store.get_task(task.id).status == "failed"
+    events = store.list_events_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    )
+    assert events is not None
+    failures = [event for event in events.items if event.type == "failed"]
+    assert len(failures) == 1
+    failure = failures[0]
+    assert failure.stage == "execution_retry_exhausted"
+    assert failure.message == "Conversation execution failed after retry limit."
+    assert failure.payload == {
+        "backend": "thread",
+        "attempts": 4,
+        "max_retries": 3,
+        "error_type": "ConnectionError",
+    }
+    assert "secret-token" not in str(failure.to_dict())
+    assert "paper-content" not in str(failure.to_dict())
+    store.close()
 
 
 def test_thread_executor_bounds_running_plus_queued_work():
@@ -490,6 +614,9 @@ def test_build_task_executor_uses_validated_thread_capacity():
         task_executor="thread",
         thread_workers=3,
         thread_queue_capacity=7,
+        task_max_retries=5,
+        task_retry_backoff_seconds=3,
+        task_retry_backoff_max_seconds=12,
     )
 
     executor = build_task_executor(FakeRunner(), config=config)
@@ -497,6 +624,9 @@ def test_build_task_executor_uses_validated_thread_capacity():
     assert isinstance(executor, TaskExecutor)
     assert executor.max_workers == 3
     assert executor.queue_capacity == 7
+    assert executor.max_retries == 5
+    assert executor.retry_backoff_seconds == 3
+    assert executor.retry_backoff_max_seconds == 12
     executor.shutdown()
 
 

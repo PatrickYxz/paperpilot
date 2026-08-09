@@ -297,7 +297,7 @@ class PaperCandidate(BaseModel):
     primary_category: str | None = None
 ```
 
-URL/ID 输入使用 `arxiv.Search(id_list=[normalized])` 精确解析；普通标题、作者和关键词使用 `arxiv.Search(query=query, max_results=limit)`。`limit` 限制为 1–20，空 query 抛 `ValueError`。Web PaperResponse 只暴露产品需要的字段；MCP 渲染继续使用 `pdf_url/published/primary_category`。
+URL/ID 输入使用 `arxiv.Search(id_list=[normalized])` 精确解析；普通标题、作者和关键词使用 `arxiv.Search(query=query, max_results=limit)`。共享 Catalog 与旧 MCP 入口继续支持 1–50；Web Paper 搜索和 Research Agent 工具边界各自把用户输入限制为 1–20。空 query 抛 `ValueError`。Web PaperResponse 只暴露产品需要的字段；MCP 渲染继续使用 `pdf_url/published/primary_category`。
 
 - [ ] **Step 4: 让 arXiv MCP 复用 catalog 并保持原文本格式**
 
@@ -1306,6 +1306,79 @@ git commit -m "docs: document conversation runtime operations"
 
 ---
 
+### Task 16: 为 Conversation 执行补齐有限重试与失败终态
+
+**背景：**
+- 最终分支审查确认 Celery 5.6 的 `task_acks_on_failure_or_timeout=True` 会 ACK 普通 Python/SQLite/checkpoint 异常；现有 `task_acks_late` 和 `task_reject_on_worker_lost` 只覆盖 Worker 丢失，不会重投普通异常。
+- `WorkflowRunner.run_real()` 有意让 Conversation 基础设施异常逃出，以便执行边界重试；但当前 Celery Task 没有调用 `self.retry()`，线程 Future 的回调也只释放容量，导致业务 Task 可永久停在 `running`。
+- 用户选择方案 1：首次失败后最多重试 3 次，指数退避从 1 秒开始且上限 30 秒；Celery 显式重投，线程进程内重试；耗尽后业务 Task 必须进入 `failed`。
+
+**Files:**
+- Modify: `paperpilot/web/config.py`
+- Modify: `paperpilot/web/task_executor.py`
+- Modify: `paperpilot/web/worker_tasks.py`
+- Modify: `paperpilot/web/workflow.py`
+- Modify: `tests/web/test_config.py`
+- Modify: `tests/web/test_task_executor.py`
+- Modify: `tests/web/test_celery_worker.py`
+- Modify: `tests/web/test_conversation_worker.py`（仅在真实业务终态覆盖需要时）
+- Modify: `tests/web/test_runtime_config.py`
+- Modify: `.env.example`
+- Modify: `README.md`
+
+**Interfaces and exact contract:**
+- `WebRuntimeConfig` 新增 `task_max_retries=3`、`task_retry_backoff_seconds=1`、`task_retry_backoff_max_seconds=30`。
+- 对应环境变量固定为 `PAPERPILOT_TASK_MAX_RETRIES`、`PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS`、`PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS`；最大重试次数允许 0，两个退避值必须为正整数，初始值不得大于上限。
+- “3 次重试”表示首次执行之外最多再执行 3 次，总尝试次数最多 4 次。第 1、2、3 次重试的默认延迟依次为 1、2、4 秒；配置更大的重试次数时使用 `min(initial * 2**retry_index, max)` 封顶。
+- 只重试从 `WorkflowRunner` 逃出的异常；Graph 内部已经转成确定业务终态的失败不得重复执行。不得把 `task_acks_on_failure_or_timeout=False` 当作修复，因为 Celery 对普通失败会 reject 且 `requeue=False`。
+- Celery bound task 在 `request.retries < task_max_retries` 时调用 `self.retry(exc=..., countdown=..., max_retries=...)`。显式 retry 消息未必带 broker `redelivered`，因此 `_execute_research_task(..., redelivered=...)` 的恢复条件必须是 `delivery_info.redelivered` 或 `request.retries > 0`。
+- 线程执行器必须使用同一退避公式在进程内重试，并允许测试注入无等待 sleeper；容量 reservation 覆盖完整重试生命周期，完成回调必须观察并记录最终 Future 异常后再释放容量。
+- 重试耗尽时，通过 `WorkflowRunner` 的小型显式方法和现有 `TaskStore.fail_conversation_task()` 幂等终结活动 Conversation Task；不得新增 Repository 层或改变数据库结构。
+- 终态事件固定为 `type="failed"`、`stage="execution_retry_exhausted"`、`message="Conversation execution failed after retry limit."`，payload 至少包含 `backend`、`attempts`、`max_retries`、`error_type`。用户可见事件不得保存原始异常消息、traceback、密钥或论文内容；完整异常只写服务端日志。
+- 若并发恢复已经把 Task 置为 `completed`，晚到的耗尽处理必须保持 completed 且不新增 failed 事件；若 Task 不存在或不是 Conversation Task，保持原异常失败语义，不伪造 Conversation 终态。
+- Celery 耗尽并完成业务失败落库后仍重新抛出原异常，使 Celery 任务自身成为 FAILURE；线程 Future 同样保留原异常。若失败落库本身不可用，记录服务端异常并保留原执行异常，不能吞掉。
+- `SynchronousTaskExecutor` 是测试用确定性执行器，不引入睡眠或生产重试；生产 `build_task_executor()` 必须把同一份已验证的 runtime config 传给 `TaskExecutor`。
+
+- [ ] **Step 1: 先写配置、Celery、线程和终态回归测试并验证 RED**
+
+至少覆盖：默认与环境变量/非法关系；线程第二或第三次成功；线程默认 4 次均失败后只有一个 failed 事件；Celery 普通异常进入显式 retry；`request.retries > 0` 能重新 claim `running` Task；Celery 耗尽后真实 SQLite 业务 Task 为 failed；并发 completed 不被晚到失败覆盖。先运行目标测试，记录它们因缺少新行为而失败，而不是因 fixture/导入错误失败。
+
+- [ ] **Step 2: 实现共享退避计算和配置校验**
+
+退避计算保持为本模块可测试的小函数或等价的单一实现；Celery 与线程不得各复制一套可能漂移的公式。配置由 `WebRuntimeConfig.from_env()` 一次验证，执行器和 Worker 只消费已验证值。
+
+- [ ] **Step 3: 实现线程有限重试和 Future 异常观测**
+
+`TaskExecutor` 对逃出的异常最多重试配置次数；每次 retry 前记录结构化服务端 warning；耗尽时调用 runner 的 Conversation 失败终结方法，再让 Future 保留原异常。回调先观察/记录异常再可靠释放 reservation 容量。
+
+- [ ] **Step 4: 实现 Celery 显式 retry 和 retry-aware claim**
+
+普通异常未耗尽时通过 `self.retry()` 重投；retry 次数和 broker redelivery 任一成立都允许恢复 `running` Task。耗尽后以新 `TaskStore` 连接终结业务 Task、关闭连接并重新抛出原异常。不得在 Web 进程启动 MCP。
+
+- [ ] **Step 5: 实现幂等且不泄密的 Conversation 失败终结方法**
+
+方法只处理活动或已 failed 的 Conversation Task；completed 是安全 no-op；首次耗尽写一个固定 failed 事件，重复耗尽不追加。错误类型只写类名，原异常正文仅进入 logger。
+
+- [ ] **Step 6: 更新运行配置文档**
+
+在 `.env.example` 与 README 说明三个参数、总尝试次数语义、默认退避序列、Celery/线程差异，以及 SQLite/checkpoint 长时间不可用时仍需要人工恢复或未来 reconciler 的限制。
+
+- [ ] **Step 7: 运行目标与完整回归门禁**
+
+Run: `LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m pytest tests/web/test_config.py tests/web/test_task_executor.py tests/web/test_celery_worker.py tests/web/test_conversation_worker.py tests/web/test_runtime_config.py -q`
+
+Run: `LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m pytest tests -q`
+
+Run: `git diff --check`
+
+Expected: 所有目标测试与完整测试 0 failed；仅保留项目已有的 slow deselection 和已知第三方 warning；diff check exit 0。
+
+- [ ] **Step 8: 提交并请求任务级、整分支级复审**
+
+提交只包含 Task 16 与 Task 3 计划文字校正。任务复审必须检查真实 Celery ACK/retry 语义、总尝试次数、completed race、失败事件泄密边界和线程容量释放；通过后重新生成 `bf003b2..HEAD` 整分支 review package，处理最终结论。
+
+---
+
 ## 计划自检映射
 
 | 设计要求 | 实施 Task |
@@ -1316,12 +1389,12 @@ git commit -m "docs: document conversation runtime operations"
 | Message 树、active path、alternatives | 6、7、13、14 |
 | 固定 SOP + LangChain Agent + Pydantic | 8、9、10 |
 | 主论文锚点 + 实际使用的关联论文 | 5、7、9、10 |
-| 幂等发布、两个崩溃窗口、Celery redelivery | 7、11、12 |
+| 幂等发布、两个崩溃窗口、Celery redelivery 与普通异常有限重试 | 7、11、12、16 |
 | 连续追问、rollback 零模型调用、后续 fork | 11、13、15 |
 | 进度轮询 + 完整 Assistant Message | 13、14 |
 | 旧 `/api/tasks` 兼容 | 12、13、15 |
 | 不实现 Store/token streaming/cancel/Postgres | Global Constraints、15 |
-| 无付费模型自动测试与完整回归 | 1–15，重点 15 |
+| 无付费模型自动测试与完整回归 | 1–16，重点 15、16 |
 
 ## 执行停止条件
 

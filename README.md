@@ -214,6 +214,9 @@ export PAPERPILOT_TASK_EXECUTOR=celery
 export PAPERPILOT_CELERY_BROKER_URL=redis://127.0.0.1:6379/0
 export PAPERPILOT_TASK_DB_PATH="$PWD/data/web/tasks.sqlite3"
 export PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH="$PWD/data/langgraph/checkpoints.sqlite3"
+export PAPERPILOT_TASK_MAX_RETRIES=3
+export PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS=1
+export PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS=30
 export LANGGRAPH_STRICT_MSGPACK=true
 ```
 
@@ -231,6 +234,25 @@ before treating broker delivery as lossless. If publication is ambiguous, API
 compensation may change only a still-`pending` Task to `failed`; it never
 overwrites a Worker-owned `running`, `completed`, or `failed` Task.
 
+Conversation infrastructure failures that escape the workflow have a bounded
+retry policy shared by the Celery and thread executors. The default
+`PAPERPILOT_TASK_MAX_RETRIES=3` means at most three retries after the initial
+execution, for at most four total attempts. With
+`PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS=1` and
+`PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS=30`, the first three retry delays are
+1, 2, and 4 seconds; larger retry counts continue exponentially and are capped
+at 30 seconds. Celery schedules each retry as a new broker delivery, while the
+thread executor waits and retries inside the same process and keeps its
+admission slot reserved for the full lifecycle. A workflow failure already
+converted into a deterministic business terminal state is not retried.
+
+After the retry limit, an active Conversation Task is recorded as `failed`,
+while the executor still reports the original exception. This prevents a Task
+from remaining permanently `running` after a transient process-local failure,
+but it cannot guarantee automatic recovery while the business SQLite database
+or LangGraph checkpoint database remains unavailable. Long outages still need
+operator recovery and, for lossless automated repair, a future reconciler.
+
 ## Web Runtime Protection
 
 For the local, in-process thread executor, configure the runtime before
@@ -241,6 +263,9 @@ export PAPERPILOT_TASK_EXECUTOR=thread
 export PAPERPILOT_THREAD_WORKERS=2
 export PAPERPILOT_THREAD_QUEUE_CAPACITY=4
 export PAPERPILOT_OVERLOAD_RETRY_AFTER_SECONDS=1
+export PAPERPILOT_TASK_MAX_RETRIES=3
+export PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS=1
+export PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS=30
 export PAPERPILOT_LOG_LEVEL=INFO
 export PAPERPILOT_LOG_FORMAT=json
 export PAPERPILOT_SLOW_REQUEST_MS=1000

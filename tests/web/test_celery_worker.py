@@ -5,7 +5,9 @@ import threading
 
 import pytest
 
+from paperpilot.papers import PaperCandidate
 from paperpilot.tools.mcp_runtime import MCPRuntime
+from paperpilot.web.config import WebRuntimeConfig
 from paperpilot.web.celery_app import create_celery_app
 from paperpilot.web.task_store import TaskStore
 from paperpilot.web import worker_tasks
@@ -51,6 +53,35 @@ class RaisingWorkflowRunner:
         raise RuntimeError("workflow failed before cleanup")
 
 
+class RetryScheduled(RuntimeError):
+    pass
+
+
+def _new_conversation_task(store: TaskStore):
+    user = store.create_user(
+        username="celery-retry-user",
+        password_hash="hash",
+        password_salt="salt",
+    )
+    conversation = store.create_conversation(
+        user_id=user.id,
+        paper=PaperCandidate(
+            external_id="2401.99992v1",
+            title="Celery retry paper",
+            authors=["Grace Hopper"],
+            abstract="Celery retry abstract.",
+            source_url="https://arxiv.org/abs/2401.99992v1",
+        ),
+    )
+    return store.create_conversation_turn(
+        user_id=user.id,
+        conversation_id=conversation.id,
+        content="Retry this Celery conversation.",
+        depth="standard",
+        expected_head_message_id=None,
+    ).task
+
+
 def test_celery_app_uses_long_task_safety_settings(monkeypatch):
     monkeypatch.setenv(
         "PAPERPILOT_CELERY_BROKER_URL",
@@ -80,6 +111,126 @@ def test_celery_app_rejects_time_limits_beyond_visibility_timeout(monkeypatch):
 
     with pytest.raises(ValueError, match="visibility timeout"):
         create_celery_app()
+
+
+def test_celery_task_retries_ordinary_execution_exception(monkeypatch):
+    execution_error = ConnectionError("temporary checkpoint outage")
+    retry_calls: list[dict[str, object]] = []
+
+    def fail_execution(*_args, **_kwargs):
+        raise execution_error
+
+    def schedule_retry(**kwargs):
+        retry_calls.append(kwargs)
+        raise RetryScheduled("scheduled")
+
+    monkeypatch.setattr(worker_tasks, "_execute_research_task", fail_execution)
+    monkeypatch.setattr(
+        worker_tasks.WebRuntimeConfig,
+        "from_env",
+        lambda: WebRuntimeConfig(),
+    )
+    monkeypatch.setattr(worker_tasks.execute_research_task, "retry", schedule_retry)
+
+    result = worker_tasks.execute_research_task.apply(
+        args=["task_retry", "real"],
+        throw=False,
+    )
+
+    assert isinstance(result.result, RetryScheduled)
+    assert retry_calls == [
+        {
+            "exc": execution_error,
+            "countdown": 1,
+            "max_retries": 3,
+        }
+    ]
+
+
+def test_celery_retry_request_can_reclaim_running_task(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    def record_execution(task_id, execution_mode, *, redelivered=False, config=None):
+        calls.append(
+            {
+                "task_id": task_id,
+                "execution_mode": execution_mode,
+                "redelivered": redelivered,
+                "config": config,
+            }
+        )
+
+    config = WebRuntimeConfig()
+    monkeypatch.setattr(worker_tasks, "_execute_research_task", record_execution)
+    monkeypatch.setattr(worker_tasks.WebRuntimeConfig, "from_env", lambda: config)
+
+    result = worker_tasks.execute_research_task.apply(
+        args=["task_running", "real"],
+        retries=1,
+        throw=False,
+    )
+
+    assert result.successful()
+    assert calls == [
+        {
+            "task_id": "task_running",
+            "execution_mode": "real",
+            "redelivered": True,
+            "config": config,
+        }
+    ]
+
+
+def test_celery_retry_exhaustion_fails_real_sqlite_conversation(monkeypatch, tmp_path):
+    db_path = tmp_path / "celery-retry.sqlite3"
+    seed = TaskStore(db_path)
+    task = _new_conversation_task(seed)
+    seed.update_status(task.id, "running")
+    seed.close()
+    execution_error = OSError("database locked secret-paper-text")
+
+    def fail_execution(*_args, **_kwargs):
+        raise execution_error
+
+    monkeypatch.setattr(worker_tasks, "_execute_research_task", fail_execution)
+    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: TaskStore(db_path))
+    monkeypatch.setattr(
+        worker_tasks.WebRuntimeConfig,
+        "from_env",
+        lambda: WebRuntimeConfig(),
+    )
+
+    result = worker_tasks.execute_research_task.apply(
+        args=[task.id, "real"],
+        retries=3,
+        throw=False,
+    )
+
+    assert result.failed()
+    assert result.result is execution_error
+    check = TaskStore(db_path)
+    assert check.get_task(task.id).status == "failed"
+    events = check.list_events_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    )
+    assert events is not None
+    failures = [event for event in events.items if event.type == "failed"]
+    assert len(failures) == 1
+    failure = failures[0]
+    assert failure.stage == "execution_retry_exhausted"
+    assert failure.message == "Conversation execution failed after retry limit."
+    assert failure.payload == {
+        "backend": "celery",
+        "attempts": 4,
+        "max_retries": 3,
+        "error_type": "OSError",
+    }
+    assert "database locked" not in str(failure.to_dict())
+    assert "secret-paper-text" not in str(failure.to_dict())
+    check.close()
 
 
 def test_worker_closes_task_store_after_success(tmp_path, monkeypatch):

@@ -1,6 +1,7 @@
 """Workflow runner boundary for Web research tasks."""
 from __future__ import annotations
 
+import logging
 import time
 from inspect import Parameter, signature
 from typing import Callable, Protocol
@@ -9,6 +10,7 @@ from paperpilot.web.event_mapper import map_paperpilot_event
 from paperpilot.web.task_store import TaskStore
 
 RealRunner = Callable[..., list[dict]]
+_LOGGER = logging.getLogger("paperpilot.web.runtime")
 
 
 class DeepReadingRunnerLike(Protocol):
@@ -118,6 +120,48 @@ class WorkflowRunner:
             self.deep_reading_runner.run(task_id)
             return
         self._run_legacy_real(task_id)
+
+    def fail_conversation_execution(
+        self,
+        task_id: str,
+        *,
+        backend: str,
+        attempts: int,
+        max_retries: int,
+        exc: Exception,
+    ) -> None:
+        """Idempotently fail active Conversation work after retries are exhausted."""
+        _LOGGER.error(
+            "Conversation execution failed after retry limit",
+            exc_info=(type(exc), exc, exc.__traceback__),
+            extra={
+                "event": "task.execution_retry_exhausted",
+                "executor": backend,
+                "reason": "retry_limit",
+                "exception_type": type(exc).__name__,
+            },
+        )
+        try:
+            self.store.fail_conversation_task(
+                task_id=task_id,
+                message="Conversation execution failed after retry limit.",
+                stage="execution_retry_exhausted",
+                payload={
+                    "backend": backend,
+                    "attempts": attempts,
+                    "max_retries": max_retries,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        except ValueError:
+            task = self.store.get_task(task_id)
+            if (
+                task is not None
+                and task.conversation_id is not None
+                and task.status == "completed"
+            ):
+                return
+            raise
 
     def _run_legacy_real(self, task_id: str) -> None:
         """Preserve the legacy runner's complete best-effort failure boundary."""
