@@ -1,7 +1,10 @@
 """State and node behavior for the deep-reading graph."""
 from __future__ import annotations
 
+import json
+from copy import deepcopy
 from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 from typing import Any, get_type_hints
 
 import pytest
@@ -14,16 +17,24 @@ from paperpilot.deep_reading.nodes import (
     DeepReadingContext,
     initialize_turn,
     needs_summary,
+    prepare_primary_paper,
+    publish_result,
     research_evidence,
     summarize_history,
+    write_answer,
 )
+from paperpilot.deep_reading.research_agent import ResearchContractError
 from paperpilot.deep_reading.schemas import (
+    AnswerCitation,
+    AnswerDraft,
     ConversationSummary,
     EvidenceItem,
     PaperUse,
     ResearchResult,
 )
+from paperpilot.core.adapter import Tool
 from paperpilot.papers import PaperCandidate
+from paperpilot.web.task_store import UsedPaperInput
 from paperpilot.deep_reading.state import (
     GRAPH_VERSION,
     SCHEMA_VERSION,
@@ -62,6 +73,122 @@ class _FakeModel:
     ) -> _StructuredModel:
         self.schemas.append(schema)
         return self.structured
+
+
+def _paper(
+    *,
+    internal_id: str = "paper-primary",
+    external_id: str = "2401.12345v1",
+    title: str = "Primary paper",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=internal_id,
+        source="arxiv",
+        external_id=external_id,
+        title=title,
+        authors=["Ada"],
+        abstract="Trusted abstract",
+        source_url=f"https://arxiv.org/abs/{external_id}",
+    )
+
+
+class _NodeStore:
+    def __init__(self) -> None:
+        self.detail = SimpleNamespace(
+            primary_paper=_paper(),
+            active_papers=[
+                _paper(),
+                _paper(
+                    internal_id="paper-active",
+                    external_id="2401.54321v2",
+                    title="Active paper",
+                ),
+            ],
+        )
+        self.detail_calls: list[tuple[str, str]] = []
+        self.publish_calls: list[dict[str, object]] = []
+
+    def get_conversation_detail(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str,
+    ) -> object:
+        self.detail_calls.append((conversation_id, user_id))
+        return self.detail
+
+    def publish_conversation_result(self, **kwargs: object) -> object:
+        self.publish_calls.append(kwargs)
+        return SimpleNamespace(
+            message=SimpleNamespace(id="assistant-published"),
+            artifact=SimpleNamespace(id=7),
+            active_paper_ids=["paper-primary", "paper-active", "paper-related"],
+        )
+
+
+def _tool(name: str, handler: Any) -> Tool:
+    return Tool(name=name, description=name, input_schema={}, handler=handler)
+
+
+def _research_result() -> ResearchResult:
+    related = PaperCandidate(
+        external_id="2401.99999v1",
+        title="Related paper",
+        authors=["Grace"],
+        abstract="Related abstract",
+        source_url="https://arxiv.org/abs/2401.99999v1",
+    )
+    return ResearchResult(
+        evidence_items=[
+            EvidenceItem(
+                id="ev-primary",
+                paper_external_id="2401.12345v1",
+                paper_title="Primary paper",
+                chunk_text="Primary evidence",
+                score=0.9,
+                supports=["primary claim"],
+            ),
+            EvidenceItem(
+                id="ev-related",
+                paper_external_id=related.external_id,
+                paper_title=related.title,
+                chunk_text="Related evidence",
+                score=0.8,
+                supports=["comparison claim"],
+            ),
+        ],
+        used_papers=[
+            PaperUse(
+                paper=related,
+                role="comparison",
+                evidence_ids=["ev-related"],
+            )
+        ],
+        limitations=["Only one related paper was used."],
+    )
+
+
+def _node_context(
+    *,
+    store: _NodeStore,
+    model: object,
+    tools: dict[str, Tool] | None = None,
+    event_sink: Any | None = None,
+    recent_turns: int = 2,
+) -> DeepReadingContext:
+    return DeepReadingContext(
+        user_id="user-1",
+        conversation_id="conversation-1",
+        task_id="task-current",
+        current_user_message_id="message-current",
+        base_checkpoint_id="checkpoint-base",
+        task_store=store,  # type: ignore[arg-type]
+        model=model,
+        mcp_tools=tools or {},
+        paper_search=lambda _query, _limit: [],
+        event_sink=event_sink or (lambda _event, _payload: None),
+        summary_recent_turns=recent_turns,
+    )
 
 
 def _context(
@@ -297,3 +424,265 @@ def test_research_evidence_writes_complete_json_research_result(monkeypatch) -> 
     assert update["research_result"]["used_papers"][0]["paper"] == (
         paper.model_dump(mode="json")
     )
+
+
+def test_prepare_primary_paper_uses_canonical_identity_and_safe_tool_sequence() -> None:
+    store = _NodeStore()
+    calls: list[tuple[str, dict[str, object]]] = []
+    events: list[tuple[str, dict[str, object]]] = []
+    original_detail = deepcopy(store.detail)
+
+    def download(arguments: dict[str, object]) -> str:
+        calls.append(("download", arguments))
+        return json.dumps(
+            {
+                "paper_id": "https://arxiv.org/pdf/2401.12345v1.pdf",
+                "text": "FULL PAPER TEXT THAT MUST NOT ENTER EVENTS",
+                "untrusted": "must not reach build_index",
+            }
+        )
+
+    def build(arguments: dict[str, object]) -> str:
+        calls.append(("build", arguments))
+        return json.dumps({"cached_papers": ["2401.12345v1"]})
+
+    tools = {
+        "mcp__arxiv__download_paper": _tool(
+            "mcp__arxiv__download_paper", download
+        ),
+        "mcp__colbert__build_index": _tool("mcp__colbert__build_index", build),
+    }
+    context = _node_context(
+        store=store,
+        model=_FakeModel(),
+        tools=tools,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    state = {"primary_paper_id": "paper-primary"}
+
+    first = prepare_primary_paper(state, Runtime(context=context))
+    second = prepare_primary_paper(state, Runtime(context=context))
+
+    assert first == second == {
+        "primary_paper_id": "paper-primary",
+        "active_paper_ids": ["paper-primary", "paper-active"],
+    }
+    assert calls == [
+        ("download", {"arxiv_id": "2401.12345v1"}),
+        (
+            "build",
+            {
+                "documents": [
+                    {
+                        "paper_id": "2401.12345v1",
+                        "text": "FULL PAPER TEXT THAT MUST NOT ENTER EVENTS",
+                    }
+                ]
+            },
+        ),
+        ("download", {"arxiv_id": "2401.12345v1"}),
+        (
+            "build",
+            {
+                "documents": [
+                    {
+                        "paper_id": "2401.12345v1",
+                        "text": "FULL PAPER TEXT THAT MUST NOT ENTER EVENTS",
+                    }
+                ]
+            },
+        ),
+    ]
+    assert store.detail == original_detail
+    assert "FULL PAPER TEXT" not in json.dumps(events)
+
+
+def test_prepare_primary_paper_rejects_bad_identity_before_build() -> None:
+    for external_id, download_result, expected_message in (
+        ("../../outside", None, "valid arXiv"),
+        (
+            "2401.12345v1",
+            {"paper_id": "2401.99999v1", "text": "wrong paper"},
+            "does not match",
+        ),
+    ):
+        store = _NodeStore()
+        store.detail.primary_paper.external_id = external_id
+        calls: list[str] = []
+
+        def download(_arguments: dict[str, object]) -> str:
+            calls.append("download")
+            return json.dumps(download_result)
+
+        def build(_arguments: dict[str, object]) -> str:
+            calls.append("build")
+            return json.dumps({"fresh_papers": ["2401.12345v1"]})
+
+        context = _node_context(
+            store=store,
+            model=_FakeModel(),
+            tools={
+                "mcp__arxiv__download_paper": _tool(
+                    "mcp__arxiv__download_paper", download
+                ),
+                "mcp__colbert__build_index": _tool(
+                    "mcp__colbert__build_index", build
+                ),
+            },
+        )
+
+        with pytest.raises(ResearchContractError, match=expected_message):
+            prepare_primary_paper(
+                {"primary_paper_id": "paper-primary"},
+                Runtime(context=context),
+            )
+
+        assert calls == ([] if download_result is None else ["download"])
+
+
+def test_write_answer_uses_bounded_trusted_context_and_writes_json_draft() -> None:
+    store = _NodeStore()
+    draft = AnswerDraft(
+        content="Evidence-grounded answer.",
+        citations=[AnswerCitation(evidence_id="ev-primary", label="Primary")],
+        result_quality="complete",
+    )
+    model = _FakeModel(draft.model_dump(mode="json"))
+    messages: list[Any] = []
+    for index in range(4):
+        messages.extend(
+            [
+                HumanMessage(content=f"question-{index}", id=f"human-{index}"),
+                AIMessage(content=f"answer-{index}", id=f"assistant-{index}"),
+            ]
+        )
+    state = {
+        "messages": messages,
+        "conversation_summary": SUMMARY.model_dump(mode="json"),
+        "primary_paper_id": "paper-primary",
+        "research_result": _research_result().model_dump(mode="json"),
+    }
+
+    update = write_answer(
+        state,
+        Runtime(context=_node_context(store=store, model=model, recent_turns=2)),
+    )
+
+    assert model.schemas == [AnswerDraft]
+    assert update == {"answer_draft": draft.model_dump(mode="json")}
+    prompt_messages = model.structured.invocations[0]
+    assert [message.id for message in prompt_messages if message.id] == [
+        "human-2",
+        "assistant-2",
+        "human-3",
+        "assistant-3",
+    ]
+    rendered = "\n".join(str(message.content) for message in prompt_messages)
+    assert "question-0" not in rendered
+    assert "answer-1" not in rendered
+    assert "question-2" in rendered
+    assert "Primary evidence" in rendered
+    assert "Only one related paper was used." in rendered
+    assert "Primary paper" in rendered
+    assert "Trusted abstract" in rendered
+
+
+def test_write_answer_rejects_citation_outside_research_result() -> None:
+    store = _NodeStore()
+    invalid_draft = AnswerDraft(
+        content="Unsupported answer.",
+        citations=[AnswerCitation(evidence_id="ev-invented", label="Invented")],
+        result_quality="partial",
+    )
+    model = _FakeModel(invalid_draft)
+
+    with pytest.raises(ResearchContractError, match="unknown evidence"):
+        write_answer(
+            {
+                "messages": [HumanMessage(content="Question", id="human-current")],
+                "primary_paper_id": "paper-primary",
+                "research_result": _research_result().model_dump(mode="json"),
+            },
+            Runtime(context=_node_context(store=store, model=model)),
+        )
+
+
+def test_publish_result_publishes_only_validated_used_papers() -> None:
+    store = _NodeStore()
+    result = _research_result()
+    draft = AnswerDraft(
+        content="Final answer.",
+        citations=[
+            AnswerCitation(evidence_id="ev-primary", label="Primary evidence"),
+            AnswerCitation(evidence_id="ev-related", label="Related evidence"),
+        ],
+        result_quality="partial",
+    )
+
+    update = publish_result(
+        {
+            "current_task_id": "task-current",
+            "current_user_message_id": "message-current",
+            "research_result": result.model_dump(mode="json"),
+            "answer_draft": draft.model_dump(mode="json"),
+        },
+        Runtime(context=_node_context(store=store, model=_FakeModel())),
+    )
+
+    assert len(store.publish_calls) == 1
+    call = store.publish_calls[0]
+    assert call["task_id"] == "task-current"
+    assert call["content"] == "Final answer."
+    assert call["metadata"] == {
+        "citations": [
+            {"evidence_id": "ev-primary", "label": "Primary evidence"},
+            {"evidence_id": "ev-related", "label": "Related evidence"},
+        ],
+        "result_quality": "partial",
+        "limitations": ["Only one related paper was used."],
+    }
+    json.dumps(call["metadata"])
+    assert call["used_papers"] == [
+        UsedPaperInput(
+            paper=result.used_papers[0].paper,
+            role="comparison",
+        )
+    ]
+    assert update == {
+        "published_message_id": "assistant-published",
+        "active_paper_ids": [
+            "paper-primary",
+            "paper-active",
+            "paper-related",
+        ],
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "Final answer.",
+                "id": "assistant-published",
+            }
+        ],
+    }
+
+
+def test_publish_result_rejects_dangling_citation_without_store_write() -> None:
+    store = _NodeStore()
+    result = _research_result()
+    invalid_draft = AnswerDraft(
+        content="Unsupported answer.",
+        citations=[AnswerCitation(evidence_id="ev-invented", label="Invented")],
+        result_quality="partial",
+    )
+
+    with pytest.raises(ResearchContractError, match="unknown evidence"):
+        publish_result(
+            {
+                "current_task_id": "task-current",
+                "current_user_message_id": "message-current",
+                "research_result": result.model_dump(mode="json"),
+                "answer_draft": invalid_draft.model_dump(mode="json"),
+            },
+            Runtime(context=_node_context(store=store, model=_FakeModel())),
+        )
+
+    assert store.publish_calls == []
