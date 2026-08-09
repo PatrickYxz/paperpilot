@@ -320,6 +320,10 @@ def test_worker_build_passes_one_custom_config_to_checkpoint_and_runner(
         summary_token_threshold=4321,
         summary_recent_turns=4,
         research_recursion_limit=10,
+        research_model_call_limit=8,
+        research_tool_call_limit=14,
+        research_max_output_tokens=2048,
+        research_model_retries=0,
     )
     builds: list[dict[str, object]] = []
     config_reads = 0
@@ -360,6 +364,10 @@ def test_worker_build_passes_one_custom_config_to_checkpoint_and_runner(
             "summary_token_threshold": 4321,
             "summary_recent_turns": 4,
             "research_recursion_limit": 10,
+            "research_model_call_limit": 8,
+            "research_tool_call_limit": 14,
+            "research_max_output_tokens": 2048,
+            "research_model_retries": 0,
         }
     ]
 
@@ -369,6 +377,10 @@ def test_worker_import_does_not_read_deep_reading_runtime_config() -> None:
     environment["PAPERPILOT_SUMMARY_TOKEN_THRESHOLD"] = "0"
     environment["PAPERPILOT_SUMMARY_RECENT_TURNS"] = "0"
     environment["PAPERPILOT_RESEARCH_RECURSION_LIMIT"] = "0"
+    environment["PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT"] = "0"
+    environment["PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT"] = "0"
+    environment["PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS"] = "0"
+    environment["PAPERPILOT_RESEARCH_MODEL_RETRIES"] = "-1"
 
     result = subprocess.run(
         [sys.executable, "-c", "import paperpilot.web.worker_tasks"],
@@ -447,6 +459,10 @@ def test_app_default_runtime_uses_injected_store_directory_and_closes_in_order(
         summary_token_threshold=2468,
         summary_recent_turns=5,
         research_recursion_limit=11,
+        research_model_call_limit=10,
+        research_tool_call_limit=18,
+        research_max_output_tokens=3072,
+        research_model_retries=0,
     )
 
     with TestClient(
@@ -466,6 +482,10 @@ def test_app_default_runtime_uses_injected_store_directory_and_closes_in_order(
             "summary_token_threshold": 2468,
             "summary_recent_turns": 5,
             "research_recursion_limit": 11,
+            "research_model_call_limit": 10,
+            "research_tool_call_limit": 18,
+            "research_max_output_tokens": 3072,
+            "research_model_retries": 0,
         }
     ]
     assert close_order == ["executor", "checkpoint", "mcp"]

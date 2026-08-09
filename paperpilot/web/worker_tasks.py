@@ -78,6 +78,10 @@ def _build_deep_reading_runner(
         summary_token_threshold=runtime_config.summary_token_threshold,
         summary_recent_turns=runtime_config.summary_recent_turns,
         research_recursion_limit=runtime_config.research_recursion_limit,
+        research_model_call_limit=runtime_config.research_model_call_limit,
+        research_tool_call_limit=runtime_config.research_tool_call_limit,
+        research_max_output_tokens=runtime_config.research_max_output_tokens,
+        research_model_retries=runtime_config.research_model_retries,
     )
 
 

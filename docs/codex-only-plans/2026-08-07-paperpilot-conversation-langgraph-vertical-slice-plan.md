@@ -1379,6 +1379,96 @@ Expected: 所有目标测试与完整测试 0 failed；仅保留项目已有的 
 
 ---
 
+### Task 17: 最终修复 Thread 所有权、终态异常分类与 Research Agent 预算
+
+**背景与用户裁决：**
+- 整分支终审在 Task 16 通过后仍确认 3 个 Important：默认 Thread 路径没有在 Graph 前原子 claim；确定性的业务绑定/checkpoint/schema/MCP payload 错误会被误作基础设施异常重试；设计承诺的 Research Agent 模型、工具、token 与失败重试预算被实施计划遗漏。
+- 用户选择预算方案 1：优先使用 LangChain 官方中间件与模型参数，不自写累计 usage middleware。每次 Research Agent 最多 6 次逻辑模型调用、12 次工具调用；每次模型响应最多 4096 output tokens；一次失败模型调用最多自动重试 1 次。
+- 本 Task 是整分支审查后的唯一 final fix wave；必须一次覆盖全部 3 个 Important，之后只允许一次 scoped final re-review。
+
+**Files:**
+- Modify: `paperpilot/web/config.py`
+- Modify: `paperpilot/web/task_executor.py`
+- Modify: `paperpilot/web/workflow.py`
+- Modify: `paperpilot/web/app.py`
+- Modify: `paperpilot/web/worker_tasks.py`
+- Modify: `paperpilot/deep_reading/runner.py`
+- Modify: `paperpilot/deep_reading/nodes.py`
+- Modify: `paperpilot/deep_reading/research_agent.py`
+- Modify: `tests/web/test_config.py`
+- Modify: `tests/web/test_task_executor.py`
+- Modify: `tests/web/test_conversation_worker.py`
+- Modify: `tests/web/test_celery_worker.py`（仅在传播契约需要时）
+- Modify: `tests/deep_reading/test_runner.py`
+- Modify: `tests/deep_reading/test_nodes.py`
+- Modify: `tests/deep_reading/test_research_agent.py`
+- Modify: `tests/web/test_runtime_config.py`
+- Modify: `.env.example`
+- Modify: `README.md`
+
+**Exact contract — Thread claim:**
+- 生产 `TaskExecutor` 在第一次调用 Conversation Graph 前必须通过 `WorkflowRunner` 的一个小型显式方法原子执行 `pending -> running`；不得把 TaskStore 注入执行器或新增 Repository/Port 层。
+- 非 Conversation legacy Task 继续原行为，不走 Conversation claim；不存在 Task 保持原错误语义。
+- Conversation claim 不到（已经 running/completed/failed，或重复提交竞争失败）时安全退出，不调用模型、MCP 或 Graph，不写第二个失败事件。
+- 同一个 Future 内的基础设施 retry 复用首次取得的所有权，不再次 claim；一次 reservation 覆盖 claim、完整 retry 与 Future 结束。
+- 测试必须用阻塞 fake/真实 SQLite 证明 Graph 被调用时 Task 已是 running；同一 task_id 并发提交两次只有一次 Graph 调用；Thread 第二次/第三次重试仍按 1/2/4 公式且不重复 claim；Celery 既有 claim/retry 语义不变。
+
+**Exact contract — terminal/transient exception taxonomy:**
+- 只有真实数据库/SQLAlchemy/SQLite、Checkpointer I/O、MCP transport/timeout、模型 provider/网络或未知基础设施异常允许逃出 `DeepReadingRunner`，由 Task 16 有界重试。
+- 已知的 Task/User Message/Conversation owner binding、活动 head/base、checkpoint 缺失/跨 thread/incomplete、graph/schema version、持久化 state/answer/paper IDs、权威 ledger、structured payload 与 MCP JSON/payload 契约错误必须转换成显式 terminal exception，由 `DeepReadingRunner.run()` 立即调用现有 `fail_conversation_task()`；不得进入 Thread/Celery retry。
+- 使用一个清晰的小型 exception hierarchy，至少暴露稳定 `error_code` 和安全 `public_message`；不得按异常文本分类，也不得 broad-catch 所有 `ValueError`。
+- 失败事件使用 `type="failed"`、`stage="deep_reading_terminal"`，payload 至少含 `error_code` 与 `error_type`；用户事件不得包含原始 payload、论文正文、密钥、traceback 或 provider 异常文本。服务端日志可保留完整异常。
+- error code 至少区分：`task_binding_invalid`、`task_status_invalid`、`checkpoint_binding_invalid`、`checkpoint_missing`、`checkpoint_incomplete`、`graph_version_unsupported`、`schema_version_unsupported`、`research_contract_invalid`、`agent_budget_exhausted`、`final_checkpoint_invalid`。
+- missing/cross-thread/incomplete/unsupported schema/base 在模型或 MCP 调用前立即 failed，只产生一个带稳定 code 的事件；Task 16 不得把它改写为 `execution_retry_exhausted`。
+- `ResearchContractError` 必须进入 terminal hierarchy；Graph/Research Agent 已知契约错误立即 failed。provider、SQLite、Saver 与 MCP transport 异常继续逃出，保留原始异常供 retry。
+
+**Exact contract — framework budget:**
+- `WebRuntimeConfig` 新增：`research_model_call_limit=6`、`research_tool_call_limit=12`、`research_max_output_tokens=4096`、`research_model_retries=1`。
+- 环境变量固定为：`PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT`、`PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT`、`PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS`、`PAPERPILOT_RESEARCH_MODEL_RETRIES`。前三个必须为正整数，retry 允许 0；模型和工具总调用预算必须至少等于 structured response attempts（当前为 2）。
+- 四个值通过 Config -> Web/Worker -> DeepReadingRunner -> DeepReadingContext 显式传递；节点/Agent 不读取环境变量。
+- `build_deep_reading_model()` 使用 `ChatDeepSeek(model="deepseek-chat", temperature=0, max_tokens=research_max_output_tokens, max_retries=0)`；provider client 不再隐藏额外 retry，Research Agent 的失败重试只由 LangChain middleware 控制。
+- `create_agent()` 必须安装 `ModelCallLimitMiddleware(..., exit_behavior="error")`、`ToolCallLimitMiddleware(..., exit_behavior="error")` 和 `ModelRetryMiddleware(max_retries=research_model_retries, on_failure="error")`。禁止自写 usage/counter middleware。
+- `run_research_agent()` 最多进行 2 次 structured-response attempts。因为 LangChain `run_limit` 在每次 `agent.invoke()` 重置，必须把总模型/工具调用预算按 attempts 分配，使两次 invoke 合计不超过配置总量；默认每次 invoke 上限分别为 3 个逻辑模型调用与 6 个工具调用，总计不超过 6/12。
+- `ModelCallLimitExceededError`、`ToolCallLimitExceededError`、`GraphRecursionError` 和两次 structured-response attempts 均耗尽必须转换成 terminal `agent_budget_exhausted`，不得进入 Task 16 基础设施 retry。预算事件不得泄露底层异常正文。
+- `ModelRetryMiddleware(on_failure="error")` 耗尽后按框架契约重新抛出原始 provider 异常；它仍属于 transient infrastructure error，必须保留原异常并进入 Task 16 有界 retry，不能按异常文本伪装成 budget error。这样每个逻辑模型调用最多有 1 次 middleware retry，而一次 Task 最多有 4 次 execution attempts，两个边界都独立且可证明。
+- README 必须明确：24,576 是单次 execution attempt 内 Research Agent 的默认逻辑模型最大生成 token 上界（6 × 4096）；Task 16 默认最多 4 个 execution attempts，因此极端 replay 上界是 98,304 generated tokens，另有每个失败逻辑调用最多 1 次 provider attempt。它不是基于 usage metadata 的精确账单上限。
+
+- [ ] **Step 1: 先写 Thread claim、异常分类和预算测试并验证 RED**
+
+目标测试至少覆盖：Thread Graph 前 running、重复 submit 只执行一次、同一 Future retry 不重复 claim；missing/cross-thread/incomplete/unsupported schema 立即安全 failed 且零 model/MCP；ResearchContractError 立即安全 failed；SQLite/Saver/MCP transport/provider 异常仍逃出；四个配置默认/覆盖/非法关系；模型 `max_tokens=4096/max_retries=0`；三个 LangChain middleware 的类型、预算、失败行为；两次 structured attempts 合计不超过 6/12；预算耗尽的稳定 terminal event。运行测试确认因缺失行为 RED，而不是 fixture/导入/收集错误。
+
+- [ ] **Step 2: 实现 Thread 原子 claim**
+
+在 WorkflowRunner/TaskExecutor 之间增加最小显式 claim 契约；claim 只发生一次且位于 retry loop 前。保持 SynchronousTaskExecutor、Celery、legacy 和容量语义兼容。
+
+- [ ] **Step 3: 实现 terminal exception hierarchy 与安全事件**
+
+逐个把已知确定性校验点改成 terminal exception；不得用 broad `except ValueError`。Runner 只捕获 terminal hierarchy，写稳定 code/message；所有基础设施异常仍原样逃出。
+
+- [ ] **Step 4: 贯通预算配置并安装 LangChain middleware**
+
+实现 6/12/4096/1 的默认配置和环境变量校验，贯通 Web/Worker/Runner/Context；用官方 middleware 和 ChatDeepSeek 参数形成可证明上界，处理两次 structured attempts 的总预算分配。
+
+- [ ] **Step 5: 更新运行文档**
+
+`.env.example` 与 README 说明四个参数、逻辑调用与 provider retry 的区别、单 execution attempt 的 24,576 output-token 上界、四次 Task attempt 的 98,304 极端 replay 上界、并非精确账单预算，以及 terminal/transient failure 的运维含义。
+
+- [ ] **Step 6: 运行最终门禁**
+
+Run: `LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m pytest tests/deep_reading/test_runner.py tests/deep_reading/test_nodes.py tests/deep_reading/test_research_agent.py tests/web/test_config.py tests/web/test_task_executor.py tests/web/test_conversation_worker.py tests/web/test_celery_worker.py tests/web/test_runtime_config.py -q`
+
+Run: `LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m pytest tests -q`
+
+Run: fresh Alembic upgrade, fresh checkpoint setup/multiprocess tests, `uv pip check --python .venv/bin/python`, `git diff --check bf003b2..HEAD`, `git status --short`。
+
+Expected: 目标与完整 suite 0 failed；只保留既有 slow deselection/第三方 warning；迁移、checkpoint、依赖和 diff 门禁 exit 0；工作树在提交后干净。
+
+- [ ] **Step 7: 提交唯一 final fix wave 并做一次 scoped re-review**
+
+一个提交可以覆盖所有 3 个 Important 和计划/文档同步。生成 `9dc29cb..HEAD` review package；re-review 逐项裁定 Thread claim、异常 taxonomy 和 Agent budget，并只检查 fix diff 新 breakage。若仍有 load-bearing finding，不再启动第二个 fix wave，交回用户裁决。
+
+---
+
 ## 计划自检映射
 
 | 设计要求 | 实施 Task |
@@ -1390,11 +1480,12 @@ Expected: 所有目标测试与完整测试 0 failed；仅保留项目已有的 
 | 固定 SOP + LangChain Agent + Pydantic | 8、9、10 |
 | 主论文锚点 + 实际使用的关联论文 | 5、7、9、10 |
 | 幂等发布、两个崩溃窗口、Celery redelivery 与普通异常有限重试 | 7、11、12、16 |
+| Thread 原子所有权、terminal/transient 异常分类、Agent 调用与 token 预算 | 17 |
 | 连续追问、rollback 零模型调用、后续 fork | 11、13、15 |
 | 进度轮询 + 完整 Assistant Message | 13、14 |
 | 旧 `/api/tasks` 兼容 | 12、13、15 |
 | 不实现 Store/token streaming/cancel/Postgres | Global Constraints、15 |
-| 无付费模型自动测试与完整回归 | 1–16，重点 15、16 |
+| 无付费模型自动测试与完整回归 | 1–17，重点 15、16、17 |
 
 ## 执行停止条件
 

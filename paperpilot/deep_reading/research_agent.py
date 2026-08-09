@@ -8,6 +8,11 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import (
+    ModelCallLimitMiddleware,
+    ModelRetryMiddleware,
+    ToolCallLimitMiddleware,
+)
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from langchain.agents.structured_output import StructuredOutputError, ToolStrategy
@@ -34,12 +39,81 @@ _MAX_EVENT_TEXT = 500
 _STRUCTURED_RESPONSE_ATTEMPTS = 2
 
 
-class ResearchContractError(ValueError):
-    """Raised when a tool, model decision, or authoritative ledger disagrees."""
-
-
 class DeepReadingTaskError(RuntimeError):
     """Expected terminal failure for one deep-reading task."""
+
+    error_code = "research_contract_invalid"
+    public_message = "The deep-reading task did not satisfy a required contract."
+
+
+class ResearchContractError(DeepReadingTaskError):
+    """Raised when a tool, model decision, or authoritative ledger disagrees."""
+
+    error_code = "research_contract_invalid"
+    public_message = "The research result did not satisfy the required contract."
+
+
+class TaskBindingError(ResearchContractError):
+    """Raised when Task, Conversation, or User Message ownership is inconsistent."""
+
+    error_code = "task_binding_invalid"
+    public_message = "The task is not bound to the requested conversation."
+
+
+class TaskStatusError(DeepReadingTaskError):
+    """Raised when a Task cannot execute from its persisted status."""
+
+    error_code = "task_status_invalid"
+    public_message = "The task is not in an executable state."
+
+
+class CheckpointBindingError(DeepReadingTaskError):
+    """Raised when business heads and checkpoint identity disagree."""
+
+    error_code = "checkpoint_binding_invalid"
+    public_message = "The conversation checkpoint binding is invalid."
+
+
+class CheckpointMissingError(DeepReadingTaskError):
+    """Raised when the required checkpoint is absent for this thread."""
+
+    error_code = "checkpoint_missing"
+    public_message = "The conversation checkpoint is unavailable."
+
+
+class CheckpointIncompleteError(DeepReadingTaskError):
+    """Raised when a required historical checkpoint is not complete."""
+
+    error_code = "checkpoint_incomplete"
+    public_message = "The conversation checkpoint is incomplete."
+
+
+class GraphVersionUnsupportedError(DeepReadingTaskError):
+    """Raised when checkpointed graph data uses an unsupported version."""
+
+    error_code = "graph_version_unsupported"
+    public_message = "The conversation checkpoint uses an unsupported graph version."
+
+
+class SchemaVersionUnsupportedError(DeepReadingTaskError):
+    """Raised when checkpointed state uses an unsupported schema version."""
+
+    error_code = "schema_version_unsupported"
+    public_message = "The conversation checkpoint uses an unsupported schema version."
+
+
+class AgentBudgetExceededError(DeepReadingTaskError):
+    """Raised when a bounded Research Agent cannot finish within its limits."""
+
+    error_code = "agent_budget_exhausted"
+    public_message = "The research agent exhausted its bounded execution budget."
+
+
+class FinalCheckpointError(ResearchContractError):
+    """Raised when published answer state cannot be safely finalized."""
+
+    error_code = "final_checkpoint_invalid"
+    public_message = "The final conversation checkpoint is invalid."
 
 
 class AgentPaperUseDecision(BaseModel):
@@ -87,6 +161,12 @@ def run_research_agent(
         prepared_ledger,
         evidence_ledger,
     )
+    per_attempt_model_limit = (
+        context.research_model_call_limit // _STRUCTURED_RESPONSE_ATTEMPTS
+    )
+    per_attempt_tool_limit = (
+        context.research_tool_call_limit // _STRUCTURED_RESPONSE_ATTEMPTS
+    )
     agent = create_agent_factory(
         model=context.model,
         tools=[search_tool, prepare_tool, retrieval_tool],
@@ -94,6 +174,20 @@ def run_research_agent(
             AgentResearchDecision,
             handle_errors=False,
         ),
+        middleware=[
+            ModelCallLimitMiddleware(
+                run_limit=per_attempt_model_limit,
+                exit_behavior="error",
+            ),
+            ToolCallLimitMiddleware(
+                run_limit=per_attempt_tool_limit,
+                exit_behavior="error",
+            ),
+            ModelRetryMiddleware(
+                max_retries=context.research_model_retries,
+                on_failure="error",
+            ),
+        ],
     )
     messages = _research_messages(
         state,
@@ -113,7 +207,7 @@ def run_research_agent(
             ModelCallLimitExceededError,
             ToolCallLimitExceededError,
         ) as exc:
-            raise DeepReadingTaskError(
+            raise AgentBudgetExceededError(
                 "research agent budget exhausted before a valid decision"
             ) from exc
         except StructuredOutputError as exc:
@@ -134,8 +228,8 @@ def run_research_agent(
             primary_external_id=primary_external_id,
         )
 
-    raise DeepReadingTaskError(
-        "research agent did not return a valid structured response after 2 attempts"
+    raise AgentBudgetExceededError(
+        "research agent structured response attempts exhausted after 2 attempts"
     ) from last_structured_error
 
 

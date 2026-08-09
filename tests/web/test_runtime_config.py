@@ -65,6 +65,10 @@ def test_env_example_declares_both_sqlite_paths_and_executor_examples():
         "PAPERPILOT_TASK_MAX_RETRIES=3",
         "PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS=1",
         "PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS=30",
+        "PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT=6",
+        "PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT=12",
+        "PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS=4096",
+        "PAPERPILOT_RESEARCH_MODEL_RETRIES=1",
     ):
         assert value in text
 
@@ -190,5 +194,23 @@ def test_readme_documents_runtime_protection_contract():
         "X-Request-ID",
         "--no-access-log",
         "benchmark_web_admission.py",
+    ):
+        assert value in text
+
+
+def test_readme_documents_research_budget_and_failure_taxonomy() -> None:
+    text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for value in (
+        "PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT",
+        "PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT",
+        "PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS",
+        "PAPERPILOT_RESEARCH_MODEL_RETRIES",
+        "24,576",
+        "98,304",
+        "generated tokens",
+        "usage metadata",
+        "terminal",
+        "transient",
     ):
         assert value in text

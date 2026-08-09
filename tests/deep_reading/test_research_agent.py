@@ -7,6 +7,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from langchain.agents.middleware import (
+    ModelCallLimitMiddleware,
+    ModelRetryMiddleware,
+    ToolCallLimitMiddleware,
+)
+from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from langchain.agents.structured_output import StructuredOutputError, ToolStrategy
 from langchain.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
@@ -336,6 +343,60 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
             },
         ),
     ]
+
+
+def test_agent_installs_official_per_attempt_limits_and_model_retry() -> None:
+    def behavior(_tools: Mapping[str, Any], _attempt: int) -> object:
+        return {
+            "structured_response": {
+                "selected_evidence_ids": [],
+                "paper_uses": [],
+                "limitations": [],
+            }
+        }
+
+    context, factory, _calls = _context(behavior)
+
+    run_research_agent(STATE, context, create_agent_factory=factory)
+
+    middleware = factory.calls[0]["middleware"]
+    assert isinstance(middleware, list)
+    assert len(middleware) == 3
+    model_limit, tool_limit, model_retry = middleware
+    assert isinstance(model_limit, ModelCallLimitMiddleware)
+    assert model_limit.thread_limit is None
+    assert model_limit.run_limit == 3
+    assert model_limit.exit_behavior == "error"
+    assert isinstance(tool_limit, ToolCallLimitMiddleware)
+    assert tool_limit.tool_name is None
+    assert tool_limit.thread_limit is None
+    assert tool_limit.run_limit == 6
+    assert tool_limit.exit_behavior == "error"
+    assert isinstance(model_retry, ModelRetryMiddleware)
+    assert model_retry.max_retries == 1
+    assert model_retry.on_failure == "error"
+
+
+def test_official_model_retry_exhaustion_preserves_provider_exception() -> None:
+    provider_error = ConnectionError("provider connection reset")
+    attempts = 0
+    middleware = ModelRetryMiddleware(
+        max_retries=1,
+        on_failure="error",
+        initial_delay=0,
+        jitter=False,
+    )
+
+    def failing_handler(_request):
+        nonlocal attempts
+        attempts += 1
+        raise provider_error
+
+    with pytest.raises(ConnectionError) as exc_info:
+        middleware.wrap_model_call(object(), failing_handler)
+
+    assert exc_info.value is provider_error
+    assert attempts == 2
 
 
 def test_two_papers_with_pool_local_ev_1_receive_distinct_global_ids() -> None:
@@ -880,11 +941,21 @@ def test_invalid_structured_response_is_attempted_at_most_twice() -> None:
 
     context, factory, _calls = _context(behavior)
 
-    with pytest.raises(DeepReadingTaskError, match="structured response"):
+    with pytest.raises(DeepReadingTaskError, match="structured response") as exc_info:
         run_research_agent(STATE, context, create_agent_factory=factory)
 
     assert factory.agent is not None
     assert len(factory.agent.invocations) == 2
+    assert exc_info.value.error_code == "agent_budget_exhausted"
+    middleware = factory.calls[0]["middleware"]
+    model_limit = next(
+        item for item in middleware if isinstance(item, ModelCallLimitMiddleware)
+    )
+    tool_limit = next(
+        item for item in middleware if isinstance(item, ToolCallLimitMiddleware)
+    )
+    assert len(factory.agent.invocations) * model_limit.run_limit <= 6
+    assert len(factory.agent.invocations) * tool_limit.run_limit <= 12
 
 
 def test_second_structured_attempt_can_idempotently_repeat_retrieval() -> None:
@@ -1054,9 +1125,48 @@ def test_graph_recursion_exhaustion_becomes_deep_reading_task_error() -> None:
 
     context, factory, _calls = _context(behavior)
 
-    with pytest.raises(DeepReadingTaskError, match="budget exhausted"):
+    with pytest.raises(DeepReadingTaskError, match="budget exhausted") as exc_info:
         run_research_agent(STATE, context, create_agent_factory=factory)
 
+    assert exc_info.value.error_code == "agent_budget_exhausted"
+    assert "recursion limit reached" not in exc_info.value.public_message
+    assert factory.agent is not None
+    assert len(factory.agent.invocations) == 1
+
+
+@pytest.mark.parametrize(
+    "budget_error",
+    [
+        ModelCallLimitExceededError(
+            thread_count=0,
+            run_count=3,
+            thread_limit=None,
+            run_limit=3,
+        ),
+        ToolCallLimitExceededError(
+            thread_count=0,
+            run_count=7,
+            thread_limit=None,
+            run_limit=6,
+        ),
+    ],
+)
+def test_official_call_limit_errors_become_safe_terminal_budget_error(
+    budget_error,
+) -> None:
+    def behavior(_tools: Mapping[str, Any], _attempt: int) -> object:
+        raise budget_error
+
+    context, factory, _calls = _context(behavior)
+
+    with pytest.raises(DeepReadingTaskError) as exc_info:
+        run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert exc_info.value.error_code == "agent_budget_exhausted"
+    assert exc_info.value.public_message == (
+        "The research agent exhausted its bounded execution budget."
+    )
+    assert str(budget_error) not in exc_info.value.public_message
     assert factory.agent is not None
     assert len(factory.agent.invocations) == 1
 
@@ -1070,6 +1180,22 @@ def test_unrelated_contract_error_is_not_retried_or_wrapped() -> None:
     with pytest.raises(ResearchContractError, match="bad MCP contract"):
         run_research_agent(STATE, context, create_agent_factory=factory)
 
+    assert factory.agent is not None
+    assert len(factory.agent.invocations) == 1
+
+
+def test_provider_error_is_preserved_for_outer_task_retry() -> None:
+    provider_error = ConnectionError("provider connection reset")
+
+    def behavior(_tools: Mapping[str, Any], _attempt: int) -> object:
+        raise provider_error
+
+    context, factory, _calls = _context(behavior)
+
+    with pytest.raises(ConnectionError) as exc_info:
+        run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert exc_info.value is provider_error
     assert factory.agent is not None
     assert len(factory.agent.invocations) == 1
 

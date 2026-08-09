@@ -28,6 +28,10 @@ class WebRuntimeConfig:
     summary_token_threshold: int = 32_000
     summary_recent_turns: int = 6
     research_recursion_limit: int = 12
+    research_model_call_limit: int = 6
+    research_tool_call_limit: int = 12
+    research_max_output_tokens: int = 4096
+    research_model_retries: int = 1
 
     @classmethod
     def from_env(
@@ -128,6 +132,30 @@ class WebRuntimeConfig:
                 "PAPERPILOT_RESEARCH_RECURSION_LIMIT",
                 default=12,
                 minimum=1,
+            ),
+            research_model_call_limit=_read_int(
+                values,
+                "PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT",
+                default=6,
+                minimum=2,
+            ),
+            research_tool_call_limit=_read_int(
+                values,
+                "PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT",
+                default=12,
+                minimum=2,
+            ),
+            research_max_output_tokens=_read_int(
+                values,
+                "PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS",
+                default=4096,
+                minimum=1,
+            ),
+            research_model_retries=_read_int(
+                values,
+                "PAPERPILOT_RESEARCH_MODEL_RETRIES",
+                default=1,
+                minimum=0,
             ),
         )
 

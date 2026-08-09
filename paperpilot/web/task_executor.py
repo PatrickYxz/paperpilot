@@ -22,6 +22,8 @@ class WorkflowRunnerLike(Protocol):
 
     def run_real(self, task_id: str) -> None: ...
 
+    def claim_conversation_task(self, task_id: str) -> str: ...
+
     def fail_conversation_execution(
         self,
         task_id: str,
@@ -223,6 +225,15 @@ class TaskExecutor:
 
     def _run(self, task_id: str, execution_mode: ExecutionMode) -> None:
         if execution_mode == "real":
+            claim = getattr(self.runner, "claim_conversation_task", None)
+            if claim is not None:
+                claim_result = claim(task_id)
+                if claim_result == "not_claimed":
+                    return
+                if claim_result not in {"claimed", "not_conversation"}:
+                    raise RuntimeError(
+                        f"invalid Conversation claim result: {claim_result!r}"
+                    )
             self._run_real_with_retries(task_id)
             return
         if execution_mode == "simulated":

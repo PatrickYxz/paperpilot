@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Any, cast
 
 from langchain.messages import HumanMessage
@@ -20,7 +21,18 @@ from paperpilot.web.task_store import (
 
 from .graph import build_deep_reading_graph
 from .nodes import DeepReadingContext
-from .research_agent import DeepReadingTaskError
+from .research_agent import (
+    CheckpointBindingError,
+    CheckpointIncompleteError,
+    CheckpointMissingError,
+    DeepReadingTaskError,
+    FinalCheckpointError,
+    GraphVersionUnsupportedError,
+    ResearchContractError,
+    SchemaVersionUnsupportedError,
+    TaskBindingError,
+    TaskStatusError,
+)
 from .schemas import AnswerDraft
 from .state import GRAPH_VERSION, SCHEMA_VERSION, DeepReadingState
 
@@ -30,6 +42,8 @@ if TYPE_CHECKING:
 
 ModelFactory = Callable[[], Any]
 PaperSearch = Callable[[str, int], list[PaperCandidate]]
+_STRUCTURED_RESPONSE_ATTEMPTS = 2
+_LOGGER = logging.getLogger("paperpilot.web.runtime")
 
 
 @dataclass(frozen=True)
@@ -41,14 +55,18 @@ class DeepReadingCheckpoint:
     is_complete: bool
 
 
-def build_deep_reading_model() -> ChatDeepSeek:
+def build_deep_reading_model(
+    *,
+    research_max_output_tokens: int = 4096,
+) -> ChatDeepSeek:
     """Build the production model lazily, only when a new task executes."""
     from langchain_deepseek import ChatDeepSeek
 
     return ChatDeepSeek(
         model="deepseek-chat",
         temperature=0,
-        max_retries=2,
+        max_tokens=research_max_output_tokens,
+        max_retries=0,
     )
 
 
@@ -61,20 +79,35 @@ class DeepReadingRunner:
         task_store: TaskStore,
         checkpointer: Any,
         mcp_runtime: MCPRuntime,
-        model_factory: ModelFactory = build_deep_reading_model,
+        model_factory: ModelFactory | None = None,
         paper_search: PaperSearch = search_arxiv_candidates,
         summary_token_threshold: int = 32_000,
         summary_recent_turns: int = 6,
         research_recursion_limit: int = 12,
+        research_model_call_limit: int = 6,
+        research_tool_call_limit: int = 12,
+        research_max_output_tokens: int = 4096,
+        research_model_retries: int = 1,
     ) -> None:
         runtime_bounds = {
             "summary_token_threshold": summary_token_threshold,
             "summary_recent_turns": summary_recent_turns,
             "research_recursion_limit": research_recursion_limit,
+            "research_max_output_tokens": research_max_output_tokens,
         }
         for name, value in runtime_bounds.items():
             if value < 1:
                 raise ValueError(f"{name} must be positive")
+        for name, value in {
+            "research_model_call_limit": research_model_call_limit,
+            "research_tool_call_limit": research_tool_call_limit,
+        }.items():
+            if value < _STRUCTURED_RESPONSE_ATTEMPTS:
+                raise ValueError(
+                    f"{name} must cover both structured-response attempts"
+                )
+        if research_model_retries < 0:
+            raise ValueError("research_model_retries must be nonnegative")
         self._task_store = task_store
         self._checkpointer = checkpointer
         self._mcp_runtime = mcp_runtime
@@ -83,17 +116,33 @@ class DeepReadingRunner:
         self._summary_token_threshold = summary_token_threshold
         self._summary_recent_turns = summary_recent_turns
         self._research_recursion_limit = research_recursion_limit
+        self._research_model_call_limit = research_model_call_limit
+        self._research_tool_call_limit = research_tool_call_limit
+        self._research_max_output_tokens = research_max_output_tokens
+        self._research_model_retries = research_model_retries
 
     def run(self, task_id: str) -> None:
         """Execute or recover one Task; only expected task errors become failed."""
         try:
             self._run(task_id)
         except DeepReadingTaskError as exc:
+            _LOGGER.error(
+                "Deep-reading terminal contract failure",
+                exc_info=(type(exc), exc, exc.__traceback__),
+                extra={
+                    "event": "task.deep_reading_terminal",
+                    "reason": exc.error_code,
+                    "exception_type": type(exc).__name__,
+                },
+            )
             self._task_store.fail_conversation_task(
                 task_id=task_id,
-                message=str(exc),
-                stage="deep_reading",
-                payload={"error_type": type(exc).__name__},
+                message=exc.public_message,
+                stage="deep_reading_terminal",
+                payload={
+                    "error_code": exc.error_code,
+                    "error_type": type(exc).__name__,
+                },
             )
 
     def read_checkpoint(
@@ -131,7 +180,7 @@ class DeepReadingRunner:
         if task.status in {"completed", "failed"}:
             return
         if task.status not in {"pending", "running"}:
-            raise ValueError(f"cannot run task in status: {task.status!r}")
+            raise TaskStatusError(f"cannot run task in status: {task.status!r}")
 
         graph = build_deep_reading_graph(self._checkpointer)
         _validate_active_task_base(
@@ -158,7 +207,13 @@ class DeepReadingRunner:
                 self._finalize(task, assistant, trusted)
                 return
 
-        model = self._model_factory()
+        model = (
+            self._model_factory()
+            if self._model_factory is not None
+            else build_deep_reading_model(
+                research_max_output_tokens=self._research_max_output_tokens
+            )
+        )
         with self._mcp_runtime.lease_tools() as tools:
             context = DeepReadingContext(
                 user_id=conversation.user_id,
@@ -176,6 +231,10 @@ class DeepReadingRunner:
                 summary_token_threshold=self._summary_token_threshold,
                 summary_recent_turns=self._summary_recent_turns,
                 research_recursion_limit=self._research_recursion_limit,
+                research_model_call_limit=self._research_model_call_limit,
+                research_tool_call_limit=self._research_tool_call_limit,
+                research_max_output_tokens=self._research_max_output_tokens,
+                research_model_retries=self._research_model_retries,
             )
             config: dict[str, dict[str, str]] = {
                 "configurable": {"thread_id": conversation.id}
@@ -203,7 +262,9 @@ class DeepReadingRunner:
 
         assistant = self._task_store.get_task_message(task.id, "assistant")
         if assistant is None:
-            raise RuntimeError("graph completed without a published assistant")
+            raise FinalCheckpointError(
+                "graph completed without a published assistant"
+            )
         trusted = _trusted_durable_snapshot(
             graph,
             final_snapshot,
@@ -212,7 +273,9 @@ class DeepReadingRunner:
             assistant=assistant,
         )
         if trusted is None:
-            raise RuntimeError("graph completed without a trusted final checkpoint")
+            raise FinalCheckpointError(
+                "graph completed without a trusted final checkpoint"
+            )
         self._finalize(task, assistant, trusted)
 
     def _load_business_binding(
@@ -221,20 +284,20 @@ class DeepReadingRunner:
     ) -> tuple[ResearchTask, MessageRecord, ConversationRecord, str]:
         task = self._task_store.get_task(task_id)
         if task is None:
-            raise ValueError(f"task not found: {task_id}")
+            raise TaskBindingError(f"task not found: {task_id}")
         if task.conversation_id is None or task.user_id is None:
-            raise ValueError("task is not attached to an owned conversation")
+            raise TaskBindingError("task is not attached to an owned conversation")
         detail = self._task_store.get_conversation_detail(
             task.conversation_id,
             user_id=task.user_id,
         )
         if detail is None:
-            raise ValueError("task conversation is unavailable for its owner")
+            raise TaskBindingError("task conversation is unavailable for its owner")
         if detail.conversation.id != task.conversation_id:
-            raise ValueError("task conversation binding is inconsistent")
+            raise TaskBindingError("task conversation binding is inconsistent")
         user_message = self._task_store.get_task_message(task.id, "user")
         if user_message is None:
-            raise ValueError("conversation task has no user message")
+            raise TaskBindingError("conversation task has no user message")
         if (
             user_message.conversation_id != task.conversation_id
             or user_message.task_id != task.id
@@ -242,7 +305,9 @@ class DeepReadingRunner:
             or user_message.status != "complete"
             or user_message.content != task.question
         ):
-            raise ValueError("conversation task user-message binding is inconsistent")
+            raise TaskBindingError(
+                "conversation task user-message binding is inconsistent"
+            )
         return (
             task,
             user_message,
@@ -273,16 +338,20 @@ class DeepReadingRunner:
         try:
             draft = AnswerDraft.model_validate(values.get("answer_draft"))
         except ValidationError as exc:
-            raise RuntimeError("final checkpoint has an invalid answer draft") from exc
+            raise FinalCheckpointError(
+                "final checkpoint has an invalid answer draft"
+            ) from exc
         active_paper_ids = values.get("active_paper_ids")
         if not isinstance(active_paper_ids, list) or not all(
             isinstance(paper_id, str) and paper_id.strip()
             for paper_id in active_paper_ids
         ):
-            raise RuntimeError("final checkpoint has invalid active paper IDs")
+            raise FinalCheckpointError(
+                "final checkpoint has invalid active paper IDs"
+            )
         checkpoint_id = _snapshot_checkpoint_id(snapshot)
         if checkpoint_id is None:
-            raise RuntimeError("final checkpoint has no checkpoint ID")
+            raise FinalCheckpointError("final checkpoint has no checkpoint ID")
         self._task_store.finalize_conversation_task(
             task_id=task.id,
             assistant_message_id=assistant.id,
@@ -296,7 +365,7 @@ def _tool_map(tools: list[Any]) -> dict[str, Any]:
     mapped: dict[str, Any] = {}
     for tool in tools:
         if tool.name in mapped:
-            raise ValueError(f"duplicate MCP tool name: {tool.name}")
+            raise ResearchContractError(f"duplicate MCP tool name: {tool.name}")
         mapped[tool.name] = tool
     return mapped
 
@@ -338,6 +407,12 @@ def _trusted_durable_snapshot(
     assistant: MessageRecord,
 ):
     """Reject pending-write projections whose checkpoint ID is still incomplete."""
+    _validate_complete_recovery_snapshot(
+        snapshot,
+        task=task,
+        user_message=user_message,
+        assistant=assistant,
+    )
     if not _is_trusted_recovery_snapshot(
         snapshot,
         task=task,
@@ -346,6 +421,12 @@ def _trusted_durable_snapshot(
     ):
         return None
     durable = graph.get_state(snapshot.config)
+    _validate_complete_recovery_snapshot(
+        durable,
+        task=task,
+        user_message=user_message,
+        assistant=assistant,
+    )
     if not _is_trusted_recovery_snapshot(
         durable,
         task=task,
@@ -356,6 +437,36 @@ def _trusted_durable_snapshot(
     if _snapshot_checkpoint_id(durable) != _snapshot_checkpoint_id(snapshot):
         return None
     return durable
+
+
+def _validate_complete_recovery_snapshot(
+    snapshot,
+    *,
+    task: ResearchTask,
+    user_message: MessageRecord,
+    assistant: MessageRecord,
+) -> None:
+    """Reject deterministic corruption while allowing incomplete crash recovery."""
+    if snapshot.created_at is None or snapshot.next != ():
+        return
+    values = snapshot.values
+    if values.get("graph_version") != GRAPH_VERSION:
+        raise GraphVersionUnsupportedError(
+            "complete recovery checkpoint graph version is unsupported"
+        )
+    if values.get("schema_version") != SCHEMA_VERSION:
+        raise SchemaVersionUnsupportedError(
+            "complete recovery checkpoint schema version is unsupported"
+        )
+    if (
+        values.get("current_task_id") != task.id
+        or values.get("current_user_message_id") != user_message.id
+        or values.get("published_message_id") != assistant.id
+        or _snapshot_checkpoint_id(snapshot) is None
+    ):
+        raise FinalCheckpointError(
+            "complete recovery checkpoint does not match the published task"
+        )
 
 
 def _validate_active_task_base(
@@ -370,15 +481,23 @@ def _validate_active_task_base(
     head_message_id = conversation.head_message_id
     head_checkpoint_id = conversation.head_checkpoint_id
     if (head_message_id is None) != (head_checkpoint_id is None):
-        raise ValueError("conversation message/checkpoint heads must be paired")
+        raise CheckpointBindingError(
+            "conversation message/checkpoint heads must be paired"
+        )
     if task.base_checkpoint_id != head_checkpoint_id:
-        raise ValueError("task base checkpoint does not match conversation head")
+        raise CheckpointBindingError(
+            "task base checkpoint does not match conversation head"
+        )
     if user_message.parent_message_id != head_message_id:
-        raise ValueError("task user-message parent does not match conversation head")
+        raise CheckpointBindingError(
+            "task user-message parent does not match conversation head"
+        )
     if head_checkpoint_id is None:
         return
     if not head_checkpoint_id.strip() or head_message_id is None:
-        raise ValueError("conversation head identifiers must be non-blank")
+        raise CheckpointBindingError(
+            "conversation head identifiers must be non-blank"
+        )
 
     head_message = task_store.get_message(
         conversation.id,
@@ -386,9 +505,13 @@ def _validate_active_task_base(
         user_id=conversation.user_id,
     )
     if head_message is None:
-        raise ValueError("conversation head message is unavailable for its owner")
+        raise CheckpointBindingError(
+            "conversation head message is unavailable for its owner"
+        )
     if head_message.role != "assistant" or head_message.status != "complete":
-        raise ValueError("conversation head must be a complete assistant message")
+        raise CheckpointBindingError(
+            "conversation head must be a complete assistant message"
+        )
 
     base_snapshot = graph.get_state(
         {
@@ -399,15 +522,25 @@ def _validate_active_task_base(
         }
     )
     if base_snapshot.created_at is None:
-        raise ValueError("conversation base checkpoint does not exist")
+        raise CheckpointMissingError("conversation base checkpoint does not exist")
     if _snapshot_checkpoint_id(base_snapshot) != head_checkpoint_id:
-        raise ValueError("conversation base checkpoint ID does not match")
+        raise CheckpointBindingError(
+            "conversation base checkpoint ID does not match"
+        )
     if base_snapshot.next != ():
-        raise ValueError("conversation base checkpoint is incomplete")
+        raise CheckpointIncompleteError(
+            "conversation base checkpoint is incomplete"
+        )
     values = base_snapshot.values
     if values.get("graph_version") != GRAPH_VERSION:
-        raise ValueError("conversation base checkpoint graph version is unsupported")
+        raise GraphVersionUnsupportedError(
+            "conversation base checkpoint graph version is unsupported"
+        )
     if values.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError("conversation base checkpoint schema version is unsupported")
+        raise SchemaVersionUnsupportedError(
+            "conversation base checkpoint schema version is unsupported"
+        )
     if values.get("published_message_id") != head_message_id:
-        raise ValueError("conversation base checkpoint does not match message head")
+        raise CheckpointBindingError(
+            "conversation base checkpoint does not match message head"
+        )

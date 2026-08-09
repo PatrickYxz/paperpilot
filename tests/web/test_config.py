@@ -26,6 +26,10 @@ def test_runtime_config_defaults_are_local_and_bounded():
     assert config.summary_token_threshold == 32_000
     assert config.summary_recent_turns == 6
     assert config.research_recursion_limit == 12
+    assert config.research_model_call_limit == 6
+    assert config.research_tool_call_limit == 12
+    assert config.research_max_output_tokens == 4096
+    assert config.research_model_retries == 1
 
 
 def test_runtime_config_accepts_explicit_overrides():
@@ -46,6 +50,10 @@ def test_runtime_config_accepts_explicit_overrides():
             "PAPERPILOT_SUMMARY_TOKEN_THRESHOLD": "64000",
             "PAPERPILOT_SUMMARY_RECENT_TURNS": "8",
             "PAPERPILOT_RESEARCH_RECURSION_LIMIT": "20",
+            "PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT": "8",
+            "PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT": "16",
+            "PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS": "2048",
+            "PAPERPILOT_RESEARCH_MODEL_RETRIES": "0",
         }
     )
 
@@ -64,6 +72,10 @@ def test_runtime_config_accepts_explicit_overrides():
     assert config.summary_token_threshold == 64_000
     assert config.summary_recent_turns == 8
     assert config.research_recursion_limit == 20
+    assert config.research_model_call_limit == 8
+    assert config.research_tool_call_limit == 16
+    assert config.research_max_output_tokens == 2048
+    assert config.research_model_retries == 0
 
 
 @pytest.mark.parametrize(
@@ -106,6 +118,26 @@ def test_runtime_config_accepts_explicit_overrides():
             "0",
             "PAPERPILOT_RESEARCH_RECURSION_LIMIT",
         ),
+        (
+            "PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT",
+            "0",
+            "PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT",
+        ),
+        (
+            "PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT",
+            "many",
+            "PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT",
+        ),
+        (
+            "PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS",
+            "0",
+            "PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS",
+        ),
+        (
+            "PAPERPILOT_RESEARCH_MODEL_RETRIES",
+            "-1",
+            "PAPERPILOT_RESEARCH_MODEL_RETRIES",
+        ),
     ],
 )
 def test_runtime_config_rejects_invalid_values(name, value, message):
@@ -124,3 +156,15 @@ def test_runtime_config_rejects_retry_backoff_above_cap():
                 "PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS": "30",
             }
         )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT",
+        "PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT",
+    ],
+)
+def test_runtime_config_requires_budget_for_both_structured_attempts(name):
+    with pytest.raises(ValueError, match=name):
+        WebRuntimeConfig.from_env({name: "1"})

@@ -8,6 +8,7 @@ import sys
 import textwrap
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,12 +17,17 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
 import paperpilot.deep_reading.graph as graph_module
+import paperpilot.deep_reading.runner as runner_module
 from paperpilot.core.adapter import Tool
 from paperpilot.deep_reading.graph import build_deep_reading_graph
-from paperpilot.deep_reading.research_agent import DeepReadingTaskError
+from paperpilot.deep_reading.research_agent import (
+    DeepReadingTaskError,
+    ResearchContractError,
+)
 from paperpilot.deep_reading.runner import (
     DeepReadingCheckpoint,
     DeepReadingRunner,
+    build_deep_reading_model,
 )
 from paperpilot.papers import PaperCandidate
 from paperpilot.tools.mcp_runtime import MCPRuntime
@@ -187,6 +193,32 @@ def _execute_business_sql(
         connection.execute(text(statement), parameters)
 
 
+def test_deepseek_model_disables_provider_retries_and_bounds_output(
+    monkeypatch,
+) -> None:
+    construction: list[dict[str, object]] = []
+
+    class RecordingChatDeepSeek:
+        def __init__(self, **kwargs) -> None:
+            construction.append(kwargs)
+
+    import langchain_deepseek
+
+    monkeypatch.setattr(langchain_deepseek, "ChatDeepSeek", RecordingChatDeepSeek)
+
+    model = build_deep_reading_model(research_max_output_tokens=4096)
+
+    assert isinstance(model, RecordingChatDeepSeek)
+    assert construction == [
+        {
+            "model": "deepseek-chat",
+            "temperature": 0,
+            "max_tokens": 4096,
+            "max_retries": 0,
+        }
+    ]
+
+
 def test_strict_checkpoint_serializer_rejects_custom_application_object(
     tmp_path,
 ) -> None:
@@ -324,7 +356,7 @@ def test_runner_passes_custom_runtime_bounds_into_graph_context(
         tmp_path / "checkpoints.sqlite3"
     )
     mcp_runtime = MCPRuntime(_FakeMCPClient)
-    seen_bounds: list[tuple[int, int, int]] = []
+    seen_bounds: list[tuple[int, int, int, int, int, int, int]] = []
 
     def record_context(_state, runtime):
         context = runtime.context
@@ -333,6 +365,10 @@ def test_runner_passes_custom_runtime_bounds_into_graph_context(
                 context.summary_token_threshold,
                 context.summary_recent_turns,
                 context.research_recursion_limit,
+                context.research_model_call_limit,
+                context.research_tool_call_limit,
+                context.research_max_output_tokens,
+                context.research_model_retries,
             )
         )
         return {
@@ -353,12 +389,16 @@ def test_runner_passes_custom_runtime_bounds_into_graph_context(
         summary_token_threshold=1234,
         summary_recent_turns=3,
         research_recursion_limit=9,
+        research_model_call_limit=8,
+        research_tool_call_limit=14,
+        research_max_output_tokens=2048,
+        research_model_retries=0,
     )
     try:
         turn = _new_turn(store, user, conversation, "Use custom runtime bounds")
         runner.run(turn.task.id)
 
-        assert seen_bounds == [(1234, 3, 9)]
+        assert seen_bounds == [(1234, 3, 9, 8, 14, 2048, 0)]
     finally:
         mcp_runtime.close()
         checkpoint_runtime.close()
@@ -366,15 +406,19 @@ def test_runner_passes_custom_runtime_bounds_into_graph_context(
 
 
 @pytest.mark.parametrize(
-    "invalid_kwargs",
+    ("invalid_kwargs", "message"),
     [
-        {"summary_token_threshold": 0},
-        {"summary_recent_turns": 0},
-        {"research_recursion_limit": 0},
+        ({"summary_token_threshold": 0}, "must be positive"),
+        ({"summary_recent_turns": 0}, "must be positive"),
+        ({"research_recursion_limit": 0}, "must be positive"),
+        ({"research_model_call_limit": 1}, "structured-response attempts"),
+        ({"research_tool_call_limit": 1}, "structured-response attempts"),
+        ({"research_max_output_tokens": 0}, "must be positive"),
+        ({"research_model_retries": -1}, "must be nonnegative"),
     ],
 )
-def test_runner_rejects_non_positive_runtime_bounds(invalid_kwargs) -> None:
-    with pytest.raises(ValueError, match="must be positive"):
+def test_runner_rejects_invalid_runtime_bounds(invalid_kwargs, message) -> None:
+    with pytest.raises(ValueError, match=message):
         DeepReadingRunner(
             task_store=object(),
             checkpointer=object(),
@@ -627,17 +671,29 @@ def test_redelivery_after_finalization_failure_uses_only_trusted_complete_snapsh
 
 
 @pytest.mark.parametrize(
-    ("field", "bad_value"),
+    ("field", "bad_value", "expected_error_code"),
     [
-        ("current_task_id", "another-task"),
-        ("current_user_message_id", "another-message"),
-        ("graph_version", "another-version"),
-        ("schema_version", 999),
-        ("published_message_id", "another-assistant"),
+        ("current_task_id", "another-task", "final_checkpoint_invalid"),
+        (
+            "current_user_message_id",
+            "another-message",
+            "final_checkpoint_invalid",
+        ),
+        ("graph_version", "another-version", "graph_version_unsupported"),
+        ("schema_version", 999, "schema_version_unsupported"),
+        (
+            "published_message_id",
+            "another-assistant",
+            "final_checkpoint_invalid",
+        ),
     ],
 )
-def test_untrusted_recovery_snapshot_is_not_finalized(
-    tmp_path, monkeypatch, field, bad_value
+def test_corrupt_complete_recovery_snapshot_is_terminal_before_model_or_mcp(
+    tmp_path,
+    monkeypatch,
+    field,
+    bad_value,
+    expected_error_code,
 ) -> None:
     store, user, conversation = _create_store_and_conversation(
         tmp_path / "business.sqlite3"
@@ -676,9 +732,19 @@ def test_untrusted_recovery_snapshot_is_not_finalized(
 
         runner.run(turn.task.id)
 
-        assert model_factory.factory_calls == calls_before + 1
-        assert mcp_client.list_tools_count == leases_before + 1
-        assert store.get_task(turn.task.id, user_id=user.id).status == "completed"
+        assert model_factory.factory_calls == calls_before
+        assert mcp_client.list_tools_count == leases_before
+        assert store.get_task(turn.task.id, user_id=user.id).status == "failed"
+        events = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events is not None
+        failure = [event for event in events.items if event.type == "failed"][0]
+        assert failure.stage == "deep_reading_terminal"
+        assert failure.payload["error_code"] == expected_error_code
     finally:
         mcp_runtime.close()
         checkpoint_runtime.close()
@@ -686,21 +752,21 @@ def test_untrusted_recovery_snapshot_is_not_finalized(
 
 
 @pytest.mark.parametrize(
-    "corruption",
+    ("corruption", "expected_error_code"),
     [
-        "nonexistent_base",
-        "cross_thread_base",
-        "task_base_mismatch",
-        "user_parent_mismatch",
-        "unpaired_business_head",
-        "incomplete_base",
-        "base_graph_version",
-        "base_schema_version",
-        "base_published_head",
+        ("nonexistent_base", "checkpoint_missing"),
+        ("cross_thread_base", "checkpoint_missing"),
+        ("task_base_mismatch", "checkpoint_binding_invalid"),
+        ("user_parent_mismatch", "checkpoint_binding_invalid"),
+        ("unpaired_business_head", "checkpoint_binding_invalid"),
+        ("incomplete_base", "checkpoint_incomplete"),
+        ("base_graph_version", "graph_version_unsupported"),
+        ("base_schema_version", "schema_version_unsupported"),
+        ("base_published_head", "checkpoint_binding_invalid"),
     ],
 )
 def test_active_task_rejects_untrusted_business_base_before_model_or_mcp(
-    tmp_path, corruption
+    tmp_path, corruption, expected_error_code
 ) -> None:
     store, user, conversation = _create_store_and_conversation(
         tmp_path / "business.sqlite3"
@@ -831,16 +897,30 @@ def test_active_task_rejects_untrusted_business_base_before_model_or_mcp(
         model_factory,
     )
     try:
-        with pytest.raises((ValueError, RuntimeError)) as exc_info:
-            runner.run(turn.task.id)
+        runner.run(turn.task.id)
 
-        assert not isinstance(exc_info.value, DeepReadingTaskError)
         task = store.get_task(turn.task.id, user_id=user.id)
-        assert task is not None and task.status == "pending"
+        assert task is not None and task.status == "failed"
         assert store.get_task_message(turn.task.id, "assistant") is None
         assert model_factory.factory_calls == 0
         assert mcp_client.start_count == 0
         assert mcp_client.list_tools_count == 0
+        events = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events is not None
+        failures = [event for event in events.items if event.type == "failed"]
+        assert len(failures) == 1
+        failure = failures[0]
+        assert failure.stage == "deep_reading_terminal"
+        assert failure.payload["error_code"] == expected_error_code
+        assert set(failure.payload) == {"error_code", "error_type"}
+        rendered_failure = str(failure.to_dict())
+        assert "checkpoint-does-not-exist" not in rendered_failure
+        assert "conversation-v999" not in rendered_failure
     finally:
         mcp_runtime.close()
         checkpoint_runtime.close()
@@ -894,6 +974,213 @@ def test_incomplete_matching_snapshot_is_not_used_for_recovery(
         store.close()
 
 
+def test_research_contract_error_is_terminal_and_public_event_is_safe(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = _runner(
+        store,
+        checkpoint_runtime,
+        mcp_runtime,
+        _ModelFactory([]),
+    )
+    turn = _new_turn(store, user, conversation, "terminal contract")
+
+    def raise_contract(_state, runtime):
+        del runtime
+        raise ResearchContractError("secret-token full-paper-text")
+
+    monkeypatch.setattr(graph_module, "research_evidence", raise_contract)
+    try:
+        runner.run(turn.task.id)
+
+        task = store.get_task(turn.task.id, user_id=user.id)
+        assert task is not None and task.status == "failed"
+        events = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events is not None
+        failures = [event for event in events.items if event.type == "failed"]
+        assert len(failures) == 1
+        failure = failures[0]
+        assert failure.stage == "deep_reading_terminal"
+        assert failure.payload == {
+            "error_code": "research_contract_invalid",
+            "error_type": "ResearchContractError",
+        }
+        assert "secret-token" not in str(failure.to_dict())
+        assert "full-paper-text" not in str(failure.to_dict())
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_invalid_task_status_records_stable_terminal_code(monkeypatch) -> None:
+    failures: list[dict[str, object]] = []
+
+    class RecordingStore:
+        def fail_conversation_task(self, **kwargs):
+            failures.append(kwargs)
+
+    runner = DeepReadingRunner(
+        task_store=RecordingStore(),  # type: ignore[arg-type]
+        checkpointer=object(),
+        mcp_runtime=object(),  # type: ignore[arg-type]
+        model_factory=lambda: object(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_load_business_binding",
+        lambda _task_id: (
+            SimpleNamespace(id="task-status", status="cancelled"),
+            SimpleNamespace(id="message-status"),
+            SimpleNamespace(id="conversation-status"),
+            "paper-status",
+        ),
+    )
+
+    runner.run("task-status")
+
+    assert failures == [
+        {
+            "task_id": "task-status",
+            "message": "The task is not in an executable state.",
+            "stage": "deep_reading_terminal",
+            "payload": {
+                "error_code": "task_status_invalid",
+                "error_type": "TaskStatusError",
+            },
+        }
+    ]
+
+
+def test_missing_published_assistant_becomes_final_checkpoint_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = _runner(store, checkpoint_runtime, mcp_runtime, _ModelFactory([]))
+    turn = _new_turn(store, user, conversation, "missing assistant")
+
+    monkeypatch.setattr(
+        graph_module,
+        "publish_result",
+        lambda _state, runtime: {"published_message_id": None},
+    )
+    try:
+        runner.run(turn.task.id)
+
+        task = store.get_task(turn.task.id, user_id=user.id)
+        assert task is not None and task.status == "failed"
+        events = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events is not None
+        failure = [event for event in events.items if event.type == "failed"][0]
+        assert failure.stage == "deep_reading_terminal"
+        assert failure.payload["error_code"] == "final_checkpoint_invalid"
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        sqlite3.OperationalError("database locked"),
+        ConnectionError("provider connection reset"),
+    ],
+)
+def test_database_and_provider_errors_escape_for_task_retry(
+    tmp_path,
+    monkeypatch,
+    failure,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = _runner(store, checkpoint_runtime, mcp_runtime, _ModelFactory([]))
+    turn = _new_turn(store, user, conversation, "transient infrastructure")
+
+    def raise_infrastructure(_state, runtime):
+        del runtime
+        raise failure
+
+    monkeypatch.setattr(graph_module, "research_evidence", raise_infrastructure)
+    try:
+        with pytest.raises(type(failure)) as exc_info:
+            runner.run(turn.task.id)
+
+        assert exc_info.value is failure
+        assert store.get_task(turn.task.id, user_id=user.id).status == "pending"
+        events = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events is not None
+        assert [event for event in events.items if event.type == "failed"] == []
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_saver_error_escapes_for_task_retry(tmp_path, monkeypatch) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = _runner(store, checkpoint_runtime, mcp_runtime, _ModelFactory([]))
+    turn = _new_turn(store, user, conversation, "saver failure")
+    failure = OSError("checkpoint unavailable")
+
+    monkeypatch.setattr(
+        runner_module,
+        "build_deep_reading_graph",
+        lambda _checkpointer: (_ for _ in ()).throw(failure),
+    )
+    try:
+        with pytest.raises(OSError) as exc_info:
+            runner.run(turn.task.id)
+
+        assert exc_info.value is failure
+        assert store.get_task(turn.task.id, user_id=user.id).status == "pending"
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
 def test_only_deep_reading_task_error_is_marked_failed(tmp_path, monkeypatch) -> None:
     store, user, conversation = _create_store_and_conversation(
         tmp_path / "business.sqlite3"
@@ -912,6 +1199,19 @@ def test_only_deep_reading_task_error_is_marked_failed(tmp_path, monkeypatch) ->
         expected_turn = _new_turn(store, user, conversation, "expected failure")
         failing_runner.run(expected_turn.task.id)
         assert store.get_task(expected_turn.task.id, user_id=user.id).status == "failed"
+        terminal_events = store.list_events_page(
+            expected_turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert terminal_events is not None
+        failure = [
+            event for event in terminal_events.items if event.type == "failed"
+        ][0]
+        assert failure.stage == "deep_reading_terminal"
+        assert failure.payload["error_code"] == "research_contract_invalid"
+        assert "expected terminal model failure" not in str(failure.to_dict())
 
         # A second conversation isolates an unknown exception from the active failed turn.
         another = store.create_conversation(user_id=user.id, paper=PRIMARY)

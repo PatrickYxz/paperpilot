@@ -253,6 +253,34 @@ but it cannot guarantee automatic recovery while the business SQLite database
 or LangGraph checkpoint database remains unavailable. Long outages still need
 operator recovery and, for lossless automated repair, a future reconciler.
 
+The Research Agent has a separate, per-execution-attempt budget configured by
+`PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT=6`,
+`PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT=12`,
+`PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS=4096`, and
+`PAPERPILOT_RESEARCH_MODEL_RETRIES=1`. LangChain's model-call and tool-call
+limit middleware enforces the logical-call bounds, while its model-retry
+middleware permits at most one additional provider attempt for each failed
+logical model call. The DeepSeek client itself has retries disabled so retry
+ownership is explicit. The agent's two structured-response attempts share the
+configured 6/12 totals rather than each receiving the full budget.
+
+At the defaults, 6 logical model calls times 4,096 output tokens is a maximum
+of 24,576 generated tokens within one execution attempt. Task execution may
+make the initial attempt plus 3 infrastructure retries, so the extreme replay
+bound is 98,304 generated tokens across 4 execution attempts. These are
+theoretical output limits, not an exact billing cap based on usage metadata;
+provider retries, input tokens, and provider billing semantics are separate.
+
+Known deterministic failures are terminal: invalid task/checkpoint bindings,
+unsupported graph or state schemas, malformed persisted or MCP payloads, and
+agent budget exhaustion immediately create one safe `deep_reading_terminal`
+failure event and are not retried. Database and checkpoint I/O failures, MCP
+transport/timeouts, model provider/network failures (including exhausted model
+retry middleware), and unknown infrastructure failures remain transient and
+escape to the bounded Task retry policy. User-visible terminal events contain
+only a stable error code/type and safe message; detailed exception data stays
+in server logs.
+
 ## Web Runtime Protection
 
 For the local, in-process thread executor, configure the runtime before

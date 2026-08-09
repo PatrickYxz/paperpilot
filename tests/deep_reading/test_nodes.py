@@ -671,6 +671,27 @@ def test_write_answer_rejects_citation_outside_research_result() -> None:
         )
 
 
+def test_write_answer_converts_invalid_structured_payload_to_terminal_contract() -> None:
+    store = _NodeStore()
+    model = _FakeModel(
+        {
+            "content": "",
+            "citations": [],
+            "result_quality": "partial",
+        }
+    )
+
+    with pytest.raises(ResearchContractError) as exc_info:
+        write_answer(
+            _bound_state(
+                research_result=_research_result().model_dump(mode="json"),
+            ),
+            Runtime(context=_node_context(store=store, model=model)),
+        )
+
+    assert exc_info.value.error_code == "research_contract_invalid"
+
+
 def test_publish_result_publishes_only_validated_used_papers() -> None:
     store = _NodeStore()
     result = _research_result()
@@ -819,9 +840,10 @@ def test_external_and_publish_nodes_validate_binding_before_side_effect(
     if node_name == "summarize_history":
         context = _context(model, threshold=1, store=store)
 
-    with pytest.raises(ResearchContractError, match="conversation"):
+    with pytest.raises(ResearchContractError, match="conversation") as exc_info:
         selected(state, Runtime(context=context))
 
+    assert exc_info.value.error_code == "task_binding_invalid"
     assert tool_calls == []
     assert agent_calls == []
     assert model.schemas == []
@@ -865,9 +887,10 @@ def test_runtime_binding_rejects_mismatched_trusted_entities(
         lambda _state, _context: agent_calls.append("called"),
     )
 
-    with pytest.raises(ResearchContractError):
+    with pytest.raises(ResearchContractError) as exc_info:
         research_evidence(state, Runtime(context=context))
 
+    assert exc_info.value.error_code == "task_binding_invalid"
     assert agent_calls == []
 
 
@@ -886,7 +909,10 @@ def test_publish_result_rejects_malformed_persisted_metadata() -> None:
     result = _research_result()
     draft = AnswerDraft(content="Retry answer", citations=[], result_quality="partial")
 
-    with pytest.raises(ResearchContractError, match="persisted assistant metadata"):
+    with pytest.raises(
+        ResearchContractError,
+        match="persisted assistant metadata",
+    ) as exc_info:
         publish_result(
             _bound_state(
                 research_result=result.model_dump(mode="json"),
@@ -895,6 +921,7 @@ def test_publish_result_rejects_malformed_persisted_metadata() -> None:
             Runtime(context=_node_context(store=store, model=_FakeModel())),
         )
 
+    assert exc_info.value.error_code == "final_checkpoint_invalid"
     assert store.publish_calls == []
 
 

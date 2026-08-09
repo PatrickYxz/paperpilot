@@ -246,6 +246,10 @@ def _create_app(
             summary_token_threshold=config.summary_token_threshold,
             summary_recent_turns=config.summary_recent_turns,
             research_recursion_limit=config.research_recursion_limit,
+            research_model_call_limit=config.research_model_call_limit,
+            research_tool_call_limit=config.research_tool_call_limit,
+            research_max_output_tokens=config.research_max_output_tokens,
+            research_model_retries=config.research_model_retries,
         )
     runner = workflow_runner or WorkflowRunner(
         store,

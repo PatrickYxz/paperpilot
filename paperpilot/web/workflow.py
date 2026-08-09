@@ -4,12 +4,13 @@ from __future__ import annotations
 import logging
 import time
 from inspect import Parameter, signature
-from typing import Callable, Protocol
+from typing import Callable, Literal, Protocol
 
 from paperpilot.web.event_mapper import map_paperpilot_event
 from paperpilot.web.task_store import TaskStore
 
 RealRunner = Callable[..., list[dict]]
+ConversationTaskClaim = Literal["claimed", "not_claimed", "not_conversation"]
 _LOGGER = logging.getLogger("paperpilot.web.runtime")
 
 
@@ -120,6 +121,16 @@ class WorkflowRunner:
             self.deep_reading_runner.run(task_id)
             return
         self._run_legacy_real(task_id)
+
+    def claim_conversation_task(self, task_id: str) -> ConversationTaskClaim:
+        """Atomically claim pending Conversation work before its first Graph call."""
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise ValueError(f"task not found: {task_id}")
+        if task.conversation_id is None:
+            return "not_conversation"
+        claimed = self.store.claim_task(task_id)
+        return "claimed" if claimed is not None else "not_claimed"
 
     def fail_conversation_execution(
         self,

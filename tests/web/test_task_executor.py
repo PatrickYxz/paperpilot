@@ -33,6 +33,10 @@ class FakeRunner:
     def run_real(self, task_id: str) -> None:
         self.calls.append(("real", task_id))
 
+    def claim_conversation_task(self, task_id: str) -> str:
+        del task_id
+        return "not_conversation"
+
 
 class FakeTaskSender:
     def __init__(self) -> None:
@@ -119,6 +123,123 @@ def test_threaded_executor_submits_work_to_runner():
     assert runner.calls == [("real", "task_1")]
     assert executor.max_workers == 2
     executor.shutdown()
+
+
+def test_thread_executor_claims_conversation_before_graph_entry(tmp_path):
+    store = TaskStore(tmp_path / "thread-claim.sqlite3")
+    task = _new_conversation_task(store)
+
+    class BlockingDeepRunner:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.statuses: list[str] = []
+
+        def run(self, task_id: str) -> None:
+            current = store.get_task(task_id)
+            assert current is not None
+            self.statuses.append(current.status)
+            self.started.set()
+            assert self.release.wait(timeout=2)
+
+    deep_runner = BlockingDeepRunner()
+    runner = WorkflowRunner(store, deep_reading_runner=deep_runner)
+    executor = TaskExecutor(runner, max_workers=1)
+    future = executor.submit(task.id, "real")
+    try:
+        assert deep_runner.started.wait(timeout=1)
+        assert deep_runner.statuses == ["running"]
+    finally:
+        deep_runner.release.set()
+        executor.shutdown()
+
+    assert future.result(timeout=1) is None
+    store.close()
+
+
+def test_concurrent_thread_submissions_claim_conversation_only_once(tmp_path):
+    store = TaskStore(tmp_path / "thread-claim-race.sqlite3")
+    task = _new_conversation_task(store)
+
+    class BlockingDeepRunner:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self.calls = 0
+            self.first_started = threading.Event()
+            self.second_started = threading.Event()
+            self.release = threading.Event()
+
+        def run(self, task_id: str) -> None:
+            del task_id
+            with self._lock:
+                self.calls += 1
+                call_number = self.calls
+            self.first_started.set()
+            if call_number == 2:
+                self.second_started.set()
+            assert self.release.wait(timeout=2)
+
+    deep_runner = BlockingDeepRunner()
+    runner = WorkflowRunner(store, deep_reading_runner=deep_runner)
+    executor = TaskExecutor(runner, max_workers=2)
+    first = executor.submit(task.id, "real")
+    try:
+        assert deep_runner.first_started.wait(timeout=1)
+        second = executor.submit(task.id, "real")
+        assert not deep_runner.second_started.wait(timeout=0.25)
+        assert second.result(timeout=1) is None
+    finally:
+        deep_runner.release.set()
+        executor.shutdown()
+
+    assert first.result(timeout=1) is None
+    assert deep_runner.calls == 1
+    store.close()
+
+
+def test_thread_retries_reuse_one_conversation_claim_and_backoff(tmp_path):
+    store = TaskStore(tmp_path / "thread-claim-retry.sqlite3")
+    task = _new_conversation_task(store)
+
+    class FlakyDeepRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, task_id: str) -> None:
+            del task_id
+            self.calls += 1
+            if self.calls <= 3:
+                raise ConnectionError("temporary checkpoint outage")
+
+    class RecordingWorkflowRunner(WorkflowRunner):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.claim_calls = 0
+
+        def claim_conversation_task(self, task_id: str) -> str:
+            self.claim_calls += 1
+            return super().claim_conversation_task(task_id)
+
+    deep_runner = FlakyDeepRunner()
+    runner = RecordingWorkflowRunner(store, deep_reading_runner=deep_runner)
+    sleeps: list[float] = []
+    executor = TaskExecutor(
+        runner,
+        max_workers=1,
+        max_retries=3,
+        sleeper=sleeps.append,
+    )
+    try:
+        future = executor.submit(task.id, "real")
+        assert future.result(timeout=1) is None
+    finally:
+        executor.shutdown()
+
+    assert runner.claim_calls == 1
+    assert deep_runner.calls == 4
+    assert sleeps == [1, 2, 4]
+    assert store.get_task(task.id).status == "running"
+    store.close()
 
 
 def test_retry_countdown_uses_exponential_backoff_with_cap():
