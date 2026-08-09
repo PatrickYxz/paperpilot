@@ -108,6 +108,23 @@ class ClaimingFailingExecutor(RecordingExecutor):
         raise ConnectionError("publish result was ambiguous")
 
 
+class WorkerFailingThenAmbiguousExecutor(RecordingExecutor):
+    def __init__(self, store: TaskStore) -> None:
+        super().__init__()
+        self.store = store
+
+    def _submit(self, task_id: str, execution_mode: str) -> object:
+        assert self.store.claim_task(task_id) is not None
+        failed = self.store.fail_conversation_task(
+            task_id=task_id,
+            message="Worker failed after claiming the task.",
+            stage="deep_reading",
+            payload={"error_type": "WorkerFailure"},
+        )
+        assert failed is not None and failed.status == "failed"
+        raise ConnectionError("publish result was ambiguous")
+
+
 @dataclass
 class AppHarness:
     store: TaskStore
@@ -533,6 +550,49 @@ def test_ambiguous_submit_failure_does_not_fail_worker_claimed_task(tmp_path):
     events = store.list_events_page(task.id, user_id=user["id"], after_id=0, limit=100)
     assert events is not None
     assert [event.type for event in events.items] == ["queued"]
+
+
+def test_ambiguous_submit_after_worker_failure_still_returns_accepted(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    executor = WorkerFailingThenAmbiguousExecutor(store)
+    runner = FakeDeepReadingRunner()
+    checkpoint = FakeCheckpointRuntime()
+    calls: list[tuple[str, int]] = []
+    client = TestClient(
+        create_app(
+            store,
+            task_executor=executor,
+            checkpoint_runtime=checkpoint,
+            deep_reading_runner=runner,
+            paper_search=_paper_search(calls),
+        )
+    )
+    user = _register(client)
+    conversation = _create_conversation(client)
+
+    response = client.post(
+        f"/api/conversations/{conversation['id']}/messages",
+        json={
+            "content": "Worker fails quickly",
+            "depth": "standard",
+            "expected_head_message_id": None,
+        },
+    )
+
+    assert response.status_code == 202
+    task_id = response.json()["task"]["id"]
+    task = store.get_task(task_id, user_id=user["id"])
+    assert task is not None and task.status == "failed"
+    events = store.list_events_page(
+        task_id,
+        user_id=user["id"],
+        after_id=0,
+        limit=100,
+    )
+    assert events is not None
+    assert [event.type for event in events.items] == ["queued", "failed"]
+    assert events.items[-1].stage == "deep_reading"
+    assert events.items[-1].message == "Worker failed after claiming the task."
 
 
 def test_messages_expose_active_path_and_unstable_turn(tmp_path):

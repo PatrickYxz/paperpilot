@@ -380,6 +380,7 @@ def create_conversation_router(
                     if current is not None and current.status in {
                         "running",
                         "completed",
+                        "failed",
                     }:
                         return response
                 else:
