@@ -35,6 +35,14 @@ _store_factory: Callable[[], TaskStore] = TaskStore
 _LOGGER = logging.getLogger("paperpilot.web.runtime")
 
 
+class _RetryableConversationExecution(Exception):
+    """Typed signal carrying a retryable Conversation infrastructure error."""
+
+    def __init__(self, original: Exception) -> None:
+        super().__init__("retryable Conversation execution failure")
+        self.original = original
+
+
 def _get_runtime() -> MCPRuntime:
     global _runtime
     with _runtime_lock:
@@ -83,6 +91,7 @@ def _execute_research_task(
     if execution_mode not in {"simulated", "real"}:
         raise ValueError(f"invalid execution mode: {execution_mode!r}")
     store = _store_factory()
+    retryable_error: _RetryableConversationExecution | None = None
     try:
         claimed = store.claim_task(task_id, allow_running=redelivered)
         if claimed is None and store.get_task(task_id) is None:
@@ -93,19 +102,23 @@ def _execute_research_task(
             WorkflowRunner(store).run_simulated(task_id)
             return
 
-        runtime = _get_runtime()
-
         if claimed.conversation_id is not None:
-            deep_reading_runner = _build_deep_reading_runner(
-                store,
-                runtime,
-                config=config,
-            )
-            WorkflowRunner(
-                store,
-                deep_reading_runner=deep_reading_runner,
-            ).run_real(task_id)
+            try:
+                runtime = _get_runtime()
+                deep_reading_runner = _build_deep_reading_runner(
+                    store,
+                    runtime,
+                    config=config,
+                )
+                WorkflowRunner(
+                    store,
+                    deep_reading_runner=deep_reading_runner,
+                ).run_real(task_id)
+            except Exception as exc:
+                raise _RetryableConversationExecution(exc) from exc
             return
+
+        runtime = _get_runtime()
 
         def real_runner(query: str, *, on_event=None) -> list[dict]:
             return run_conversation(
@@ -115,8 +128,23 @@ def _execute_research_task(
             )
 
         WorkflowRunner(store, real_runner=real_runner).run_real(task_id)
+    except _RetryableConversationExecution as exc:
+        retryable_error = exc
+        raise
     finally:
-        store.close()
+        try:
+            store.close()
+        except Exception:
+            if retryable_error is None:
+                raise
+            _LOGGER.exception(
+                "Task store cleanup failed after Conversation execution",
+                extra={
+                    "event": "task.execution_cleanup_failed",
+                    "executor": "celery",
+                    "reason": "store_exception",
+                },
+            )
 
 
 @celery_app.task(
@@ -141,7 +169,8 @@ def execute_research_task(
             ),
             config=config,
         )
-    except Exception as exc:
+    except _RetryableConversationExecution as retryable:
+        exc = retryable.original
         if retries < config.task_max_retries:
             countdown = task_retry_countdown_seconds(
                 retries,
@@ -153,7 +182,7 @@ def execute_research_task(
                 retries + 1,
                 config.task_max_retries,
                 countdown,
-                exc_info=True,
+                exc_info=(type(exc), exc, exc.__traceback__),
                 extra={
                     "event": "task.execution_retry",
                     "executor": "celery",
@@ -183,7 +212,7 @@ def execute_research_task(
                     "reason": "store_exception",
                 },
             )
-        raise
+        raise exc
 
 
 def _fail_conversation_execution(

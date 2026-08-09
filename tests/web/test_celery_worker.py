@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -57,6 +58,18 @@ class RetryScheduled(RuntimeError):
     pass
 
 
+class NonRetryableWorkerError(RuntimeError):
+    pass
+
+
+class FailingDeepReadingRunner:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    def run(self, task_id: str) -> None:
+        raise self.exc
+
+
 def _new_conversation_task(store: TaskStore):
     user = store.create_user(
         username="celery-retry-user",
@@ -80,6 +93,42 @@ def _new_conversation_task(store: TaskStore):
         depth="standard",
         expected_head_message_id=None,
     ).task
+
+
+def _capture_retry(monkeypatch):
+    retry_calls: list[dict[str, object]] = []
+
+    def schedule_retry(**kwargs):
+        retry_calls.append(kwargs)
+        raise RetryScheduled("scheduled")
+
+    monkeypatch.setattr(worker_tasks.execute_research_task, "retry", schedule_retry)
+    return retry_calls
+
+
+def _configure_failing_conversation(
+    monkeypatch,
+    *,
+    db_path,
+    execution_error: Exception,
+    store_factory=None,
+) -> None:
+    monkeypatch.setattr(
+        worker_tasks,
+        "_store_factory",
+        store_factory or (lambda: TaskStore(db_path)),
+    )
+    monkeypatch.setattr(worker_tasks, "_get_runtime", lambda: object())
+    monkeypatch.setattr(
+        worker_tasks,
+        "_build_deep_reading_runner",
+        lambda *_args, **_kwargs: FailingDeepReadingRunner(execution_error),
+    )
+    monkeypatch.setattr(
+        worker_tasks.WebRuntimeConfig,
+        "from_env",
+        lambda: WebRuntimeConfig(),
+    )
 
 
 def test_celery_app_uses_long_task_safety_settings(monkeypatch):
@@ -113,27 +162,24 @@ def test_celery_app_rejects_time_limits_beyond_visibility_timeout(monkeypatch):
         create_celery_app()
 
 
-def test_celery_task_retries_ordinary_execution_exception(monkeypatch):
+def test_celery_task_retries_real_conversation_execution_exception(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "conversation-retry.sqlite3"
+    seed = TaskStore(db_path)
+    task = _new_conversation_task(seed)
+    seed.close()
     execution_error = ConnectionError("temporary checkpoint outage")
-    retry_calls: list[dict[str, object]] = []
-
-    def fail_execution(*_args, **_kwargs):
-        raise execution_error
-
-    def schedule_retry(**kwargs):
-        retry_calls.append(kwargs)
-        raise RetryScheduled("scheduled")
-
-    monkeypatch.setattr(worker_tasks, "_execute_research_task", fail_execution)
-    monkeypatch.setattr(
-        worker_tasks.WebRuntimeConfig,
-        "from_env",
-        lambda: WebRuntimeConfig(),
+    _configure_failing_conversation(
+        monkeypatch,
+        db_path=db_path,
+        execution_error=execution_error,
     )
-    monkeypatch.setattr(worker_tasks.execute_research_task, "retry", schedule_retry)
+    retry_calls = _capture_retry(monkeypatch)
 
     result = worker_tasks.execute_research_task.apply(
-        args=["task_retry", "real"],
+        args=[task.id, "real"],
         throw=False,
     )
 
@@ -145,6 +191,277 @@ def test_celery_task_retries_ordinary_execution_exception(monkeypatch):
             "max_retries": 3,
         }
     ]
+    check = TaskStore(db_path)
+    assert check.get_task(task.id).status == "running"
+    check.close()
+
+
+@pytest.mark.parametrize("failure_point", ["mcp", "checkpoint"])
+def test_celery_task_retries_real_conversation_resource_failure(
+    monkeypatch,
+    tmp_path,
+    failure_point,
+):
+    db_path = tmp_path / f"conversation-{failure_point}.sqlite3"
+    seed = TaskStore(db_path)
+    task = _new_conversation_task(seed)
+    seed.close()
+    execution_error = ConnectionError(f"{failure_point} unavailable")
+    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: TaskStore(db_path))
+    if failure_point == "mcp":
+        monkeypatch.setattr(
+            worker_tasks,
+            "_get_runtime",
+            lambda: (_ for _ in ()).throw(execution_error),
+        )
+    else:
+        monkeypatch.setattr(worker_tasks, "_get_runtime", lambda: object())
+        monkeypatch.setattr(
+            worker_tasks,
+            "_build_deep_reading_runner",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(execution_error),
+        )
+    monkeypatch.setattr(
+        worker_tasks.WebRuntimeConfig,
+        "from_env",
+        lambda: WebRuntimeConfig(),
+    )
+    retry_calls = _capture_retry(monkeypatch)
+
+    result = worker_tasks.execute_research_task.apply(
+        args=[task.id, "real"],
+        throw=False,
+    )
+
+    assert isinstance(result.result, RetryScheduled)
+    assert retry_calls[0]["exc"] is execution_error
+
+
+def test_celery_task_does_not_retry_invalid_execution_mode(monkeypatch):
+    retry_calls = _capture_retry(monkeypatch)
+    monkeypatch.setattr(
+        worker_tasks.WebRuntimeConfig,
+        "from_env",
+        lambda: WebRuntimeConfig(),
+    )
+
+    result = worker_tasks.execute_research_task.apply(
+        args=["task_invalid", "invalid"],
+        throw=False,
+    )
+
+    assert result.failed()
+    assert isinstance(result.result, ValueError)
+    assert retry_calls == []
+
+
+def test_celery_task_does_not_retry_missing_task(monkeypatch, tmp_path):
+    db_path = tmp_path / "missing.sqlite3"
+    seed = TaskStore(db_path)
+    seed.close()
+    retry_calls = _capture_retry(monkeypatch)
+    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: TaskStore(db_path))
+    monkeypatch.setattr(
+        worker_tasks.WebRuntimeConfig,
+        "from_env",
+        lambda: WebRuntimeConfig(),
+    )
+
+    result = worker_tasks.execute_research_task.apply(
+        args=["task_missing", "real"],
+        throw=False,
+    )
+
+    assert result.failed()
+    assert isinstance(result.result, ValueError)
+    assert retry_calls == []
+
+
+def test_celery_task_does_not_retry_store_construction_failure(monkeypatch):
+    store_error = NonRetryableWorkerError("store unavailable")
+    retry_calls = _capture_retry(monkeypatch)
+    monkeypatch.setattr(
+        worker_tasks,
+        "_store_factory",
+        lambda: (_ for _ in ()).throw(store_error),
+    )
+    monkeypatch.setattr(
+        worker_tasks.WebRuntimeConfig,
+        "from_env",
+        lambda: WebRuntimeConfig(),
+    )
+
+    result = worker_tasks.execute_research_task.apply(
+        args=["task_store", "real"],
+        throw=False,
+    )
+
+    assert result.failed()
+    assert result.result is store_error
+    assert retry_calls == []
+
+
+def test_celery_task_does_not_retry_claim_failure(monkeypatch):
+    claim_error = NonRetryableWorkerError("claim unavailable")
+    retry_calls = _capture_retry(monkeypatch)
+
+    class ClaimFailingStore:
+        close_calls = 0
+
+        def claim_task(self, task_id, *, allow_running=False):
+            raise claim_error
+
+        def close(self):
+            self.close_calls += 1
+
+    store = ClaimFailingStore()
+    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: store)
+    monkeypatch.setattr(
+        worker_tasks.WebRuntimeConfig,
+        "from_env",
+        lambda: WebRuntimeConfig(),
+    )
+
+    result = worker_tasks.execute_research_task.apply(
+        args=["task_claim", "real"],
+        throw=False,
+    )
+
+    assert result.failed()
+    assert result.result is claim_error
+    assert retry_calls == []
+    assert store.close_calls == 1
+
+
+def test_celery_task_does_not_retry_standalone_cleanup_failure(monkeypatch):
+    cleanup_error = NonRetryableWorkerError("cleanup failed")
+    retry_calls = _capture_retry(monkeypatch)
+
+    class CleanupFailingStore:
+        def claim_task(self, task_id, *, allow_running=False):
+            return None
+
+        def get_task(self, task_id):
+            return SimpleNamespace(id=task_id)
+
+        def close(self):
+            raise cleanup_error
+
+    monkeypatch.setattr(worker_tasks, "_store_factory", CleanupFailingStore)
+    monkeypatch.setattr(
+        worker_tasks.WebRuntimeConfig,
+        "from_env",
+        lambda: WebRuntimeConfig(),
+    )
+
+    result = worker_tasks.execute_research_task.apply(
+        args=["task_cleanup", "real"],
+        throw=False,
+    )
+
+    assert result.failed()
+    assert result.result is cleanup_error
+    assert retry_calls == []
+
+
+def test_celery_task_does_not_retry_simulated_workflow_failure(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "simulated-failure.sqlite3"
+    seed = TaskStore(db_path)
+    task = seed.create_task(question="simulated failure")
+    seed.close()
+    retry_calls = _capture_retry(monkeypatch)
+    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: TaskStore(db_path))
+    monkeypatch.setattr(worker_tasks, "WorkflowRunner", RaisingWorkflowRunner)
+    monkeypatch.setattr(
+        worker_tasks.WebRuntimeConfig,
+        "from_env",
+        lambda: WebRuntimeConfig(),
+    )
+
+    result = worker_tasks.execute_research_task.apply(
+        args=[task.id, "simulated"],
+        throw=False,
+    )
+
+    assert result.failed()
+    assert isinstance(result.result, RuntimeError)
+    assert retry_calls == []
+
+
+def test_celery_task_does_not_retry_legacy_workflow_failure(monkeypatch, tmp_path):
+    db_path = tmp_path / "legacy-failure.sqlite3"
+    seed = TaskStore(db_path)
+    task = seed.create_task(question="legacy failure")
+    seed.close()
+    execution_error = NonRetryableWorkerError("legacy failed")
+    retry_calls = _capture_retry(monkeypatch)
+
+    class RaisingLegacyWorkflowRunner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run_real(self, task_id):
+            raise execution_error
+
+    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: TaskStore(db_path))
+    monkeypatch.setattr(worker_tasks, "_get_runtime", lambda: object())
+    monkeypatch.setattr(worker_tasks, "WorkflowRunner", RaisingLegacyWorkflowRunner)
+    monkeypatch.setattr(
+        worker_tasks.WebRuntimeConfig,
+        "from_env",
+        lambda: WebRuntimeConfig(),
+    )
+
+    result = worker_tasks.execute_research_task.apply(
+        args=[task.id, "real"],
+        throw=False,
+    )
+
+    assert result.failed()
+    assert result.result is execution_error
+    assert retry_calls == []
+
+
+def test_conversation_execution_error_wins_over_cleanup_failure(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "conversation-cleanup.sqlite3"
+    seed = TaskStore(db_path)
+    task = _new_conversation_task(seed)
+    seed.close()
+    execution_error = ConnectionError("checkpoint unavailable")
+    cleanup_error = NonRetryableWorkerError("cleanup failed")
+
+    class CloseFailingStore:
+        def __init__(self) -> None:
+            self.inner = TaskStore(db_path)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def close(self):
+            self.inner.close()
+            raise cleanup_error
+
+    _configure_failing_conversation(
+        monkeypatch,
+        db_path=db_path,
+        execution_error=execution_error,
+        store_factory=CloseFailingStore,
+    )
+    retry_calls = _capture_retry(monkeypatch)
+
+    result = worker_tasks.execute_research_task.apply(
+        args=[task.id, "real"],
+        throw=False,
+    )
+
+    assert isinstance(result.result, RetryScheduled)
+    assert retry_calls[0]["exc"] is execution_error
 
 
 def test_celery_retry_request_can_reclaim_running_task(monkeypatch):
@@ -188,16 +505,10 @@ def test_celery_retry_exhaustion_fails_real_sqlite_conversation(monkeypatch, tmp
     seed.update_status(task.id, "running")
     seed.close()
     execution_error = OSError("database locked secret-paper-text")
-
-    def fail_execution(*_args, **_kwargs):
-        raise execution_error
-
-    monkeypatch.setattr(worker_tasks, "_execute_research_task", fail_execution)
-    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: TaskStore(db_path))
-    monkeypatch.setattr(
-        worker_tasks.WebRuntimeConfig,
-        "from_env",
-        lambda: WebRuntimeConfig(),
+    _configure_failing_conversation(
+        monkeypatch,
+        db_path=db_path,
+        execution_error=execution_error,
     )
 
     result = worker_tasks.execute_research_task.apply(
