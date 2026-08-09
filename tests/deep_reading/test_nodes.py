@@ -9,13 +9,21 @@ from langchain.messages import AIMessage, HumanMessage, RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from langgraph.runtime import Runtime
 
+import paperpilot.deep_reading.nodes as nodes_module
 from paperpilot.deep_reading.nodes import (
     DeepReadingContext,
     initialize_turn,
     needs_summary,
+    research_evidence,
     summarize_history,
 )
-from paperpilot.deep_reading.schemas import ConversationSummary
+from paperpilot.deep_reading.schemas import (
+    ConversationSummary,
+    EvidenceItem,
+    PaperUse,
+    ResearchResult,
+)
+from paperpilot.papers import PaperCandidate
 from paperpilot.deep_reading.state import (
     GRAPH_VERSION,
     SCHEMA_VERSION,
@@ -242,3 +250,50 @@ def test_summarize_history_writes_json_and_retains_recent_six_turns() -> None:
         "h-7",
         "a-7",
     ]
+
+
+def test_research_evidence_writes_complete_json_research_result(monkeypatch) -> None:
+    paper = PaperCandidate(
+        external_id="2401.12345v1",
+        title="Related paper",
+        authors=["Ada"],
+        abstract="Abstract",
+        source_url="https://arxiv.org/abs/2401.12345v1",
+    )
+    result = ResearchResult(
+        evidence_items=[
+            EvidenceItem(
+                id="ev-1",
+                paper_external_id=paper.external_id,
+                paper_title=paper.title,
+                chunk_text="Retrieved evidence",
+                score=0.9,
+                supports=["method"],
+            )
+        ],
+        used_papers=[
+            PaperUse(
+                paper=paper,
+                role="comparison",
+                evidence_ids=["ev-1"],
+            )
+        ],
+        limitations=["One comparison paper."],
+    )
+    seen: list[tuple[object, object]] = []
+
+    def fake_run(state: object, context: object) -> ResearchResult:
+        seen.append((state, context))
+        return result
+
+    monkeypatch.setattr(nodes_module, "run_research_agent", fake_run)
+    state = {"messages": [HumanMessage(content="Compare", id="human-1")]}
+    context = _context(_FakeModel())
+
+    update = research_evidence(state, Runtime(context=context))
+
+    assert seen == [(state, context)]
+    assert update == {"research_result": result.model_dump(mode="json")}
+    assert update["research_result"]["used_papers"][0]["paper"] == (
+        paper.model_dump(mode="json")
+    )

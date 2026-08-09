@@ -15,6 +15,7 @@ from paperpilot.papers import PaperCandidate
 from paperpilot.web.task_store import TaskStore
 
 from .schemas import ConversationSummary
+from .research_agent import run_research_agent
 from .state import GRAPH_VERSION, SCHEMA_VERSION, DeepReadingState
 
 PaperSearch = Callable[[str, int], list[PaperCandidate]]
@@ -115,6 +116,15 @@ def summarize_history(
         "conversation_summary": summary.model_dump(mode="json"),
         "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *recent_messages],
     }
+
+
+def research_evidence(
+    state: DeepReadingState,
+    runtime: Runtime[DeepReadingContext],
+) -> DeepReadingState:
+    """Run bounded research and checkpoint the complete JSON result."""
+    result = run_research_agent(state, runtime.context)
+    return {"research_result": result.model_dump(mode="json")}
 
 
 def _estimated_tokens(state: DeepReadingState) -> int:
