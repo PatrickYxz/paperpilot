@@ -9,6 +9,15 @@ from langgraph.checkpoint.memory import InMemorySaver
 import paperpilot.deep_reading.graph as graph_module
 from paperpilot.deep_reading.graph import build_deep_reading_graph
 from paperpilot.deep_reading.nodes import DeepReadingContext
+from paperpilot.deep_reading.schemas import (
+    AnswerCitation,
+    AnswerDraft,
+    EvidenceItem,
+    PaperUse,
+    ResearchResult,
+)
+from paperpilot.papers import PaperCandidate
+from paperpilot.web.task_store import TaskStore
 
 
 def _context(
@@ -16,14 +25,18 @@ def _context(
     task_id: str,
     message_id: str,
     threshold: int,
+    store: object | None = None,
+    user_id: str = "user-1",
+    conversation_id: str = "conv-two-turn",
+    base_checkpoint_id: str | None = None,
 ) -> DeepReadingContext:
     return DeepReadingContext(
-        user_id="user-1",
-        conversation_id="conv-two-turn",
+        user_id=user_id,
+        conversation_id=conversation_id,
         task_id=task_id,
         current_user_message_id=message_id,
-        base_checkpoint_id=None,
-        task_store=object(),  # type: ignore[arg-type]
+        base_checkpoint_id=base_checkpoint_id,
+        task_store=store or object(),  # type: ignore[arg-type]
         model=object(),
         mcp_tools={},
         paper_search=lambda _query, _limit: [],
@@ -235,3 +248,169 @@ def test_in_memory_saver_preserves_history_and_long_lived_state_across_two_turns
         "assistant-task-first",
         "message-second",
     ]
+
+
+def _replay_result(suffix: str) -> ResearchResult:
+    paper = PaperCandidate(
+        external_id=f"2401.8000{suffix}v1",
+        title=f"Related paper {suffix}",
+        authors=[f"Author {suffix}"],
+        abstract=f"Abstract {suffix}",
+        source_url=f"https://arxiv.org/abs/2401.8000{suffix}v1",
+    )
+    evidence_id = f"ev-result-{suffix}"
+    return ResearchResult(
+        evidence_items=[
+            EvidenceItem(
+                id=evidence_id,
+                paper_external_id=paper.external_id,
+                paper_title=paper.title,
+                chunk_text=f"Evidence {suffix}",
+                score=0.8,
+                supports=[f"claim {suffix}"],
+            )
+        ],
+        used_papers=[
+            PaperUse(
+                paper=paper,
+                role="comparison",
+                evidence_ids=[evidence_id],
+            )
+        ],
+        limitations=[f"limitation-{suffix}"],
+    )
+
+
+def test_same_task_replay_keeps_first_sqlite_publication_authoritative(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = TaskStore(tmp_path / "business.sqlite3")
+    user = store.create_user(
+        username="graph-replay",
+        password_hash="hash",
+        password_salt="salt",
+    )
+    conversation = store.create_conversation(
+        user_id=user.id,
+        paper=PaperCandidate(
+            external_id="2401.80000v1",
+            title="Primary paper",
+            authors=["Primary Author"],
+            abstract="Primary abstract",
+            source_url="https://arxiv.org/abs/2401.80000v1",
+        ),
+    )
+    turn = store.create_conversation_turn(
+        user_id=user.id,
+        conversation_id=conversation.id,
+        content="Compare the papers.",
+        depth="deep",
+        expected_head_message_id=None,
+    )
+    assert store.claim_task(turn.task.id) is not None
+
+    results = [_replay_result("1"), _replay_result("2")]
+    drafts = [
+        AnswerDraft(
+            content="answer-1",
+            citations=[
+                AnswerCitation(evidence_id="ev-result-1", label="result-1")
+            ],
+            result_quality="complete",
+        ),
+        AnswerDraft(
+            content="answer-2",
+            citations=[
+                AnswerCitation(evidence_id="ev-result-2", label="result-2")
+            ],
+            result_quality="partial",
+        ),
+    ]
+    research_calls = 0
+    writer_calls = 0
+
+    def fake_prepare(state: dict[str, Any], runtime: object) -> dict[str, object]:
+        del runtime
+        return {
+            "primary_paper_id": conversation.primary_paper_id,
+            "active_paper_ids": state.get(
+                "active_paper_ids", [conversation.primary_paper_id]
+            ),
+        }
+
+    def fake_research(state: dict[str, Any], runtime: object) -> dict[str, object]:
+        nonlocal research_calls
+        del state, runtime
+        result = results[research_calls]
+        research_calls += 1
+        return {"research_result": result.model_dump(mode="json")}
+
+    def fake_writer(state: dict[str, Any], runtime: object) -> dict[str, object]:
+        nonlocal writer_calls
+        del state, runtime
+        draft = drafts[writer_calls]
+        writer_calls += 1
+        return {"answer_draft": draft.model_dump(mode="json")}
+
+    monkeypatch.setattr(graph_module, "prepare_primary_paper", fake_prepare)
+    monkeypatch.setattr(graph_module, "research_evidence", fake_research)
+    monkeypatch.setattr(graph_module, "write_answer", fake_writer)
+
+    graph = build_deep_reading_graph(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": conversation.id}}
+    context = _context(
+        task_id=turn.task.id,
+        message_id=turn.user_message.id,
+        threshold=32_000,
+        store=store,
+        user_id=user.id,
+        conversation_id=conversation.id,
+        base_checkpoint_id=None,
+    )
+    graph_input = {
+        "messages": [
+            HumanMessage(content=turn.user_message.content, id=turn.user_message.id)
+        ],
+        "primary_paper_id": conversation.primary_paper_id,
+    }
+
+    first = graph.invoke(graph_input, config=config, context=context)
+    second = graph.invoke(graph_input, config=config, context=context)
+
+    assert first["answer_draft"] == drafts[0].model_dump(mode="json")
+    assert second["answer_draft"] == drafts[0].model_dump(mode="json")
+    assert second["research_result"] == results[0].model_dump(mode="json")
+    assert [
+        message.content for message in second["messages"] if message.type == "ai"
+    ] == ["answer-1"]
+    assistant = store.get_task_message(turn.task.id, "assistant")
+    assert assistant is not None
+    assert assistant.content == "answer-1"
+    assert assistant.metadata["result_quality"] == "complete"
+    assert assistant.metadata["research_result"] == results[0].model_dump(mode="json")
+    artifacts = store.list_artifacts_page(
+        turn.task.id,
+        user_id=user.id,
+        after_id=0,
+        limit=10,
+    )
+    assert artifacts is not None
+    assert len(artifacts.items) == 1
+    assert artifacts.items[0].content == "answer-1"
+    assert artifacts.items[0].payload == assistant.metadata
+
+    with store.engine.connect() as connection:
+        external_ids = list(
+            connection.exec_driver_sql(
+                """
+                SELECT papers.external_id
+                FROM conversation_papers
+                JOIN papers ON papers.id = conversation_papers.paper_id
+                WHERE conversation_papers.conversation_id = ?
+                ORDER BY papers.external_id
+                """,
+                (conversation.id,),
+            ).scalars()
+        )
+    assert external_ids == ["2401.80000v1", "2401.80001v1"]

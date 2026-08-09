@@ -13,7 +13,12 @@ from pydantic import ValidationError
 
 from paperpilot.core.adapter import Tool
 from paperpilot.papers import PaperCandidate, normalize_arxiv_id
-from paperpilot.web.task_store import TaskStore, UsedPaperInput
+from paperpilot.web.task_store import (
+    MessageRecord,
+    ResearchTask,
+    TaskStore,
+    UsedPaperInput,
+)
 
 from .research_agent import ResearchContractError, run_research_agent
 from .schemas import AnswerDraft, ConversationSummary, ResearchResult
@@ -100,6 +105,7 @@ def summarize_history(
         return {}
 
     context = runtime.context
+    _validate_runtime_binding(state, context)
     summary_model = context.model.with_structured_output(ConversationSummary)
     summary_input: list[AnyMessage] = [
         SystemMessage(
@@ -137,7 +143,9 @@ def research_evidence(
     runtime: Runtime[DeepReadingContext],
 ) -> DeepReadingState:
     """Run bounded research and checkpoint the complete JSON result."""
-    result = run_research_agent(state, runtime.context)
+    context = runtime.context
+    _validate_runtime_binding(state, context)
+    result = run_research_agent(state, context)
     return {"research_result": result.model_dump(mode="json")}
 
 
@@ -147,6 +155,7 @@ def prepare_primary_paper(
 ) -> DeepReadingState:
     """Prepare the business-authoritative primary paper for bounded retrieval."""
     context = runtime.context
+    _validate_runtime_binding(state, context)
     detail = _conversation_detail(context)
     primary = detail.primary_paper
     state_primary_id = _required_text(
@@ -208,6 +217,7 @@ def write_answer(
 ) -> DeepReadingState:
     """Create and validate a structured answer from checkpoint-safe inputs."""
     context = runtime.context
+    _validate_runtime_binding(state, context)
     result = _validated_research_result(state.get("research_result"))
     detail = _conversation_detail(context)
     primary_id = _required_text(state.get("primary_paper_id"), "primary_paper_id")
@@ -273,52 +283,52 @@ def publish_result(
 ) -> DeepReadingState:
     """Idempotently publish one validated answer and its actually used papers."""
     context = runtime.context
-    task_id = _required_text(state.get("current_task_id"), "current_task_id")
-    if task_id != context.task_id:
-        raise ResearchContractError(
-            "state current_task_id does not match runtime context"
+    task, user_message = _validate_runtime_binding(state, context)
+    candidate_result = _validated_research_result(state.get("research_result"))
+    candidate_draft = _validated_answer_draft(state.get("answer_draft"))
+    _validate_answer_citations(candidate_draft, candidate_result)
+
+    existing = context.task_store.get_task_message(task.id, "assistant")
+    if existing is None:
+        candidate_metadata = _publication_metadata(candidate_result, candidate_draft)
+        established = context.task_store.publish_conversation_result(
+            task_id=task.id,
+            content=candidate_draft.content,
+            metadata=candidate_metadata,
+            used_papers=[],
         )
-    user_message_id = _required_text(
-        state.get("current_user_message_id"),
-        "current_user_message_id",
-    )
-    if user_message_id != context.current_user_message_id:
-        raise ResearchContractError(
-            "state current_user_message_id does not match runtime context"
+        result, draft = _read_authoritative_publication(
+            established.message,
+            task=task,
+            user_message=user_message,
+        )
+    else:
+        result, draft = _read_authoritative_publication(
+            existing,
+            task=task,
+            user_message=user_message,
         )
 
-    result = _validated_research_result(state.get("research_result"))
-    draft = _validated_answer_draft(state.get("answer_draft"))
-    _validate_answer_citations(draft, result)
-    metadata = json.loads(
-        json.dumps(
-            {
-                "citations": [
-                    citation.model_dump(mode="json") for citation in draft.citations
-                ],
-                "result_quality": draft.result_quality,
-                "limitations": list(result.limitations),
-            },
-            ensure_ascii=False,
-        )
-    )
-    used_papers = [
-        UsedPaperInput(paper=paper_use.paper, role=paper_use.role)
-        for paper_use in result.used_papers
-    ]
     published = context.task_store.publish_conversation_result(
-        task_id=task_id,
+        task_id=task.id,
         content=draft.content,
-        metadata=metadata,
-        used_papers=used_papers,
+        metadata=_publication_metadata(result, draft),
+        used_papers=_used_paper_inputs(result),
+    )
+    result, draft = _read_authoritative_publication(
+        published.message,
+        task=task,
+        user_message=user_message,
     )
     return {
+        "research_result": result.model_dump(mode="json"),
+        "answer_draft": draft.model_dump(mode="json"),
         "published_message_id": published.message.id,
         "active_paper_ids": list(published.active_paper_ids),
         "messages": [
             {
                 "role": "assistant",
-                "content": draft.content,
+                "content": published.message.content,
                 "id": published.message.id,
             }
         ],
@@ -367,6 +377,50 @@ def _conversation_detail(context: DeepReadingContext) -> Any:
     if detail is None:
         raise ResearchContractError("conversation paper catalog is unavailable")
     return detail
+
+
+def _validate_runtime_binding(
+    state: DeepReadingState,
+    context: DeepReadingContext,
+) -> tuple[ResearchTask, MessageRecord]:
+    task_id = _required_text(context.task_id, "runtime task_id")
+    task = context.task_store.get_task(task_id, user_id=context.user_id)
+    if task is None:
+        raise ResearchContractError("runtime task is unavailable for the owner")
+    if task.id != task_id or task.user_id != context.user_id:
+        raise ResearchContractError("runtime task does not match the requested owner")
+    if task.conversation_id != context.conversation_id:
+        raise ResearchContractError("runtime task belongs to another conversation")
+    if task.base_checkpoint_id != context.base_checkpoint_id:
+        raise ResearchContractError(
+            "runtime task base checkpoint does not match context"
+        )
+    state_task_id = _required_text(state.get("current_task_id"), "current_task_id")
+    if state_task_id != task.id:
+        raise ResearchContractError("state current_task_id does not match runtime task")
+
+    message = context.task_store.get_task_message(task.id, "user")
+    if message is None:
+        raise ResearchContractError("runtime task user message is unavailable")
+    if message.id != context.current_user_message_id:
+        raise ResearchContractError("runtime task is bound to another user message")
+    if message.role != "user" or message.status != "complete":
+        raise ResearchContractError("runtime task user message is not complete")
+    if message.conversation_id != context.conversation_id:
+        raise ResearchContractError(
+            "runtime user message belongs to another conversation"
+        )
+    if message.task_id != task.id:
+        raise ResearchContractError("runtime user message belongs to another task")
+    state_message_id = _required_text(
+        state.get("current_user_message_id"),
+        "current_user_message_id",
+    )
+    if state_message_id != message.id:
+        raise ResearchContractError(
+            "state current_user_message_id does not match runtime user message"
+        )
+    return task, message
 
 
 def _required_text(value: object, field_name: str) -> str:
@@ -487,6 +541,70 @@ def _validate_answer_citations(
             raise ResearchContractError(
                 f"answer citation references unknown evidence: {citation.evidence_id}"
             )
+
+
+def _publication_metadata(
+    result: ResearchResult,
+    draft: AnswerDraft,
+) -> dict[str, object]:
+    return json.loads(
+        json.dumps(
+            {
+                "citations": [
+                    citation.model_dump(mode="json") for citation in draft.citations
+                ],
+                "result_quality": draft.result_quality,
+                "limitations": list(result.limitations),
+                "research_result": result.model_dump(mode="json"),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def _read_authoritative_publication(
+    message: MessageRecord,
+    *,
+    task: ResearchTask,
+    user_message: MessageRecord,
+) -> tuple[ResearchResult, AnswerDraft]:
+    if message.conversation_id != task.conversation_id:
+        raise ResearchContractError(
+            "persisted assistant belongs to another conversation"
+        )
+    if message.task_id != task.id:
+        raise ResearchContractError("persisted assistant belongs to another task")
+    if message.parent_message_id != user_message.id:
+        raise ResearchContractError("persisted assistant has an invalid parent")
+    if message.role != "assistant" or message.status != "complete":
+        raise ResearchContractError("persisted assistant is not complete")
+    if not isinstance(message.metadata, dict):
+        raise ResearchContractError("persisted assistant metadata is not an object")
+    try:
+        result = ResearchResult.model_validate(message.metadata["research_result"])
+        draft = AnswerDraft.model_validate(
+            {
+                "content": message.content,
+                "citations": message.metadata["citations"],
+                "result_quality": message.metadata["result_quality"],
+            }
+        )
+        limitations = message.metadata["limitations"]
+    except (KeyError, TypeError, ValidationError) as exc:
+        raise ResearchContractError("persisted assistant metadata is invalid") from exc
+    if limitations != result.limitations:
+        raise ResearchContractError(
+            "persisted assistant metadata limitations do not match research result"
+        )
+    _validate_answer_citations(draft, result)
+    return result, draft
+
+
+def _used_paper_inputs(result: ResearchResult) -> list[UsedPaperInput]:
+    return [
+        UsedPaperInput(paper=paper_use.paper, role=paper_use.role)
+        for paper_use in result.used_papers
+    ]
 
 
 def _paper_metadata(paper: object) -> dict[str, object]:
