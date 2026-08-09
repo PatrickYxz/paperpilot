@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from langchain.agents.structured_output import ToolStrategy
+from langchain.agents.structured_output import StructuredOutputError, ToolStrategy
 from langchain.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 
@@ -20,6 +20,7 @@ from paperpilot.deep_reading.research_agent import (
     run_research_agent,
 )
 from paperpilot.papers import PaperCandidate
+from paperpilot.tools.mcp_client import MCPTransportError
 
 
 PRIMARY = PaperCandidate(
@@ -115,7 +116,12 @@ class _AgentFactory:
         return self.agent
 
 
-def _evidence_payload(external_id: str, evidence_id: str) -> dict[str, object]:
+def _evidence_payload(
+    external_id: str,
+    evidence_id: str,
+    *,
+    best_score: float = 5.0,
+) -> dict[str, object]:
     return {
         "summary_text": "Planned retrieval completed.",
         "query_errors": [],
@@ -129,7 +135,7 @@ def _evidence_payload(external_id: str, evidence_id: str) -> dict[str, object]:
                     "paper_id": external_id,
                     "chunk_id": "chunk-1",
                     "chunk_text": f"Evidence from {external_id}",
-                    "best_score": 0.91,
+                    "best_score": best_score,
                     "matched_queries": [
                         {
                             "query_id": "q-1",
@@ -181,7 +187,7 @@ def _mcp_tools(
                     {"fresh_papers": [paper_id], "existing_papers": []}
                 )
             paper_id = arguments["paper_id"]
-            return json.dumps(_evidence_payload(paper_id, f"ev-{paper_id}"))
+            return json.dumps(_evidence_payload(paper_id, "ev_1"))
 
         return call
 
@@ -204,6 +210,7 @@ def _context(
     mcp_tools: dict[str, Tool] | None = None,
     search: Callable[[str, int], list[PaperCandidate]] | None = None,
     event_sink: Callable[[str, dict[str, object]], None] | None = None,
+    store: object | None = None,
 ) -> tuple[DeepReadingContext, _AgentFactory, list[tuple[str, dict[str, object]]]]:
     tools, mcp_calls = _mcp_tools() if mcp_tools is None else (mcp_tools, [])
     events: list[tuple[str, dict[str, object]]] = []
@@ -214,7 +221,7 @@ def _context(
         task_id="task-1",
         current_user_message_id="message-1",
         base_checkpoint_id="checkpoint-base",
-        task_store=_Store(),  # type: ignore[arg-type]
+        task_store=store or _Store(),  # type: ignore[arg-type]
         model=object(),
         mcp_tools=tools,
         paper_search=search or (lambda _query, _limit: [RELATED, UNUSED]),
@@ -234,6 +241,8 @@ STATE = {
 
 
 def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> None:
+    selected_ids: list[str] = []
+
     def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
         found = tools["search_related_papers"].invoke(
             {"query": "related method", "limit": 2}
@@ -254,14 +263,17 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
         assert retrieved["evidence_items"][0]["paper_external_id"] == (
             RELATED.external_id
         )
+        evidence_id = retrieved["evidence_items"][0]["id"]
+        assert evidence_id != "ev_1"
+        selected_ids.append(evidence_id)
         return {
             "structured_response": {
-                "selected_evidence_ids": [f"ev-{RELATED.external_id}"],
+                "selected_evidence_ids": [evidence_id],
                 "paper_uses": [
                     {
                         "external_id": RELATED.external_id,
                         "role": "comparison",
-                        "evidence_ids": [f"ev-{RELATED.external_id}"],
+                        "evidence_ids": [evidence_id],
                     }
                 ],
                 "limitations": ["Only one related paper was compared."],
@@ -274,9 +286,7 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
         STATE, context, create_agent_factory=factory
     )
 
-    assert [item.id for item in result.evidence_items] == [
-        f"ev-{RELATED.external_id}"
-    ]
+    assert [item.id for item in result.evidence_items] == selected_ids
     assert [item.paper.external_id for item in result.used_papers] == [
         RELATED.external_id
     ]
@@ -295,6 +305,7 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
     response_format = create_call["response_format"]
     assert isinstance(response_format, ToolStrategy)
     assert response_format.schema is AgentResearchDecision
+    assert response_format.handle_errors is False
     assert factory.agent is not None
     assert factory.agent.invocations[0][1] == {"recursion_limit": 12}
     assert mcp_calls == [
@@ -325,6 +336,129 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
             },
         ),
     ]
+
+
+def test_two_papers_with_pool_local_ev_1_receive_distinct_global_ids() -> None:
+    selected_ids: list[str] = []
+
+    def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
+        found = tools["search_related_papers"].invoke(
+            {"query": "two papers", "limit": 2}
+        )
+        paper_uses: list[dict[str, object]] = []
+        for candidate in found:
+            external_id = candidate["external_id"]
+            tools["prepare_paper"].invoke({"external_id": external_id})
+            retrieved = tools["retrieve_paper_evidence"].invoke(
+                {
+                    "question": "compare",
+                    "external_id": external_id,
+                    "top_k_each": 2,
+                    "summary_k": 2,
+                }
+            )
+            evidence_id = retrieved["evidence_items"][0]["id"]
+            assert retrieved["summary_item_ids"] == [evidence_id]
+            selected_ids.append(evidence_id)
+            paper_uses.append(
+                {
+                    "external_id": external_id,
+                    "role": "comparison",
+                    "evidence_ids": [evidence_id],
+                }
+            )
+        return {
+            "structured_response": {
+                "selected_evidence_ids": selected_ids,
+                "paper_uses": paper_uses,
+                "limitations": [],
+            }
+        }
+
+    context, factory, _calls = _context(behavior)
+
+    result = run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert len(selected_ids) == 2
+    assert len(set(selected_ids)) == 2
+    assert "ev_1" not in selected_ids
+    assert [item.id for item in result.evidence_items] == selected_ids
+    assert {item.paper_external_id for item in result.evidence_items} == {
+        RELATED.external_id,
+        UNUSED.external_id,
+    }
+
+
+@pytest.mark.parametrize(
+    ("raw_score", "expected"),
+    [(5.0, 0.5), (10.0, 1.0), (30.0, 1.0)],
+)
+def test_colbert_scores_are_normalized_to_schema_range(
+    raw_score: float,
+    expected: float,
+) -> None:
+    def retrieval(arguments: dict) -> str:
+        return json.dumps(
+            _evidence_payload(
+                arguments["paper_id"],
+                "ev_1",
+                best_score=raw_score,
+            )
+        )
+
+    mcp_tools, _calls = _mcp_tools(retrieval_result=retrieval)
+
+    def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
+        tools["prepare_paper"].invoke({"external_id": PRIMARY.external_id})
+        retrieved = tools["retrieve_paper_evidence"].invoke(
+            {
+                "question": "question",
+                "external_id": PRIMARY.external_id,
+                "top_k_each": 2,
+                "summary_k": 2,
+            }
+        )
+        assert retrieved["evidence_items"][0]["score"] == expected
+        return {
+            "structured_response": {
+                "selected_evidence_ids": [retrieved["evidence_items"][0]["id"]],
+                "paper_uses": [],
+                "limitations": [],
+            }
+        }
+
+    context, factory, _unused = _context(behavior, mcp_tools=mcp_tools)
+
+    result = run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert result.evidence_items[0].score == expected
+
+
+@pytest.mark.parametrize("raw_score", [-0.1, float("inf"), float("nan")])
+def test_colbert_scores_reject_negative_or_nonfinite_values(raw_score: float) -> None:
+    payload = _evidence_payload(
+        PRIMARY.external_id,
+        "ev_1",
+        best_score=raw_score,
+    )
+    mcp_tools, _calls = _mcp_tools(retrieval_result=json.dumps(payload))
+
+    def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
+        tools["prepare_paper"].invoke({"external_id": PRIMARY.external_id})
+        tools["retrieve_paper_evidence"].invoke(
+            {
+                "question": "question",
+                "external_id": PRIMARY.external_id,
+                "top_k_each": 2,
+                "summary_k": 2,
+            }
+        )
+        raise AssertionError("invalid score should have raised")
+
+    context, factory, _unused = _context(behavior, mcp_tools=mcp_tools)
+
+    with pytest.raises(ResearchContractError, match="score"):
+        run_research_agent(STATE, context, create_agent_factory=factory)
 
 
 def test_prepare_guard_accepts_trusted_primary_active_and_searched_ids() -> None:
@@ -384,7 +518,7 @@ def test_tool_events_are_bounded_and_do_not_include_downloaded_text() -> None:
 
     def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
         tools["prepare_paper"].invoke({"external_id": PRIMARY.external_id})
-        tools["retrieve_paper_evidence"].invoke(
+        retrieved = tools["retrieve_paper_evidence"].invoke(
             {
                 "question": "question",
                 "external_id": PRIMARY.external_id,
@@ -394,7 +528,7 @@ def test_tool_events_are_bounded_and_do_not_include_downloaded_text() -> None:
         )
         return {
             "structured_response": {
-                "selected_evidence_ids": [f"ev-{PRIMARY.external_id}"],
+                "selected_evidence_ids": [retrieved["evidence_items"][0]["id"]],
                 "paper_uses": [],
                 "limitations": [],
             }
@@ -425,6 +559,103 @@ def test_prepare_guard_rejects_untrusted_external_id_before_mcp_call() -> None:
     context, factory, mcp_calls = _context(behavior)
 
     with pytest.raises(ResearchContractError, match="not allowed"):
+        run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert mcp_calls == []
+
+
+def test_model_arxiv_url_is_normalized_before_downloader_call() -> None:
+    primary_url = f"https://arxiv.org/abs/{PRIMARY.external_id}"
+
+    def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
+        prepared = tools["prepare_paper"].invoke({"external_id": primary_url})
+        assert prepared["external_id"] == PRIMARY.external_id
+        return {
+            "structured_response": {
+                "selected_evidence_ids": [],
+                "paper_uses": [],
+                "limitations": [],
+            }
+        }
+
+    context, factory, mcp_calls = _context(behavior)
+
+    run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert mcp_calls[0] == (
+        "mcp__arxiv__download_paper",
+        {"arxiv_id": PRIMARY.external_id},
+    )
+
+
+def test_model_invalid_external_id_never_reaches_downloader() -> None:
+    def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
+        tools["prepare_paper"].invoke({"external_id": "../../outside"})
+        raise AssertionError("invalid arXiv ID should have raised")
+
+    context, factory, mcp_calls = _context(behavior)
+
+    with pytest.raises(ResearchContractError, match="valid arXiv"):
+        run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert mcp_calls == []
+
+
+def test_invalid_trusted_database_external_id_is_rejected_before_agent() -> None:
+    store = _Store()
+    store.detail.primary_paper.external_id = "../../outside"
+
+    def behavior(_tools: Mapping[str, Any], _attempt: int) -> object:
+        raise AssertionError("agent should not be created for invalid DB metadata")
+
+    context, factory, mcp_calls = _context(behavior, store=store)
+
+    with pytest.raises(ResearchContractError, match="valid arXiv"):
+        run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert factory.agent is None
+    assert mcp_calls == []
+
+
+def test_trusted_database_source_mismatch_is_rejected_before_agent() -> None:
+    store = _Store()
+    store.detail.primary_paper.source = "local"
+
+    context, factory, mcp_calls = _context(
+        lambda _tools, _attempt: {},
+        store=store,
+    )
+
+    with pytest.raises(ResearchContractError, match="source"):
+        run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert factory.agent is None
+    assert mcp_calls == []
+
+
+@pytest.mark.parametrize(
+    "bad_candidate",
+    [
+        RELATED.model_copy(update={"external_id": "../../outside"}),
+        {
+            **RELATED.model_dump(mode="json"),
+            "source": "local",
+        },
+    ],
+)
+def test_invalid_search_identity_never_reaches_downloader(
+    bad_candidate: object,
+) -> None:
+    def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
+        tools["search_related_papers"].invoke({"query": "unsafe", "limit": 1})
+        raise AssertionError("invalid search identity should have raised")
+
+    context, factory, mcp_calls = _context(
+        behavior,
+        search=lambda _query, _limit: [bad_candidate],  # type: ignore[list-item]
+    )
+
+    with pytest.raises(ResearchContractError, match="arXiv|source"):
         run_research_agent(STATE, context, create_agent_factory=factory)
 
     assert mcp_calls == []
@@ -615,6 +846,122 @@ def test_invalid_structured_response_is_attempted_at_most_twice() -> None:
     assert len(factory.agent.invocations) == 2
 
 
+def test_second_structured_attempt_can_idempotently_repeat_retrieval() -> None:
+    retrieved_ids: list[str] = []
+
+    def behavior(tools: Mapping[str, Any], attempt: int) -> object:
+        tools["search_related_papers"].invoke({"query": "related", "limit": 1})
+        tools["prepare_paper"].invoke({"external_id": RELATED.external_id})
+        retrieved = tools["retrieve_paper_evidence"].invoke(
+            {
+                "question": "compare",
+                "external_id": RELATED.external_id,
+                "top_k_each": 2,
+                "summary_k": 2,
+            }
+        )
+        evidence_id = retrieved["evidence_items"][0]["id"]
+        retrieved_ids.append(evidence_id)
+        if attempt == 1:
+            return {"structured_response": {"selected_evidence_ids": []}}
+        return {
+            "structured_response": {
+                "selected_evidence_ids": [evidence_id],
+                "paper_uses": [
+                    {
+                        "external_id": RELATED.external_id,
+                        "role": "comparison",
+                        "evidence_ids": [evidence_id],
+                    }
+                ],
+                "limitations": [],
+            }
+        }
+
+    context, factory, mcp_calls = _context(
+        behavior,
+        search=lambda _query, _limit: [RELATED],
+    )
+
+    result = run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert factory.agent is not None
+    assert len(factory.agent.invocations) == 2
+    assert retrieved_ids[0] == retrieved_ids[1]
+    assert [item.id for item in result.evidence_items] == [retrieved_ids[0]]
+    assert sum(
+        name == "mcp__colbert__planned_retrieval" for name, _args in mcp_calls
+    ) == 2
+
+
+def test_repeated_global_evidence_id_rejects_conflicting_content() -> None:
+    retrieval_count = 0
+
+    def retrieval(arguments: dict) -> str:
+        nonlocal retrieval_count
+        retrieval_count += 1
+        payload = _evidence_payload(arguments["paper_id"], "ev_1")
+        if retrieval_count == 2:
+            pool = payload["evidence_pool"]
+            assert isinstance(pool, dict)
+            pool["items"][0]["chunk_text"] = "conflicting evidence text"
+        return json.dumps(payload)
+
+    mcp_tools, _calls = _mcp_tools(retrieval_result=retrieval)
+
+    def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
+        tools["prepare_paper"].invoke({"external_id": PRIMARY.external_id})
+        for _index in range(2):
+            tools["retrieve_paper_evidence"].invoke(
+                {
+                    "question": "question",
+                    "external_id": PRIMARY.external_id,
+                    "top_k_each": 2,
+                    "summary_k": 2,
+                }
+            )
+        raise AssertionError("conflicting replay should have raised")
+
+    context, factory, _unused = _context(behavior, mcp_tools=mcp_tools)
+
+    with pytest.raises(ResearchContractError, match="conflicting evidence"):
+        run_research_agent(STATE, context, create_agent_factory=factory)
+
+
+def test_structured_output_error_is_retried_once_at_outer_boundary() -> None:
+    def behavior(_tools: Mapping[str, Any], attempt: int) -> object:
+        if attempt == 1:
+            raise StructuredOutputError("invalid structured tool output")
+        return {
+            "structured_response": {
+                "selected_evidence_ids": [],
+                "paper_uses": [],
+                "limitations": [],
+            }
+        }
+
+    context, factory, _calls = _context(behavior)
+
+    result = run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert result.evidence_items == []
+    assert factory.agent is not None
+    assert len(factory.agent.invocations) == 2
+
+
+def test_structured_output_error_stops_after_two_agent_invocations() -> None:
+    def behavior(_tools: Mapping[str, Any], _attempt: int) -> object:
+        raise StructuredOutputError("invalid structured tool output")
+
+    context, factory, _calls = _context(behavior)
+
+    with pytest.raises(DeepReadingTaskError, match="structured response"):
+        run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert factory.agent is not None
+    assert len(factory.agent.invocations) == 2
+
+
 def test_graph_recursion_exhaustion_becomes_deep_reading_task_error() -> None:
     def behavior(_tools: Mapping[str, Any], _attempt: int) -> object:
         raise GraphRecursionError("recursion limit reached")
@@ -635,6 +982,19 @@ def test_unrelated_contract_error_is_not_retried_or_wrapped() -> None:
     context, factory, _calls = _context(behavior)
 
     with pytest.raises(ResearchContractError, match="bad MCP contract"):
+        run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert factory.agent is not None
+    assert len(factory.agent.invocations) == 1
+
+
+def test_transport_error_is_not_retried_or_wrapped() -> None:
+    def behavior(_tools: Mapping[str, Any], _attempt: int) -> object:
+        raise MCPTransportError("connection lost")
+
+    context, factory, _calls = _context(behavior)
+
+    with pytest.raises(MCPTransportError, match="connection lost"):
         run_research_agent(STATE, context, create_agent_factory=factory)
 
     assert factory.agent is not None
