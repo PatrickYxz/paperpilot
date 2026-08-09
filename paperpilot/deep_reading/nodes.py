@@ -127,7 +127,10 @@ def summarize_history(
 
     context = runtime.context
     _validate_runtime_binding(state, context)
-    summary_model = context.model.with_structured_output(ConversationSummary)
+    summary_model = context.model.with_structured_output(
+        ConversationSummary,
+        include_raw=True,
+    )
     summary_input: list[AnyMessage] = [
         SystemMessage(
             content=(
@@ -149,9 +152,22 @@ def summarize_history(
         )
     summary_input.extend(state.get("messages", []))
 
-    raw_summary = summary_model.invoke(summary_input)
+    summary_envelope = summary_model.invoke(summary_input)
+    if not isinstance(summary_envelope, Mapping):
+        raise ResearchContractError(
+            "model returned an invalid conversation summary"
+        )
+    parsing_error = summary_envelope.get("parsing_error")
+    if isinstance(parsing_error, BaseException):
+        raise ResearchContractError(
+            "model returned an invalid conversation summary"
+        ) from parsing_error
+    if parsing_error is not None or "parsed" not in summary_envelope:
+        raise ResearchContractError(
+            "model returned an invalid conversation summary"
+        )
     try:
-        summary = ConversationSummary.model_validate(raw_summary)
+        summary = ConversationSummary.model_validate(summary_envelope["parsed"])
     except ValidationError as exc:
         raise ResearchContractError(
             "model returned an invalid conversation summary"
@@ -296,10 +312,22 @@ def write_answer(
         )
     )
 
-    structured_model = context.model.with_structured_output(AnswerDraft)
-    raw_draft = structured_model.invoke(model_input)
+    structured_model = context.model.with_structured_output(
+        AnswerDraft,
+        include_raw=True,
+    )
+    draft_envelope = structured_model.invoke(model_input)
+    if not isinstance(draft_envelope, Mapping):
+        raise ResearchContractError("model returned an invalid answer draft")
+    parsing_error = draft_envelope.get("parsing_error")
+    if isinstance(parsing_error, BaseException):
+        raise ResearchContractError(
+            "model returned an invalid answer draft"
+        ) from parsing_error
+    if parsing_error is not None or "parsed" not in draft_envelope:
+        raise ResearchContractError("model returned an invalid answer draft")
     try:
-        draft = AnswerDraft.model_validate(raw_draft)
+        draft = AnswerDraft.model_validate(draft_envelope["parsed"])
     except ValidationError as exc:
         raise ResearchContractError("model returned an invalid answer draft") from exc
     _validate_answer_citations(draft, result)

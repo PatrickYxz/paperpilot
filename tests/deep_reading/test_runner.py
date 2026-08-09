@@ -12,7 +12,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from langchain.messages import HumanMessage
+from langchain.messages import AIMessage, HumanMessage
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
@@ -29,6 +30,7 @@ from paperpilot.deep_reading.runner import (
     DeepReadingRunner,
     build_deep_reading_model,
 )
+from paperpilot.deep_reading.schemas import ConversationSummary
 from paperpilot.papers import PaperCandidate
 from paperpilot.tools.mcp_runtime import MCPRuntime
 from paperpilot.web.checkpoint import SqliteCheckpointRuntime
@@ -115,6 +117,50 @@ class _ModelFactory:
     def __call__(self) -> _RecordingModel:
         self.factory_calls += 1
         return _RecordingModel(self.calls, fail=self.fail)
+
+
+class _SummaryParserErrorModel:
+    def __init__(self, parser_error: ValidationError) -> None:
+        self.parser_error = parser_error
+        self.invoke_count = 0
+        self.structured_output_calls: list[tuple[type, bool]] = []
+
+    def with_structured_output(
+        self,
+        schema: type,
+        *,
+        include_raw: bool = False,
+    ) -> object:
+        self.structured_output_calls.append((schema, include_raw))
+        return self
+
+    def invoke(self, _model_input: object) -> object:
+        self.invoke_count += 1
+        return {
+            "raw": AIMessage(content="secret-token full-paper-text"),
+            "parsed": None,
+            "parsing_error": self.parser_error,
+        }
+
+
+class _ProviderFailureModel:
+    def __init__(self, failure: ConnectionError) -> None:
+        self.failure = failure
+        self.invoke_count = 0
+        self.structured_output_calls: list[tuple[type, bool]] = []
+
+    def with_structured_output(
+        self,
+        schema: type,
+        *,
+        include_raw: bool = False,
+    ) -> object:
+        self.structured_output_calls.append((schema, include_raw))
+        return self
+
+    def invoke(self, _model_input: object) -> object:
+        self.invoke_count += 1
+        raise self.failure
 
 
 @pytest.fixture(autouse=True)
@@ -1020,6 +1066,149 @@ def test_research_contract_error_is_terminal_and_public_event_is_safe(
         }
         assert "secret-token" not in str(failure.to_dict())
         assert "full-paper-text" not in str(failure.to_dict())
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_summary_parser_error_is_terminal_without_mcp_or_reexecution(
+    tmp_path,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_calls: list[str] = []
+
+    class CountingMCPClient(_FakeMCPClient):
+        def list_tools(self) -> list[Tool]:
+            tools = super().list_tools()
+            return [
+                Tool(
+                    name=tool.name,
+                    description=tool.description,
+                    input_schema=tool.input_schema,
+                    handler=lambda _args, name=tool.name: mcp_calls.append(name),
+                )
+                for tool in tools
+            ]
+
+    mcp_runtime = MCPRuntime(CountingMCPClient)
+    with pytest.raises(ValidationError) as parser_exc:
+        ConversationSummary.model_validate(
+            {
+                "confirmed_facts": ["secret-token full-paper-text", ""],
+                "paper_findings": [],
+                "comparison_context": [],
+                "open_questions": [],
+            }
+        )
+    model = _SummaryParserErrorModel(parser_exc.value)
+    factory_calls: list[str] = []
+
+    def model_factory() -> _SummaryParserErrorModel:
+        factory_calls.append("model")
+        return model
+
+    runner = DeepReadingRunner(
+        task_store=store,
+        checkpointer=checkpoint_runtime.saver,
+        mcp_runtime=mcp_runtime,
+        model_factory=model_factory,
+        paper_search=lambda _query, _limit: [],
+        summary_token_threshold=1,
+    )
+    turn = _new_turn(
+        store,
+        user,
+        conversation,
+        "A long question that must enter the summary parser boundary.",
+    )
+    try:
+        runner.run(turn.task.id)
+
+        task = store.get_task(turn.task.id, user_id=user.id)
+        assert task is not None and task.status == "failed"
+        events = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events is not None
+        failures = [event for event in events.items if event.type == "failed"]
+        assert len(failures) == 1
+        failure = failures[0]
+        assert failure.stage == "deep_reading_terminal"
+        assert failure.payload == {
+            "error_code": "research_contract_invalid",
+            "error_type": "ResearchContractError",
+        }
+        assert "secret-token" not in str(failure.to_dict())
+        assert "full-paper-text" not in str(failure.to_dict())
+        assert factory_calls == ["model"]
+        assert model.invoke_count == 1
+        assert model.structured_output_calls == [(ConversationSummary, True)]
+        assert mcp_calls == []
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_summary_provider_connection_error_escapes_runner_with_identity(
+    tmp_path,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    failure = ConnectionError("provider connection reset")
+    model = _ProviderFailureModel(failure)
+    factory_calls: list[str] = []
+
+    def model_factory() -> _ProviderFailureModel:
+        factory_calls.append("model")
+        return model
+
+    runner = DeepReadingRunner(
+        task_store=store,
+        checkpointer=checkpoint_runtime.saver,
+        mcp_runtime=mcp_runtime,
+        model_factory=model_factory,
+        paper_search=lambda _query, _limit: [],
+        summary_token_threshold=1,
+    )
+    turn = _new_turn(
+        store,
+        user,
+        conversation,
+        "A long question that reaches the provider exactly once.",
+    )
+    try:
+        with pytest.raises(ConnectionError) as exc_info:
+            runner.run(turn.task.id)
+
+        assert exc_info.value is failure
+        task = store.get_task(turn.task.id, user_id=user.id)
+        assert task is not None and task.status == "pending"
+        events = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events is not None
+        assert [event for event in events.items if event.type == "failed"] == []
+        assert factory_calls == ["model"]
+        assert model.invoke_count == 1
+        assert model.structured_output_calls == [(ConversationSummary, True)]
     finally:
         mcp_runtime.close()
         checkpoint_runtime.close()

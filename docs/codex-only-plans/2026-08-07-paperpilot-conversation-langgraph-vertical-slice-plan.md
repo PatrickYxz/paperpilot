@@ -1469,6 +1469,56 @@ Expected: 目标与完整 suite 0 failed；只保留既有 slow deselection/第�
 
 ---
 
+### Task 18: 收口 structured parser 的 terminal 错误边界
+
+**背景与用户裁决：**
+- Task 17 的唯一 scoped final re-review 已确认 Thread claim 和 Agent budget 完整关闭，但 terminal/transient taxonomy 仍有一个窄缺口：生产 `with_structured_output(Pydantic).invoke()` 会在节点内部解析时直接抛 `ValidationError`，而 `summarize_history()` 与 `write_answer()` 的 try 块从 invoke 之后才开始。
+- 该异常会穿过 `DeepReadingRunner.run()`，被 Task 16 误作基础设施异常执行最多 4 次，最后写成 generic `execution_retry_exhausted`。
+- 用户选择方案 1：新增一个窄范围 follow-up Task，只修两个节点并增加真实 parser-error 测试；不抽取通用 structured-output 包装层，不扩大到其他节点或新架构。
+
+**Files:**
+- Modify: `paperpilot/deep_reading/nodes.py`
+- Modify: `tests/deep_reading/test_nodes.py`
+- Modify: `tests/deep_reading/test_runner.py`（仅用于真实业务终态/零重试集成覆盖）
+- Modify: `docs/codex-only-plans/2026-08-07-paperpilot-conversation-langgraph-vertical-slice-plan.md`
+
+**Exact contract:**
+- `summarize_history()` 和 `write_answer()` 分别使用 `context.model.with_structured_output(ConversationSummary, include_raw=True)` 与 `...with_structured_output(AnswerDraft, include_raw=True)`。
+- 成功返回必须从 LangChain include-raw envelope 的 `parsed` 字段读取并再次用对应 Pydantic schema `model_validate()`；不得信任 raw model content。
+- envelope 的 `parsing_error` 非 `None` 时，分别转换为安全的 `ResearchContractError("model returned an invalid conversation summary")` 或 `ResearchContractError("model returned an invalid answer draft")`，并以原 parser error 作为 `__cause__`。
+- envelope 缺失、不是 Mapping、缺少/无效 `parsed` 或包含非法 `parsing_error` 类型时同样转换为对应安全 `ResearchContractError`；用户事件不得包含原始模型输出、parser 文本、论文正文、密钥或 traceback。
+- `with_structured_output()` 构造失败以及 `invoke()` 直接抛出的 `ConnectionError`、timeout、provider/network 或未知非 parser 基础设施异常必须保持原对象 identity 逃出；不得 broad-catch `Exception`/`ValueError`，不得按异常文本分类。
+- 通过现有 Task 17 hierarchy，真实 parser error 最终立即写一个 `type="failed"`、`stage="deep_reading_terminal"`、`error_code="research_contract_invalid"` 事件，且模型/MCP/Task execution retry 计数保持 1；不得被改写为 `execution_retry_exhausted`。
+- 不新增 helper/adapter/repository/dependency/schema/config，不修改 Research Agent budget、Celery/Thread retry、Graph edges、API 或 UI。
+
+- [ ] **Step 1: 先写真实 structured parser 与 provider passthrough 测试并验证 RED**
+
+至少覆盖 summary 和 answer 两个节点：使用 LangChain 真实 Pydantic structured parser 产生 invoke 内 `ValidationError`，证明当前异常逃出；使用 provider fake 直接抛一个带 identity 的 `ConnectionError`，证明修复后仍原对象逃出；使用 include-raw envelope 的 missing/invalid parsed/parsing_error 变体验证安全 `ResearchContractError`。RED 必须由缺少 include-raw/转换行为触发，而不是 fixture/导入错误。
+
+- [ ] **Step 2: 实现两个节点的显式 include-raw 解析边界**
+
+只在两个函数内部做局部、可读的 envelope 校验；provider invoke 保持在 terminal conversion catch 之外。允许为类型窄化使用 `Mapping`，但不抽取通用 helper 或新层次。
+
+- [ ] **Step 3: 增加 Runner/业务终态集成回归**
+
+用 fake model + 真实 SQLite/checkpointer 证明 parser error 立即将 Task 标为 failed、只有一个 `research_contract_invalid` 事件、零 MCP/重复 execution；provider `ConnectionError` 仍逃出并保持 identity，供 Task 16 retry。
+
+- [ ] **Step 4: 运行目标和完整门禁**
+
+Run: `LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m pytest tests/deep_reading/test_nodes.py tests/deep_reading/test_runner.py tests/web/test_task_executor.py tests/web/test_celery_worker.py -q`
+
+Run: `LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m pytest tests -q`
+
+Run: `git diff --check 3203635..HEAD`
+
+Expected: 目标与完整 suite 0 failed；只保留既有 slow deselection/第三方 warning；diff check exit 0。
+
+- [ ] **Step 5: 提交、任务复审和最终分支复审**
+
+提交一个窄范围 Task 18 commit；生成 `3203635..HEAD` task review package，确认 parser terminal/provider transient 双向边界和无新 Critical/Important。通过后重新生成 `bf003b2..HEAD` 整分支 review package，只检查 merge readiness 与已知 deferred minors，不重复修复已关闭范围。
+
+---
+
 ## 计划自检映射
 
 | 设计要求 | 实施 Task |
@@ -1481,11 +1531,12 @@ Expected: 目标与完整 suite 0 failed；只保留既有 slow deselection/第�
 | 主论文锚点 + 实际使用的关联论文 | 5、7、9、10 |
 | 幂等发布、两个崩溃窗口、Celery redelivery 与普通异常有限重试 | 7、11、12、16 |
 | Thread 原子所有权、terminal/transient 异常分类、Agent 调用与 token 预算 | 17 |
+| structured parser terminal 分类与 provider transient passthrough | 18 |
 | 连续追问、rollback 零模型调用、后续 fork | 11、13、15 |
 | 进度轮询 + 完整 Assistant Message | 13、14 |
 | 旧 `/api/tasks` 兼容 | 12、13、15 |
 | 不实现 Store/token streaming/cancel/Postgres | Global Constraints、15 |
-| 无付费模型自动测试与完整回归 | 1–17，重点 15、16、17 |
+| 无付费模型自动测试与完整回归 | 1–18，重点 15–18 |
 
 ## 执行停止条件
 

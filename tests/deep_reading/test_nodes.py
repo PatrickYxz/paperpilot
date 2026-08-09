@@ -7,12 +7,17 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 from threading import Barrier
 from types import SimpleNamespace
-from typing import Any, get_type_hints
+from typing import Any, Sequence, get_type_hints
 
 import pytest
 from langchain.messages import AIMessage, HumanMessage, RemoveMessage
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import BaseTool
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from langgraph.runtime import Runtime
+from pydantic import PrivateAttr, ValidationError
 
 import paperpilot.deep_reading.nodes as nodes_module
 from paperpilot.deep_reading.nodes import (
@@ -53,7 +58,7 @@ SUMMARY = ConversationSummary(
 
 
 class _StructuredModel:
-    def __init__(self, result: ConversationSummary | dict[str, object]) -> None:
+    def __init__(self, result: object) -> None:
         self.result = result
         self.invocations: list[object] = []
 
@@ -71,10 +76,139 @@ class _FakeModel:
         self.schemas: list[type[ConversationSummary]] = []
 
     def with_structured_output(
-        self, schema: type[ConversationSummary]
-    ) -> _StructuredModel:
+        self,
+        schema: type[ConversationSummary],
+        *,
+        include_raw: bool = False,
+    ) -> object:
         self.schemas.append(schema)
+        if include_raw:
+            return _IncludeRawStructuredModel(self.structured)
         return self.structured
+
+
+class _IncludeRawStructuredModel:
+    def __init__(self, structured: _StructuredModel) -> None:
+        self.structured = structured
+
+    def invoke(self, model_input: object) -> object:
+        parsed = self.structured.invoke(model_input)
+        return {
+            "raw": AIMessage(content=""),
+            "parsed": parsed,
+            "parsing_error": None,
+        }
+
+
+class _ParserBackedChatModel(BaseChatModel):
+    """Return one invalid tool call through LangChain's real Pydantic parser."""
+
+    invalid_args: dict[str, object]
+    _schema: type | None = PrivateAttr(default=None)
+    _invoke_count: int = PrivateAttr(default=0)
+    _structured_output_calls: list[tuple[type, bool]] = PrivateAttr(
+        default_factory=list
+    )
+
+    @property
+    def _llm_type(self) -> str:
+        return "parser-backed-test-model"
+
+    @property
+    def invoke_count(self) -> int:
+        return self._invoke_count
+
+    @property
+    def structured_output_calls(self) -> list[tuple[type, bool]]:
+        return list(self._structured_output_calls)
+
+    def with_structured_output(
+        self,
+        schema: type,
+        *,
+        include_raw: bool = False,
+        **kwargs: object,
+    ) -> object:
+        self._structured_output_calls.append((schema, include_raw))
+        return super().with_structured_output(
+            schema,
+            include_raw=include_raw,
+            **kwargs,
+        )
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> BaseChatModel:
+        del tool_choice, kwargs
+        tool = tools[0]
+        assert isinstance(tool, type)
+        self._schema = tool
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: object | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del messages, stop, run_manager, kwargs
+        self._invoke_count += 1
+        assert self._schema is not None
+        message = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": self._schema.__name__,
+                    "args": self.invalid_args,
+                    "id": "invalid-structured-call",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+class _EnvelopeModel:
+    def __init__(self, envelope: object) -> None:
+        self.structured = _StructuredModel(envelope)
+        self.calls: list[tuple[type, bool]] = []
+
+    def with_structured_output(
+        self,
+        schema: type,
+        *,
+        include_raw: bool = False,
+    ) -> _StructuredModel:
+        self.calls.append((schema, include_raw))
+        return self.structured
+
+
+class _ProviderFailureModel:
+    def __init__(self, failure: ConnectionError, *, fail_during: str) -> None:
+        self.failure = failure
+        self.fail_during = fail_during
+        self.calls: list[tuple[type, bool]] = []
+        self.invoke_count = 0
+
+    def with_structured_output(
+        self,
+        schema: type,
+        *,
+        include_raw: bool = False,
+    ) -> object:
+        self.calls.append((schema, include_raw))
+        if self.fail_during == "construction":
+            raise self.failure
+        return self
+
+    def invoke(self, _model_input: object) -> object:
+        self.invoke_count += 1
+        raise self.failure
 
 
 def _paper(
@@ -443,6 +577,144 @@ def test_summarize_history_writes_json_and_retains_recent_six_turns() -> None:
         "a-7",
         "message-current",
     ]
+
+
+@pytest.mark.parametrize(
+    ("node_name", "schema", "invalid_args", "expected_message"),
+    [
+        (
+            "summary",
+            ConversationSummary,
+            {
+                "confirmed_facts": [""],
+                "paper_findings": [],
+                "comparison_context": [],
+                "open_questions": [],
+            },
+            "model returned an invalid conversation summary",
+        ),
+        (
+            "answer",
+            AnswerDraft,
+            {
+                "content": "",
+                "citations": [],
+                "result_quality": "partial",
+            },
+            "model returned an invalid answer draft",
+        ),
+    ],
+)
+def test_structured_parser_validation_error_becomes_terminal_contract(
+    node_name: str,
+    schema: type,
+    invalid_args: dict[str, object],
+    expected_message: str,
+) -> None:
+    model = _ParserBackedChatModel(invalid_args=invalid_args)
+    if node_name == "summary":
+        call = lambda: summarize_history(  # noqa: E731
+            _bound_state(),
+            Runtime(context=_context(model, threshold=1)),
+        )
+    else:
+        call = lambda: write_answer(  # noqa: E731
+            _bound_state(
+                research_result=_research_result().model_dump(mode="json"),
+            ),
+            Runtime(context=_node_context(store=_NodeStore(), model=model)),
+        )
+
+    with pytest.raises(ResearchContractError, match=expected_message) as exc_info:
+        call()
+
+    assert isinstance(exc_info.value.__cause__, ValidationError)
+    assert model.invoke_count == 1
+    assert model.structured_output_calls == [(schema, True)]
+
+
+@pytest.mark.parametrize("node_name", ["summary", "answer"])
+@pytest.mark.parametrize(
+    "envelope_kind",
+    ["missing", "not_mapping", "missing_parsed", "invalid_parsed", "invalid_error"],
+)
+def test_structured_envelope_defects_become_safe_terminal_contract(
+    node_name: str,
+    envelope_kind: str,
+) -> None:
+    schema = ConversationSummary if node_name == "summary" else AnswerDraft
+    valid_parsed: object = (
+        SUMMARY
+        if node_name == "summary"
+        else AnswerDraft(content="Answer", citations=[], result_quality="partial")
+    )
+    if envelope_kind == "missing":
+        envelope: object = None
+    elif envelope_kind == "not_mapping":
+        envelope = []
+    elif envelope_kind == "missing_parsed":
+        envelope = {"raw": "secret raw output", "parsing_error": None}
+    elif envelope_kind == "invalid_parsed":
+        envelope = {"raw": "secret raw output", "parsed": {}, "parsing_error": None}
+    else:
+        envelope = {
+            "raw": "secret raw output",
+            "parsed": valid_parsed,
+            "parsing_error": "secret parser text",
+        }
+    model = _EnvelopeModel(envelope)
+
+    if node_name == "summary":
+        call = lambda: summarize_history(  # noqa: E731
+            _bound_state(),
+            Runtime(context=_context(model, threshold=1)),
+        )
+        expected_message = "model returned an invalid conversation summary"
+    else:
+        call = lambda: write_answer(  # noqa: E731
+            _bound_state(
+                research_result=_research_result().model_dump(mode="json"),
+            ),
+            Runtime(context=_node_context(store=_NodeStore(), model=model)),
+        )
+        expected_message = "model returned an invalid answer draft"
+
+    with pytest.raises(ResearchContractError, match=expected_message) as exc_info:
+        call()
+
+    assert "secret" not in str(exc_info.value)
+    assert model.calls == [(schema, True)]
+
+
+@pytest.mark.parametrize("node_name", ["summary", "answer"])
+@pytest.mark.parametrize("fail_during", ["construction", "invoke"])
+def test_structured_provider_failure_preserves_identity(
+    node_name: str,
+    fail_during: str,
+) -> None:
+    failure = ConnectionError(f"provider {fail_during}")
+    model = _ProviderFailureModel(failure, fail_during=fail_during)
+    if node_name == "summary":
+        call = lambda: summarize_history(  # noqa: E731
+            _bound_state(),
+            Runtime(context=_context(model, threshold=1)),
+        )
+        schema = ConversationSummary
+    else:
+        call = lambda: write_answer(  # noqa: E731
+            _bound_state(
+                research_result=_research_result().model_dump(mode="json"),
+            ),
+            Runtime(context=_node_context(store=_NodeStore(), model=model)),
+        )
+        schema = AnswerDraft
+
+    with pytest.raises(ConnectionError) as exc_info:
+        call()
+
+    assert exc_info.value is failure
+    assert model.calls == [(schema, True)]
+    assert model.invoke_count == (1 if fail_during == "invoke" else 0)
 
 
 def test_research_evidence_writes_complete_json_research_result(monkeypatch) -> None:
