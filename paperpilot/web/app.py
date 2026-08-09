@@ -10,12 +10,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from paperpilot.deep_reading.runner import DeepReadingRunner
+from paperpilot.tools.mcp_runtime import MCPRuntime
 from paperpilot.web.auth import (
     SESSION_COOKIE_NAME,
     AuthService,
     InvalidCredentialsError,
     UsernameAlreadyExistsError,
 )
+from paperpilot.web.checkpoint import SqliteCheckpointRuntime
 from paperpilot.web.config import WebRuntimeConfig
 from paperpilot.web.eval_summary import (
     build_eval_snapshot,
@@ -141,13 +144,46 @@ def create_app(
     workflow_runner: WorkflowRunner | None = None,
     task_executor: TaskExecutorLike | None = None,
     runtime_config: WebRuntimeConfig | None = None,
+    checkpoint_runtime: SqliteCheckpointRuntime | None = None,
+    mcp_runtime: MCPRuntime | None = None,
+    deep_reading_runner: DeepReadingRunner | None = None,
 ) -> FastAPI:
     config = runtime_config or WebRuntimeConfig.from_env()
     owns_task_store = task_store is None
     store = task_store if task_store is not None else TaskStore()
+    owns_checkpoint_runtime = False
+    owns_mcp_runtime = False
+    checkpoint = checkpoint_runtime
+    mcp = mcp_runtime
+    deep_runner = deep_reading_runner
+    if (
+        config.task_executor == "thread"
+        and workflow_runner is None
+        and deep_runner is None
+    ):
+        if checkpoint is None:
+            checkpoint_path = (
+                store.db_path.parent / "checkpoints.sqlite3"
+                if task_store is not None
+                else config.checkpoint_db_path
+            )
+            checkpoint = SqliteCheckpointRuntime.open(checkpoint_path)
+            owns_checkpoint_runtime = True
+        if mcp is None:
+            mcp = MCPRuntime()
+            owns_mcp_runtime = True
+        deep_runner = DeepReadingRunner(
+            task_store=store,
+            checkpointer=checkpoint.saver,
+            mcp_runtime=mcp,
+            summary_token_threshold=config.summary_token_threshold,
+            summary_recent_turns=config.summary_recent_turns,
+            research_recursion_limit=config.research_recursion_limit,
+        )
     runner = workflow_runner or WorkflowRunner(
         store,
         delay_seconds=simulation_delay_seconds,
+        deep_reading_runner=deep_runner,
     )
     executor = task_executor or build_task_executor(runner, config=config)
     auth = AuthService(store)
@@ -158,13 +194,22 @@ def create_app(
     app.state.runtime_config = config
     app.state.task_store = store
     app.state.task_executor = executor
+    app.state.deep_reading_runner = deep_runner
 
     def shutdown_resources() -> None:
         try:
             executor.shutdown()
         finally:
-            if owns_task_store:
-                store.close()
+            try:
+                if owns_checkpoint_runtime and checkpoint is not None:
+                    checkpoint.close()
+            finally:
+                try:
+                    if owns_mcp_runtime and mcp is not None:
+                        mcp.close()
+                finally:
+                    if owns_task_store:
+                        store.close()
 
     if hasattr(app, "add_event_handler"):
         app.add_event_handler("shutdown", shutdown_resources)

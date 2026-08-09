@@ -63,12 +63,26 @@ class DeepReadingRunner:
         mcp_runtime: MCPRuntime,
         model_factory: ModelFactory = build_deep_reading_model,
         paper_search: PaperSearch = search_arxiv_candidates,
+        summary_token_threshold: int = 32_000,
+        summary_recent_turns: int = 6,
+        research_recursion_limit: int = 12,
     ) -> None:
+        runtime_bounds = {
+            "summary_token_threshold": summary_token_threshold,
+            "summary_recent_turns": summary_recent_turns,
+            "research_recursion_limit": research_recursion_limit,
+        }
+        for name, value in runtime_bounds.items():
+            if value < 1:
+                raise ValueError(f"{name} must be positive")
         self._task_store = task_store
         self._checkpointer = checkpointer
         self._mcp_runtime = mcp_runtime
         self._model_factory = model_factory
         self._paper_search = paper_search
+        self._summary_token_threshold = summary_token_threshold
+        self._summary_recent_turns = summary_recent_turns
+        self._research_recursion_limit = research_recursion_limit
 
     def run(self, task_id: str) -> None:
         """Execute or recover one Task; only expected task errors become failed."""
@@ -159,6 +173,9 @@ class DeepReadingRunner:
                 event_sink=lambda event_type, payload: self._record_event(
                     task.id, event_type, payload
                 ),
+                summary_token_threshold=self._summary_token_threshold,
+                summary_recent_turns=self._summary_recent_turns,
+                research_recursion_limit=self._research_recursion_limit,
             )
             config: dict[str, dict[str, str]] = {
                 "configurable": {"thread_id": conversation.id}

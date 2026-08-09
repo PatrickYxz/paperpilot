@@ -3,22 +3,30 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
-from celery.signals import worker_process_shutdown
+from celery.signals import worker_process_init, worker_process_shutdown
 
 from paperpilot.conversation import run as run_conversation
+from paperpilot.deep_reading.runner import DeepReadingRunner
 from paperpilot.tools.mcp_runtime import MCPRuntime
 from paperpilot.web.celery_app import (
     EXECUTE_RESEARCH_TASK_NAME,
     celery_app,
 )
+from paperpilot.web.checkpoint import SqliteCheckpointRuntime
+from paperpilot.web.config import WebRuntimeConfig
 from paperpilot.web.task_executor import ExecutionMode
 from paperpilot.web.task_store import TaskStore
 from paperpilot.web.workflow import WorkflowRunner
 
 _runtime: MCPRuntime | None = None
+_checkpoint_runtime: SqliteCheckpointRuntime | None = None
 _runtime_lock = threading.Lock()
 _runtime_factory: Callable[[], MCPRuntime] = MCPRuntime
+_checkpoint_runtime_factory: Callable[[Path], SqliteCheckpointRuntime] = (
+    SqliteCheckpointRuntime.open
+)
 _store_factory: Callable[[], TaskStore] = TaskStore
 
 
@@ -28,6 +36,35 @@ def _get_runtime() -> MCPRuntime:
         if _runtime is None:
             _runtime = _runtime_factory()
         return _runtime
+
+
+def _get_checkpoint_runtime(path: Path) -> SqliteCheckpointRuntime:
+    global _checkpoint_runtime
+    with _runtime_lock:
+        if _checkpoint_runtime is None:
+            _checkpoint_runtime = _checkpoint_runtime_factory(path)
+        return _checkpoint_runtime
+
+
+def _build_deep_reading_runner(
+    store: TaskStore,
+    mcp_runtime: MCPRuntime,
+    checkpoint_runtime: SqliteCheckpointRuntime | None = None,
+) -> DeepReadingRunner:
+    config = WebRuntimeConfig.from_env()
+    checkpoint = (
+        checkpoint_runtime
+        if checkpoint_runtime is not None
+        else _get_checkpoint_runtime(config.checkpoint_db_path)
+    )
+    return DeepReadingRunner(
+        task_store=store,
+        checkpointer=checkpoint.saver,
+        mcp_runtime=mcp_runtime,
+        summary_token_threshold=config.summary_token_threshold,
+        summary_recent_turns=config.summary_recent_turns,
+        research_recursion_limit=config.research_recursion_limit,
+    )
 
 
 def _execute_research_task(
@@ -50,6 +87,17 @@ def _execute_research_task(
             return
 
         runtime = _get_runtime()
+
+        if claimed.conversation_id is not None:
+            deep_reading_runner = _build_deep_reading_runner(
+                store,
+                runtime,
+            )
+            WorkflowRunner(
+                store,
+                deep_reading_runner=deep_reading_runner,
+            ).run_real(task_id)
+            return
 
         def real_runner(query: str, *, on_event=None) -> list[dict]:
             return run_conversation(
@@ -81,10 +129,28 @@ def execute_research_task(
     )
 
 
+@worker_process_init.connect
+def _reset_worker_resources(**kwargs) -> None:
+    """Drop parent-process handles before the child can perform any work."""
+    del kwargs
+    global _runtime, _checkpoint_runtime
+    # This signal runs synchronously during child initialization. Do not acquire
+    # a lock copied from the parent: it could have been held by a vanished thread
+    # at fork time.
+    _runtime = None
+    _checkpoint_runtime = None
+
+
 @worker_process_shutdown.connect
 def _close_worker_runtime(**kwargs) -> None:
-    global _runtime
+    del kwargs
+    global _runtime, _checkpoint_runtime
     with _runtime_lock:
         runtime, _runtime = _runtime, None
-    if runtime is not None:
-        runtime.close()
+        checkpoint_runtime, _checkpoint_runtime = _checkpoint_runtime, None
+    try:
+        if checkpoint_runtime is not None:
+            checkpoint_runtime.close()
+    finally:
+        if runtime is not None:
+            runtime.close()

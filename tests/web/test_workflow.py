@@ -1,8 +1,47 @@
 """WorkflowRunner tests."""
 from __future__ import annotations
 
+import pytest
+
+from paperpilot.papers import PaperCandidate
 from paperpilot.web.task_store import TaskStore
 from paperpilot.web.workflow import WorkflowRunner
+
+
+PRIMARY_PAPER = PaperCandidate(
+    external_id="2401.12345v1",
+    title="Primary paper",
+    authors=["Ada Lovelace"],
+    abstract="Primary abstract.",
+    source_url="https://arxiv.org/abs/2401.12345v1",
+)
+
+
+class FakeDeepReadingRunner:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.calls: list[str] = []
+        self.error = error
+
+    def run(self, task_id: str) -> None:
+        self.calls.append(task_id)
+        if self.error is not None:
+            raise self.error
+
+
+def _conversation_task(store: TaskStore):
+    user = store.create_user(
+        username="alice",
+        password_hash="hash",
+        password_salt="salt",
+    )
+    conversation = store.create_conversation(user_id=user.id, paper=PRIMARY_PAPER)
+    return store.create_conversation_turn(
+        user_id=user.id,
+        conversation_id=conversation.id,
+        content="Compare the paper's evidence.",
+        depth="standard",
+        expected_head_message_id=None,
+    ).task
 
 
 def test_simulated_workflow_writes_events_status_and_artifact(tmp_path):
@@ -156,3 +195,65 @@ def test_real_workflow_failure_marks_task_failed(tmp_path):
     assert events[-1].type == "failed"
     assert events[-1].stage == "failure"
     assert artifacts == []
+
+
+def test_real_conversation_task_delegates_without_calling_legacy_runner(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    task = _conversation_task(store)
+    deep_runner = FakeDeepReadingRunner()
+    legacy_calls: list[str] = []
+    runner = WorkflowRunner(
+        store,
+        delay_seconds=0,
+        real_runner=lambda query: legacy_calls.append(query) or [],
+        deep_reading_runner=deep_runner,
+    )
+
+    runner.run_real(task.id)
+
+    assert deep_runner.calls == [task.id]
+    assert legacy_calls == []
+    assert store.get_task(task.id).status == "pending"
+    assert store.list_artifacts_page(
+        task.id,
+        user_id=task.user_id,
+        after_id=0,
+        limit=100,
+    ).items == []
+
+
+def test_real_conversation_task_requires_configured_deep_reading_runner(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    task = _conversation_task(store)
+    runner = WorkflowRunner(store, delay_seconds=0, real_runner=lambda _query: [])
+
+    with pytest.raises(RuntimeError, match="deep-reading runner"):
+        runner.run_real(task.id)
+
+    assert store.get_task(task.id).status == "pending"
+
+
+def test_unknown_deep_reading_failure_propagates_without_legacy_failure_write(
+    tmp_path,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    task = _conversation_task(store)
+    deep_runner = FakeDeepReadingRunner(error=RuntimeError("checkpoint unavailable"))
+    runner = WorkflowRunner(
+        store,
+        delay_seconds=0,
+        real_runner=lambda _query: [],
+        deep_reading_runner=deep_runner,
+    )
+
+    with pytest.raises(RuntimeError, match="checkpoint unavailable"):
+        runner.run_real(task.id)
+
+    assert store.get_task(task.id).status == "pending"
+    events = store.list_events_page(
+        task.id,
+        user_id=task.user_id,
+        after_id=0,
+        limit=100,
+    ).items
+    assert [event.type for event in events] == ["queued"]

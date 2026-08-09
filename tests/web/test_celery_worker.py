@@ -20,11 +20,15 @@ class RuntimeFactory:
 
 
 class ClosableRuntime:
-    def __init__(self) -> None:
+    def __init__(self, name: str = "runtime", close_order=None) -> None:
+        self.name = name
+        self.close_order = close_order
         self.close_count = 0
 
     def close(self) -> None:
         self.close_count += 1
+        if self.close_order is not None:
+            self.close_order.append(self.name)
 
 
 class TrackingTaskStore(TaskStore):
@@ -187,10 +191,44 @@ def test_only_redelivered_message_can_recover_running_task(tmp_path, monkeypatch
 
 
 def test_worker_shutdown_closes_and_forgets_runtime(monkeypatch):
-    runtime = ClosableRuntime()
+    close_order: list[str] = []
+    runtime = ClosableRuntime("mcp", close_order)
+    checkpoint_runtime = ClosableRuntime("checkpoint", close_order)
     monkeypatch.setattr(worker_tasks, "_runtime", runtime)
+    monkeypatch.setattr(
+        worker_tasks,
+        "_checkpoint_runtime",
+        checkpoint_runtime,
+        raising=False,
+    )
 
     worker_tasks._close_worker_runtime()
 
     assert runtime.close_count == 1
+    assert checkpoint_runtime.close_count == 1
+    assert close_order == ["checkpoint", "mcp"]
     assert worker_tasks._runtime is None
+    assert worker_tasks._checkpoint_runtime is None
+
+    worker_tasks._close_worker_runtime()
+    assert runtime.close_count == 1
+    assert checkpoint_runtime.close_count == 1
+
+
+def test_worker_process_init_forgets_parent_process_resources(monkeypatch):
+    parent_mcp = ClosableRuntime("mcp")
+    parent_checkpoint = ClosableRuntime("checkpoint")
+    monkeypatch.setattr(worker_tasks, "_runtime", parent_mcp)
+    monkeypatch.setattr(
+        worker_tasks,
+        "_checkpoint_runtime",
+        parent_checkpoint,
+        raising=False,
+    )
+
+    worker_tasks._reset_worker_resources()
+
+    assert worker_tasks._runtime is None
+    assert worker_tasks._checkpoint_runtime is None
+    assert parent_mcp.close_count == 0
+    assert parent_checkpoint.close_count == 0

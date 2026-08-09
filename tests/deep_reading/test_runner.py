@@ -232,6 +232,76 @@ def test_success_finalizes_business_head_and_exposes_frozen_checkpoint(tmp_path)
         store.close()
 
 
+def test_runner_passes_custom_runtime_bounds_into_graph_context(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    seen_bounds: list[tuple[int, int, int]] = []
+
+    def record_context(_state, runtime):
+        context = runtime.context
+        seen_bounds.append(
+            (
+                context.summary_token_threshold,
+                context.summary_recent_turns,
+                context.research_recursion_limit,
+            )
+        )
+        return {
+            "research_result": {
+                "evidence_items": [],
+                "used_papers": [],
+                "limitations": ["bounded test"],
+            }
+        }
+
+    monkeypatch.setattr(graph_module, "research_evidence", record_context)
+    runner = DeepReadingRunner(
+        task_store=store,
+        checkpointer=checkpoint_runtime.saver,
+        mcp_runtime=mcp_runtime,
+        model_factory=_ModelFactory([]),
+        paper_search=lambda _query, _limit: [],
+        summary_token_threshold=1234,
+        summary_recent_turns=3,
+        research_recursion_limit=9,
+    )
+    try:
+        turn = _new_turn(store, user, conversation, "Use custom runtime bounds")
+        runner.run(turn.task.id)
+
+        assert seen_bounds == [(1234, 3, 9)]
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "invalid_kwargs",
+    [
+        {"summary_token_threshold": 0},
+        {"summary_recent_turns": 0},
+        {"research_recursion_limit": 0},
+    ],
+)
+def test_runner_rejects_non_positive_runtime_bounds(invalid_kwargs) -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        DeepReadingRunner(
+            task_store=object(),
+            checkpointer=object(),
+            mcp_runtime=object(),
+            **invalid_kwargs,
+        )
+
+
 def test_restart_and_second_turn_preserve_first_turn_messages(tmp_path) -> None:
     business_path = tmp_path / "business.sqlite3"
     checkpoint_path = tmp_path / "checkpoints.sqlite3"

@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import time
 from inspect import Parameter, signature
-from typing import Callable
+from typing import Callable, Protocol
 
 from paperpilot.web.event_mapper import map_paperpilot_event
 from paperpilot.web.task_store import TaskStore
 
 RealRunner = Callable[..., list[dict]]
+
+
+class DeepReadingRunnerLike(Protocol):
+    def run(self, task_id: str) -> None: ...
 
 
 class WorkflowRunner:
@@ -20,10 +24,12 @@ class WorkflowRunner:
         *,
         delay_seconds: float = 0.4,
         real_runner: RealRunner | None = None,
+        deep_reading_runner: DeepReadingRunnerLike | None = None,
     ) -> None:
         self.store = store
         self.delay_seconds = delay_seconds
         self.real_runner = real_runner or _default_real_runner
+        self.deep_reading_runner = deep_reading_runner
 
     def run_simulated(self, task_id: str) -> None:
         """Run a placeholder workflow that exercises the task boundary."""
@@ -90,9 +96,20 @@ class WorkflowRunner:
             )
 
     def run_real(self, task_id: str) -> None:
-        """Run the existing PaperPilot one-shot agent and persist its result."""
+        """Route conversation work to LangGraph, or run the legacy one-shot agent."""
+        task = self.store.get_task(task_id)
+        if task is not None and task.conversation_id is not None:
+            if self.deep_reading_runner is None:
+                raise RuntimeError(
+                    "conversation task requires a configured deep-reading runner"
+                )
+            # DeepReadingRunner deliberately lets infrastructure failures escape so
+            # Celery can redeliver them. Keep this call outside the legacy broad
+            # exception boundary below.
+            self.deep_reading_runner.run(task_id)
+            return
+
         try:
-            task = self.store.get_task(task_id)
             if task is None:
                 raise ValueError(f"task not found: {task_id}")
 
