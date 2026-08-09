@@ -20,6 +20,9 @@ def test_runtime_config_defaults_are_local_and_bounded():
     assert config.slow_request_ms == 1000
     assert config.environment == "development"
     assert config.checkpoint_db_path == Path("data/langgraph/checkpoints.sqlite3")
+    assert config.summary_token_threshold == 32_000
+    assert config.summary_recent_turns == 6
+    assert config.research_recursion_limit == 12
 
 
 def test_runtime_config_accepts_explicit_overrides():
@@ -34,6 +37,9 @@ def test_runtime_config_accepts_explicit_overrides():
             "PAPERPILOT_SLOW_REQUEST_MS": "250",
             "PAPERPILOT_ENV": "test",
             "PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH": "/tmp/paperpilot-checkpoints.sqlite3",
+            "PAPERPILOT_SUMMARY_TOKEN_THRESHOLD": "64000",
+            "PAPERPILOT_SUMMARY_RECENT_TURNS": "8",
+            "PAPERPILOT_RESEARCH_RECURSION_LIMIT": "20",
         }
     )
 
@@ -46,6 +52,9 @@ def test_runtime_config_accepts_explicit_overrides():
     assert config.slow_request_ms == 250
     assert config.environment == "test"
     assert config.checkpoint_db_path == Path("/tmp/paperpilot-checkpoints.sqlite3")
+    assert config.summary_token_threshold == 64_000
+    assert config.summary_recent_turns == 8
+    assert config.research_recursion_limit == 20
 
 
 @pytest.mark.parametrize(
@@ -60,6 +69,22 @@ def test_runtime_config_accepts_explicit_overrides():
         ("PAPERPILOT_LOG_FORMAT", "yaml", "PAPERPILOT_LOG_FORMAT"),
         ("PAPERPILOT_SLOW_REQUEST_MS", "0", "PAPERPILOT_SLOW_REQUEST_MS"),
         ("PAPERPILOT_ENV", "   ", "PAPERPILOT_ENV"),
+        (
+            "PAPERPILOT_SUMMARY_TOKEN_THRESHOLD",
+            "0",
+            "PAPERPILOT_SUMMARY_TOKEN_THRESHOLD",
+        ),
+        (
+            "PAPERPILOT_SUMMARY_TOKEN_THRESHOLD",
+            "many",
+            "PAPERPILOT_SUMMARY_TOKEN_THRESHOLD",
+        ),
+        ("PAPERPILOT_SUMMARY_RECENT_TURNS", "0", "PAPERPILOT_SUMMARY_RECENT_TURNS"),
+        (
+            "PAPERPILOT_RESEARCH_RECURSION_LIMIT",
+            "0",
+            "PAPERPILOT_RESEARCH_RECURSION_LIMIT",
+        ),
     ],
 )
 def test_runtime_config_rejects_invalid_values(name, value, message):

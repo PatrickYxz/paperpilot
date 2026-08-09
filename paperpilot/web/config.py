@@ -22,6 +22,9 @@ class WebRuntimeConfig:
     slow_request_ms: int = 1000
     environment: str = "development"
     checkpoint_db_path: Path = Path("data/langgraph/checkpoints.sqlite3")
+    summary_token_threshold: int = 32_000
+    summary_recent_turns: int = 6
+    research_recursion_limit: int = 12
 
     @classmethod
     def from_env(
@@ -78,6 +81,24 @@ class WebRuntimeConfig:
                     "PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH",
                     "data/langgraph/checkpoints.sqlite3",
                 ).strip()
+            ),
+            summary_token_threshold=_read_int(
+                values,
+                "PAPERPILOT_SUMMARY_TOKEN_THRESHOLD",
+                default=32_000,
+                minimum=1,
+            ),
+            summary_recent_turns=_read_int(
+                values,
+                "PAPERPILOT_SUMMARY_RECENT_TURNS",
+                default=6,
+                minimum=1,
+            ),
+            research_recursion_limit=_read_int(
+                values,
+                "PAPERPILOT_RESEARCH_RECURSION_LIMIT",
+                default=12,
+                minimum=1,
             ),
         )
 
