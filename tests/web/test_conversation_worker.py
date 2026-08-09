@@ -34,8 +34,13 @@ class FakeMCPRuntime:
         close_error: Exception | None = None,
     ) -> None:
         self.close_count = 0
+        self.lease_calls = 0
         self.close_order = close_order
         self.close_error = close_error
+
+    def lease_tools(self):  # pragma: no cover - Web reader must never start MCP
+        self.lease_calls += 1
+        raise AssertionError("Web checkpoint reader started MCP")
 
     def close(self) -> None:
         self.close_count += 1
@@ -56,6 +61,9 @@ class FakeCheckpointRuntime:
         self.close_count = 0
         self.close_order = close_order
         self.close_error = close_error
+
+    def check_health(self) -> None:
+        pass
 
     def close(self) -> None:
         self.close_count += 1
@@ -437,34 +445,31 @@ def test_app_default_runtime_uses_injected_store_directory_and_closes_in_order(
     store.close()
 
 
-def test_injected_executor_does_not_create_local_deep_reading_resources(
+def test_injected_executor_creates_model_free_api_resources_and_closes_owned(
     tmp_path,
     monkeypatch,
 ):
     store = TaskStore(tmp_path / "tasks.sqlite3")
     close_order: list[str] = []
     executor = RecordingExecutor(close_order)
+    checkpoint = FakeCheckpointRuntime(close_order)
+    mcp = FakeMCPRuntime(close_order)
+    builds: list[dict[str, object]] = []
     monkeypatch.setattr(
         app_module.SqliteCheckpointRuntime,
         "open",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("injected executor opened checkpoint")
-        ),
+        lambda _path: checkpoint,
     )
-    monkeypatch.setattr(
-        app_module,
-        "MCPRuntime",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("injected executor constructed MCP runtime")
-        ),
-    )
-    monkeypatch.setattr(
-        app_module,
-        "DeepReadingRunner",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("injected executor constructed DeepReadingRunner")
-        ),
-    )
+    monkeypatch.setattr(app_module, "MCPRuntime", lambda: mcp)
+
+    class RecordingDeepRunner:
+        def __init__(self, **kwargs) -> None:
+            builds.append(kwargs)
+
+        def run(self, task_id: str) -> None:  # pragma: no cover
+            raise AssertionError(f"Web API reader executed model task {task_id}")
+
+    monkeypatch.setattr(app_module, "DeepReadingRunner", RecordingDeepRunner)
 
     with TestClient(
         create_app(
@@ -473,9 +478,15 @@ def test_injected_executor_does_not_create_local_deep_reading_resources(
             runtime_config=WebRuntimeConfig(task_executor="thread"),
         )
     ) as client:
-        assert client.app.state.deep_reading_runner is None
+        assert isinstance(client.app.state.deep_reading_runner, RecordingDeepRunner)
+        assert client.get("/health/ready").status_code == 200
 
-    assert close_order == ["executor"]
+    assert len(builds) == 1
+    assert builds[0]["task_store"] is store
+    assert builds[0]["checkpointer"] is checkpoint.saver
+    assert builds[0]["mcp_runtime"] is mcp
+    assert mcp.lease_calls == 0
+    assert close_order == ["executor", "checkpoint", "mcp"]
     store.close()
 
 
@@ -640,32 +651,30 @@ def test_app_does_not_close_injected_deep_reading_resources(tmp_path):
     store.close()
 
 
-def test_celery_web_parent_does_not_create_deep_reading_resources(
+def test_celery_web_parent_owns_model_free_checkpoint_reader_resources(
     tmp_path,
     monkeypatch,
 ):
     store = TaskStore(tmp_path / "tasks.sqlite3")
+    close_order: list[str] = []
+    checkpoint = FakeCheckpointRuntime(close_order)
+    mcp = FakeMCPRuntime(close_order)
+    builds: list[dict[str, object]] = []
     monkeypatch.setattr(
         app_module.SqliteCheckpointRuntime,
         "open",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("Celery Web parent opened checkpoint")
-        ),
+        lambda _path: checkpoint,
     )
-    monkeypatch.setattr(
-        app_module,
-        "MCPRuntime",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("Celery Web parent constructed MCP runtime")
-        ),
-    )
-    monkeypatch.setattr(
-        app_module,
-        "DeepReadingRunner",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("Celery Web parent constructed DeepReadingRunner")
-        ),
-    )
+    monkeypatch.setattr(app_module, "MCPRuntime", lambda: mcp)
+
+    class RecordingDeepRunner:
+        def __init__(self, **kwargs) -> None:
+            builds.append(kwargs)
+
+        def run(self, task_id: str) -> None:  # pragma: no cover
+            raise AssertionError(f"Celery Web parent executed model task {task_id}")
+
+    monkeypatch.setattr(app_module, "DeepReadingRunner", RecordingDeepRunner)
 
     with TestClient(
         create_app(
@@ -673,6 +682,14 @@ def test_celery_web_parent_does_not_create_deep_reading_resources(
             runtime_config=WebRuntimeConfig(task_executor="celery"),
         )
     ) as client:
-        assert client.app.state.deep_reading_runner is None
+        assert isinstance(client.app.state.deep_reading_runner, RecordingDeepRunner)
+        assert client.get("/health/ready").status_code == 200
 
+    assert len(builds) == 1
+    assert builds[0]["task_store"] is store
+    assert builds[0]["checkpointer"] is checkpoint.saver
+    assert builds[0]["mcp_runtime"] is mcp
+    assert mcp.lease_calls == 0
+    assert checkpoint.close_count == 1
+    assert mcp.close_count == 1
     store.close()

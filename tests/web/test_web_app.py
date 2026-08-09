@@ -122,6 +122,20 @@ class FailingHealthStore(TaskStore):
         raise sqlite3.OperationalError("database unavailable")
 
 
+class FailingHealthCheckpoint:
+    saver = object()
+
+    def __init__(self) -> None:
+        self.health_calls = 0
+
+    def check_health(self) -> None:
+        self.health_calls += 1
+        raise sqlite3.OperationalError("checkpoint unavailable")
+
+    def close(self) -> None:
+        pass
+
+
 class TrackingTaskStore(TaskStore):
     def __init__(self, db_path) -> None:
         super().__init__(db_path)
@@ -388,8 +402,44 @@ def test_ready_fails_for_database_but_live_remains_ok(tmp_path):
     assert response.status_code == 503
     assert response.json() == {
         "status": "not_ready",
-        "checks": {"database": "failed", "executor": "ok"},
+        "checks": {
+            "database": "failed",
+            "checkpoint": "ok",
+            "executor": "ok",
+        },
     }
+
+
+def test_ready_fails_for_checkpoint_but_live_does_not_probe_it(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    runner = WorkflowRunner(store, delay_seconds=0)
+    executor = SynchronousTaskExecutor(runner)
+    checkpoint = FailingHealthCheckpoint()
+    client = TestClient(
+        create_app(
+            store,
+            workflow_runner=runner,
+            task_executor=executor,
+            runtime_config=WebRuntimeConfig(),
+            checkpoint_runtime=checkpoint,
+            deep_reading_runner=object(),
+        )
+    )
+
+    assert client.get("/health/live").json() == {"status": "ok"}
+    assert checkpoint.health_calls == 0
+    response = client.get("/health/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "not_ready",
+        "checks": {
+            "database": "ok",
+            "checkpoint": "failed",
+            "executor": "ok",
+        },
+    }
+    assert checkpoint.health_calls == 1
 
 
 def test_ready_fails_after_executor_shutdown(tmp_path):
@@ -410,6 +460,7 @@ def test_ready_fails_after_executor_shutdown(tmp_path):
     assert response.status_code == 503
     assert response.json()["checks"] == {
         "database": "ok",
+        "checkpoint": "ok",
         "executor": "failed",
     }
 

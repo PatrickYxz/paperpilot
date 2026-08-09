@@ -21,6 +21,11 @@ from paperpilot.web.auth import (
 )
 from paperpilot.web.checkpoint import SqliteCheckpointRuntime
 from paperpilot.web.config import WebRuntimeConfig
+from paperpilot.web.conversation_routes import (
+    PaperSearch,
+    create_conversation_router,
+    default_web_paper_search,
+)
 from paperpilot.web.eval_summary import (
     build_eval_snapshot,
     list_calibration_candidates,
@@ -176,6 +181,7 @@ def create_app(
     checkpoint_runtime: SqliteCheckpointRuntime | None = None,
     mcp_runtime: MCPRuntime | None = None,
     deep_reading_runner: DeepReadingRunner | None = None,
+    paper_search: PaperSearch | None = None,
 ) -> FastAPI:
     owned_resources = _OwnedAppResources()
     try:
@@ -188,6 +194,7 @@ def create_app(
             checkpoint_runtime=checkpoint_runtime,
             mcp_runtime=mcp_runtime,
             deep_reading_runner=deep_reading_runner,
+            paper_search=paper_search,
             owned_resources=owned_resources,
         )
     except BaseException:
@@ -205,6 +212,7 @@ def _create_app(
     checkpoint_runtime: SqliteCheckpointRuntime | None = None,
     mcp_runtime: MCPRuntime | None = None,
     deep_reading_runner: DeepReadingRunner | None = None,
+    paper_search: PaperSearch | None = None,
     owned_resources: _OwnedAppResources,
 ) -> FastAPI:
     config = runtime_config or WebRuntimeConfig.from_env()
@@ -217,21 +225,16 @@ def _create_app(
     checkpoint = checkpoint_runtime
     mcp = mcp_runtime
     deep_runner = deep_reading_runner
-    if (
-        config.task_executor == "thread"
-        and workflow_runner is None
-        and task_executor is None
-        and deep_runner is None
-    ):
-        if checkpoint is None:
-            checkpoint_path = (
-                store.db_path.parent / "checkpoints.sqlite3"
-                if task_store is not None
-                else config.checkpoint_db_path
-            )
-            checkpoint = SqliteCheckpointRuntime.open(checkpoint_path)
-            owns_checkpoint_runtime = True
-            owned_resources.checkpoint = checkpoint
+    if checkpoint is None:
+        checkpoint_path = (
+            store.db_path.parent / "checkpoints.sqlite3"
+            if task_store is not None
+            else config.checkpoint_db_path
+        )
+        checkpoint = SqliteCheckpointRuntime.open(checkpoint_path)
+        owns_checkpoint_runtime = True
+        owned_resources.checkpoint = checkpoint
+    if deep_runner is None:
         if mcp is None:
             mcp = MCPRuntime()
             owns_mcp_runtime = True
@@ -262,6 +265,7 @@ def _create_app(
     app.state.runtime_config = config
     app.state.task_store = store
     app.state.task_executor = executor
+    app.state.checkpoint_runtime = checkpoint
     app.state.deep_reading_runner = deep_runner
 
     def shutdown_resources() -> None:
@@ -299,6 +303,16 @@ def _create_app(
         request.state.user_id = user.id
         return user
 
+    app.include_router(
+        create_conversation_router(
+            store=store,
+            executor=executor,
+            deep_reading_runner=deep_runner,
+            require_user=require_user,
+            paper_search=paper_search or default_web_paper_search,
+        )
+    )
+
     def set_session_cookie(response: Response, token: str) -> None:
         response.set_cookie(
             key=SESSION_COOKIE_NAME,
@@ -318,11 +332,15 @@ def _create_app(
 
     @app.get("/health/ready", include_in_schema=False)
     def health_ready() -> Response:
-        checks = {"database": "ok", "executor": "ok"}
+        checks = {"database": "ok", "checkpoint": "ok", "executor": "ok"}
         try:
             store.check_health()
         except Exception:
             checks["database"] = "failed"
+        try:
+            checkpoint.check_health()
+        except Exception:
+            checks["checkpoint"] = "failed"
         if executor.is_shutdown:
             checks["executor"] = "failed"
         if "failed" in checks.values():
