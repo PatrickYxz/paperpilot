@@ -28,11 +28,88 @@ def test_readme_documents_celery_runtime_commands():
 
     assert "PAPERPILOT_TASK_EXECUTOR=celery" in text
     assert "PAPERPILOT_TASK_DB_PATH" in text
+    assert "PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH" in text
     assert "PAPERPILOT_REDIS_VISIBILITY_TIMEOUT_SECONDS" in text
     assert "at-least-once" in text
     assert "transactional outbox" in text
     assert "docker compose up -d redis" in text
     assert "paperpilot.web.celery_app:celery_app worker" in text
+    assert "20260807_0002" in text
+    assert "database`, `checkpoint`, and `executor" in text
+    assert "`running`, `completed`, or `failed`" in text
+
+    startup_commands = (
+        "uv pip sync requirements-lock.txt --python .venv/bin/python",
+        "./.venv/bin/python -m alembic -c alembic.ini upgrade head",
+        "LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python "
+        "-m paperpilot.web.checkpoint --setup",
+        "./.venv/bin/celery -A paperpilot.web.celery_app:celery_app "
+        "worker --loglevel=INFO",
+        "./.venv/bin/uvicorn paperpilot.web.app:app "
+        "--host 127.0.0.1 --port 8000",
+    )
+    positions = [text.index(command) for command in startup_commands]
+    assert positions == sorted(positions)
+
+
+def test_env_example_declares_both_sqlite_paths_and_executor_examples():
+    text = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+
+    for value in (
+        "PAPERPILOT_TASK_DB_PATH=data/web/tasks.sqlite3",
+        "PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH=data/langgraph/checkpoints.sqlite3",
+        "LANGGRAPH_STRICT_MSGPACK=true",
+        "PAPERPILOT_TASK_EXECUTOR=thread",
+        "PAPERPILOT_TASK_EXECUTOR=celery",
+        "PAPERPILOT_CELERY_BROKER_URL=redis://127.0.0.1:6379/0",
+    ):
+        assert value in text
+
+
+def test_readme_exports_dotenv_before_starting_celery_runtime():
+    text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+
+    assert "does not load `.env` automatically" in text
+    dotenv_commands = (
+        "cp .env.example .env",
+        "set -a",
+        "source .env",
+        "set +a",
+        "uv pip sync requirements-lock.txt --python .venv/bin/python",
+    )
+    positions = [text.index(command) for command in dotenv_commands]
+    assert positions == sorted(positions)
+    assert "set `PAPERPILOT_TASK_EXECUTOR=celery` in `.env`" in normalized
+    assert text.index("docker compose up -d redis") < text.index(
+        "./.venv/bin/celery -A paperpilot.web.celery_app:celery_app "
+        "worker --loglevel=INFO"
+    )
+
+
+def test_readme_starts_worker_and_api_in_separate_loaded_shells():
+    text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+
+    assert "two bash/zsh terminals" in normalized
+    assert "load the same `.env` in each" in normalized
+    assert "Start the Worker in terminal 1" in normalized
+    assert "start the API in terminal 2" in normalized
+    assert "POSIX shell" not in text
+
+
+def test_readme_backs_up_and_restores_sqlite_files_as_timestamped_pair():
+    text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert 'BACKUP_DIR="data/backups/$(date +%Y%m%d-%H%M%S)"' in text
+    assert 'mkdir -p "$BACKUP_DIR"' in text
+    assert '"$BACKUP_DIR/business.sqlite3"' in text
+    assert '"$BACKUP_DIR/checkpoints.sqlite3"' in text
+    assert 'RESTORE_DIR="data/backups/<selected-timestamp>"' in text
+    assert '"$RESTORE_DIR/business.sqlite3"' in text
+    assert '"$RESTORE_DIR/checkpoints.sqlite3"' in text
+    assert "data/backups/business.sqlite3" not in text
+    assert "data/backups/checkpoints.sqlite3" not in text
 
 
 def test_admission_benchmark_proves_bound_and_recovery():

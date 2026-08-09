@@ -5,10 +5,10 @@ academic papers. It uses an Anthropic-compatible ReAct loop with MCP tools for
 arXiv download, per-paper ColBERT retrieval, citation graph lookup, multimodal
 figure understanding, and concurrent paper reading.
 
-**Current status**: evaluation-complete prototype with one post-eval
-improvement pass. The core agent loop, tool stack, deep-read workflow,
-report-writing workflow, and a third-party QASPER eval harness are implemented
-and validated locally.
+**Current status**: the original evaluation-complete ReAct prototype remains
+available, and the Web product now also has a typed Conversation runtime with
+durable LangGraph checkpoints, continuous follow-up, branch alternatives, and
+rollback. The two paths intentionally coexist during migration.
 
 ## What It Does
 
@@ -20,24 +20,25 @@ and validated locally.
 - Compacts long conversations with a protocol-safe `compact_context` tool.
 - Produces structured Markdown research reports from multiple papers.
 - Evaluates deep-read recall on a QASPER subset with reproducible baselines.
+- Persists owned paper-reading Conversations, messages, tasks, branches, and
+  rollback points through the Web API.
 
 ## Architecture
 
+The Web Conversation path uses LangGraph only for orchestration, LangChain for
+model/tool interaction and structured output, and Pydantic for typed contracts:
+
 ```text
-User query
-  -> paperpilot.main.run(...)
-  -> synchronous ReAct loop
-  -> built-in tools
-       load_skill / research_todo / paper_deep_read / compact_context
-  -> MCP tools
-       arxiv / colbert / graph / vlm
-  -> DeepSeek via Anthropic-compatible messages API
-  -> final answer or Markdown report
+HTTP Conversation API -> business SQLite -> queued research Task
+  -> Worker -> DeepReadingRunner -> LangGraph fixed workflow
+  -> bounded LangChain model/tools -> checkpoint SQLite
+  -> published Message + authoritative Conversation head in business SQLite
 ```
 
-The top-level loop stays synchronous. `MCPClient` hides the async MCP sessions
-behind synchronous tool handlers, so the agent loop can reason over a simple
-tool list while each MCP server owns its specialized runtime.
+The older `paperpilot.main.run(...)` path remains a synchronous ReAct loop.
+`MCPClient` still hides async MCP sessions behind synchronous tool handlers for
+that legacy path. The Web endpoint `/api/tasks` also remains the legacy
+workbench path; new multi-turn product work goes through `/api/conversations`.
 
 ## Day 16/18 Evaluation
 
@@ -100,108 +101,135 @@ Runtime artifacts are written under `data/eval/` and `data/traces/`. Large
 JSONL result files and traces are intentionally ignored by git; the committed
 summary is the portable eval artifact.
 
-## Web Database Migrations
+## Conversation Runtime And SQLite Ownership
 
-The Web business database continues to use SQLite, but its five tables are now
-managed by SQLAlchemy 2.0 and Alembic:
+The Conversation runtime deliberately uses two SQLite files with different
+authorities:
 
-- `users`
-- `sessions`
-- `research_tasks`
-- `task_events`
-- `task_artifacts`
+- `PAPERPILOT_TASK_DB_PATH` is the business database. SQLAlchemy/Alembic owns
+  users, sessions, papers, conversations, conversation-paper membership,
+  messages, research tasks, events, artifacts, ownership, and the current
+  Conversation head.
+- `PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH` is the LangGraph database.
+  `SqliteSaver` owns durable graph state, including the `checkpoints` and
+  `writes` tables. It is not a user, Conversation, or authorization database.
 
-Agent runtime tables in the same SQLite file are outside this Alembic metadata
-and are preserved. Install `requirements.txt` before running migrations, and
-set `PAPERPILOT_TASK_DB_PATH` to the exact file shared by the API and workers.
+The API and every Worker must receive the same two explicit paths, while each
+process owns separate business connections, checkpoint connections, and
+runtimes. Never share a live SQLite connection across Web/Worker processes.
+The Web (including Celery-backed Web) constructs a lazy `MCPRuntime` only so
+its `DeepReadingRunner` can read validated checkpoints for rollback; checkpoint
+reads do not start MCP tools or a model. A Worker starts and reuses its MCP
+runtime only when it executes actual Conversation work.
 
-For an existing deployment, stop the API and workers first. Then create and
-verify a SQLite backup before changing the schema:
+LangGraph Store-backed user profile/memory is intentionally not implemented in
+this vertical slice. Conversation data and graph checkpoints are durable, but
+cross-Conversation user memory is future work. Automated tests use bounded fake
+models, MCP tools, and paper search; a real model/MCP smoke remains an explicit
+manual integration check outside the test suite.
+
+## Installation, Migration, And Startup Order
+
+PaperPilot does not load `.env` automatically. For a Celery-backed deployment,
+create and edit `.env`, set both SQLite paths, and set
+`PAPERPILOT_TASK_EXECUTOR=celery` in `.env`. Export that file into the current
+bash/zsh shell and start Redis before migration and startup. Run the following
+prerequisites from the repository root:
 
 ```bash
-export PAPERPILOT_TASK_DB_PATH="$PWD/data/web/tasks.sqlite3"
-mkdir -p data/backups
-BACKUP_PATH="data/backups/tasks-$(date +%Y%m%d-%H%M%S).sqlite3"
-sqlite3 "$PAPERPILOT_TASK_DB_PATH" ".backup '$BACKUP_PATH'"
-sqlite3 "$BACKUP_PATH" "PRAGMA integrity_check;"
+cp .env.example .env
+# Edit .env before continuing; replace placeholders and set the Celery executor.
+set -a
+source .env
+set +a
+docker compose up -d redis
+
+uv pip sync requirements-lock.txt --python .venv/bin/python
+./.venv/bin/python -m alembic -c alembic.ini upgrade head
+LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m paperpilot.web.checkpoint --setup
 ```
 
-The integrity check must print `ok`. Upgrade the selected database explicitly
-and confirm its revision:
+After dependency sync, migration, and checkpoint setup succeed, open two
+bash/zsh terminals in the repository root and load the same `.env` in each.
+Start the Worker in terminal 1; it intentionally remains in the foreground.
 
 ```bash
-.venv/bin/python -m alembic -c alembic.ini upgrade head
-.venv/bin/python -m alembic -c alembic.ini current
+set -a
+source .env
+set +a
+./.venv/bin/celery -A paperpilot.web.celery_app:celery_app worker --loglevel=INFO
 ```
 
-Only start the API and Celery workers after both commands succeed and `current`
-reports `20260806_0001 (head)`. An adopted legacy database intentionally keeps
-SQLite primary-key reflection differences and may lack the historical
-`research_tasks.user_id` foreign key, so `alembic check` is not a rollout gate
-for that database. A new or existing single-process local workbench still
-upgrades through `TaskStore` as a compatibility convenience, but production
-must run the explicit command first so multiple API/worker processes never race
-to migrate the same file.
+Once the Worker is ready, start the API in terminal 2:
 
-The adoption migration is non-destructive: it creates missing Web tables,
-columns, and indexes while retaining existing rows and unknown tables. Its
-downgrade intentionally refuses to delete business data. To roll back this
-initial adoption, stop all processes and restore the verified backup instead of
-running `alembic downgrade`.
+```bash
+set -a
+source .env
+set +a
+./.venv/bin/uvicorn paperpilot.web.app:app --host 127.0.0.1 --port 8000
+```
+
+The five required dependency, migration, setup, Worker, and API commands above
+are shown in their execution order even though the two long-running processes
+use separate terminals.
+
+Alembic head is `20260807_0002`. It manages the original Web tables plus
+`papers`, `conversations`, `messages`, `conversation_papers`, and the
+Conversation/checkpoint columns and indexes on `research_tasks`. Production
+must run Alembic before starting multiple processes; `TaskStore` migration on
+open remains only a local compatibility convenience. The migrations retain
+unknown legacy rows and objects, and downgrade intentionally refuses to delete
+business data.
+
+For backup or restore, stop the API and all workers so neither SQLite file can
+advance. Back up both files as one matched pair and verify both copies:
+
+```bash
+BACKUP_DIR="data/backups/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP_DIR"
+sqlite3 "$PAPERPILOT_TASK_DB_PATH" ".backup '$BACKUP_DIR/business.sqlite3'"
+sqlite3 "$PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH" ".backup '$BACKUP_DIR/checkpoints.sqlite3'"
+sqlite3 "$BACKUP_DIR/business.sqlite3" "PRAGMA integrity_check;"
+sqlite3 "$BACKUP_DIR/checkpoints.sqlite3" "PRAGMA integrity_check;"
+```
+
+Both integrity checks must print `ok`. Restore both members of the same pair
+while the API and workers remain stopped; restoring only one can break the
+Message/Task-to-checkpoint binding used by rollback:
+
+```bash
+RESTORE_DIR="data/backups/<selected-timestamp>"
+sqlite3 "$RESTORE_DIR/business.sqlite3" ".backup '$PAPERPILOT_TASK_DB_PATH'"
+sqlite3 "$RESTORE_DIR/checkpoints.sqlite3" ".backup '$PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH'"
+```
 
 ## Web Workbench With Celery
 
 The Web workbench defaults to its in-process thread executor, so local usage
-does not require Redis. For a broker-backed queue and long-lived worker processes
-that reuse one MCP runtime per process, start Redis and select the Celery
-executor before starting the API:
+does not require Redis. For broker-backed execution, use the same business and
+checkpoint paths in the API and worker environments:
 
 ```bash
-docker compose up -d redis
-
 export PAPERPILOT_TASK_EXECUTOR=celery
 export PAPERPILOT_CELERY_BROKER_URL=redis://127.0.0.1:6379/0
 export PAPERPILOT_TASK_DB_PATH="$PWD/data/web/tasks.sqlite3"
+export PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH="$PWD/data/langgraph/checkpoints.sqlite3"
+export LANGGRAPH_STRICT_MSGPACK=true
 ```
 
 The default worker limits are a 3-hour soft limit, a 3-hour 5-minute hard
-limit, and a 4-hour Redis visibility timeout. Override them together when a
-deployment needs different limits; the visibility timeout must remain greater
-than the hard limit:
-
-```bash
-export PAPERPILOT_TASK_SOFT_TIME_LIMIT_SECONDS=10800
-export PAPERPILOT_TASK_TIME_LIMIT_SECONDS=11100
-export PAPERPILOT_REDIS_VISIBILITY_TIMEOUT_SECONDS=14400
-```
-
-Start a worker in one terminal. Each prefork child lazily loads its MCP runtime
-on its first real research task and reuses it for later tasks. Start with two
-children and adjust only after measuring model memory use:
-
-```bash
-.venv/bin/celery -A paperpilot.web.celery_app:celery_app worker \
-  --loglevel=INFO --concurrency=2
-```
-
-Start the API in another terminal with the same environment variables and
-working directory so the API and workers share the same SQLite database:
-
-```bash
-.venv/bin/uvicorn paperpilot.web.app:app \
-  --host 127.0.0.1 --port 8000 --workers 2 --no-access-log
-```
-
-Celery delivery is **at-least-once**. PaperPilot atomically claims pending
-tasks so duplicate messages cannot run the same task concurrently; a message
-marked as redelivered may reclaim a running task after worker loss. One
-reliability window remains: SQLite task creation and Redis publication are not
-one transaction. If the API process exits after the database commit but before
-broker publication, a pending task can be left without a queue message. A
-transactional outbox or reconciler is required before treating this deployment
-as lossless across process crashes. If publication returns an ambiguous error,
-the API only changes `pending` to `failed`; it never overwrites work that a
-worker has already claimed as `running` or `completed`.
+limit, and a 4-hour Redis visibility timeout. The visibility timeout must
+remain greater than the hard limit. Override the three values together with
+`PAPERPILOT_TASK_SOFT_TIME_LIMIT_SECONDS`,
+`PAPERPILOT_TASK_TIME_LIMIT_SECONDS`, and
+`PAPERPILOT_REDIS_VISIBILITY_TIMEOUT_SECONDS`. Celery delivery is
+**at-least-once**:
+PaperPilot atomically claims pending work, and a redelivered message can reclaim
+a running Task after worker loss. SQLite task creation and Redis publication
+are not one transaction, so a transactional outbox/reconciler is still needed
+before treating broker delivery as lossless. If publication is ambiguous, API
+compensation may change only a still-`pending` Task to `failed`; it never
+overwrites a Worker-owned `running`, `completed`, or `failed` Task.
 
 ## Web Runtime Protection
 
@@ -227,11 +255,13 @@ guaranteed to be even.
 When that per-process capacity is full, task creation returns `503` with a
 `Retry-After` header and creates no task or event database rows.
 
-`/health/live` has no dependency probe. `/health/ready` checks SQLite with
-`SELECT 1` and only whether the executor has begun shutdown; Redis, MCP, and
-temporary executor saturation do not fail readiness. PaperPilot accepts an
-incoming `X-Request-ID` only when it matches `[A-Za-z0-9._:-]` and is at most
-128 characters; otherwise it generates a new request ID.
+`/health/live` probes no dependencies. `/health/ready` reports exactly the
+`database`, `checkpoint`, and `executor` checks: both owned SQLite connections
+must answer their health query and the executor must not have begun shutdown.
+Redis, MCP, models, and temporary executor saturation are intentionally not
+readiness probes. PaperPilot accepts an incoming `X-Request-ID` only when it
+matches `[A-Za-z0-9._:-]` and is at most 128 characters; otherwise it generates
+a new request ID.
 
 When PaperPilot structured access logging is active, use `--no-access-log` to
 disable duplicate Uvicorn access logs:
@@ -262,7 +292,7 @@ connection. WAL allows API reads to continue while a worker commits a write,
 but SQLite still has only one writer at a time. It remains a local, shared-file
 design rather than a general high-write-concurrency database.
 
-All three list APIs return bounded pagination envelopes. Task lists use
+The legacy task list APIs return bounded pagination envelopes. Task lists use
 `{items, next_cursor, has_more}` with keyset cursors; event and artifact lists
 use `{items, next_after_id, has_more}` with numeric watermarks. The default page
 size is 50 and the maximum is 100. `/api/tasks/{task_id}/updates` reads the
@@ -293,8 +323,10 @@ single-writer boundary.
 
 ## Tech Stack
 
-- **LLM**: DeepSeek through Anthropic-compatible messages API
-- **Agent loop**: local synchronous ReAct loop
+- **Conversation orchestration**: LangGraph with durable SQLite checkpoints
+- **Conversation model/tools**: LangChain with Pydantic structured contracts
+- **Legacy agent loop**: local synchronous ReAct loop
+- **LLM**: DeepSeek (created lazily only for actual model work)
 - **Tool protocol**: MCP over stdio
 - **Retrieval**: PyLate/ColBERT per-paper indexes
 - **Citation graph**: NetworkX + Semantic Scholar Graph API
@@ -316,16 +348,18 @@ single-writer boundary.
 
 ## Validation
 
-Known local checks for the Day 18 state:
+Run the Conversation-focused gate, then the complete automated suite with the
+strict checkpoint serializer enabled:
 
-```powershell
-.venv\Scripts\python.exe -m pytest tests -q `
-  --ignore=tests/mcp_servers/test_colbert_via_client.py `
-  --ignore=tests/mcp_servers/vlm/test_vlm_via_client.py `
-  --ignore=tests/test_per_paper_index_slow.py
+```bash
+LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m pytest tests/deep_reading tests/web/test_checkpoint.py tests/web/test_conversation_store.py tests/web/test_conversation_worker.py tests/web/test_conversation_api.py tests/web/test_conversation_ui.py -q
+LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m pytest tests -q
 ```
 
-Current fast-suite result: `137 passed, 4 deselected`.
+The Task 15 local run produced `238 passed` for the focused gate and
+`873 passed, 11 deselected` for the complete automated suite. The deselected
+tests and any real model, arXiv, MCP-server, Redis/Celery-broker, or paid call
+remain separate live-integration checks.
 
 ## License
 

@@ -1,8 +1,13 @@
 """Durable DeepReadingRunner integration and recovery tests."""
 from __future__ import annotations
 
+import os
 import sqlite3
+import subprocess
+import sys
+import textwrap
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -31,6 +36,8 @@ PRIMARY = PaperCandidate(
     abstract="A primary-paper abstract.",
     source_url="https://arxiv.org/abs/2401.12345v1",
 )
+
+PROJECT_ROOT = Path(__file__).parents[2]
 
 
 class _FakeMCPClient:
@@ -178,6 +185,80 @@ def _execute_business_sql(
 ) -> None:
     with store.engine.begin() as connection:
         connection.execute(text(statement), parameters)
+
+
+def test_strict_checkpoint_serializer_rejects_custom_application_object(
+    tmp_path,
+) -> None:
+    script = textwrap.dedent(
+        """
+        import sys
+        from typing import TypedDict
+
+        from langgraph.graph import END, START, StateGraph
+
+        from paperpilot.web.checkpoint import SqliteCheckpointRuntime
+
+
+        class UnsafeApplicationObject:
+            pass
+
+
+        class UnsafeState(TypedDict, total=False):
+            value: object
+
+
+        def persist_unsafe_object(_state: UnsafeState) -> UnsafeState:
+            return {"value": UnsafeApplicationObject()}
+
+
+        runtime = SqliteCheckpointRuntime.open(sys.argv[1])
+        builder = StateGraph(UnsafeState)
+        builder.add_node("unsafe", persist_unsafe_object)
+        builder.add_edge(START, "unsafe")
+        builder.add_edge("unsafe", END)
+        graph = builder.compile(checkpointer=runtime.saver)
+        config = {"configurable": {"thread_id": "strict-security"}}
+        try:
+            graph.invoke({"value": "safe"}, config)
+        except TypeError as exc:
+            if "not msgpack serializable: UnsafeApplicationObject" not in str(exc):
+                raise AssertionError(f"unexpected serializer failure: {exc}") from exc
+        else:
+            raise AssertionError("unsafe application object was checkpointed")
+        runtime.close()
+
+        reopened = SqliteCheckpointRuntime.open(sys.argv[1])
+        try:
+            restored_graph = builder.compile(checkpointer=reopened.saver)
+            snapshot = restored_graph.get_state(config)
+            if isinstance(snapshot.values.get("value"), UnsafeApplicationObject):
+                raise AssertionError("unsafe application object was recovered")
+            if snapshot.values.get("value") != "safe":
+                raise AssertionError(
+                    f"unexpected value survived rejection: {snapshot.values!r}"
+                )
+        finally:
+            reopened.close()
+        print("strict serializer rejected and did not recover custom object")
+        """
+    )
+    environment = os.environ.copy()
+    environment["LANGGRAPH_STRICT_MSGPACK"] = "true"
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "strict.sqlite3")],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == (
+        "strict serializer rejected and did not recover custom object"
+    )
+    assert result.stderr == ""
 
 
 def test_success_finalizes_business_head_and_exposes_frozen_checkpoint(tmp_path) -> None:
