@@ -566,26 +566,67 @@ def test_prepare_guard_rejects_untrusted_external_id_before_mcp_call() -> None:
 
 def test_model_arxiv_url_is_normalized_before_downloader_call() -> None:
     primary_url = f"https://arxiv.org/abs/{PRIMARY.external_id}"
+    mcp_tools, mcp_calls = _mcp_tools(
+        download_result=json.dumps(
+            {
+                "paper_id": primary_url,
+                "text": "downloaded paper text",
+                "untrusted_extra": "must not reach build_index",
+            }
+        )
+    )
 
     def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
         prepared = tools["prepare_paper"].invoke({"external_id": primary_url})
         assert prepared["external_id"] == PRIMARY.external_id
+        retrieved = tools["retrieve_paper_evidence"].invoke(
+            {
+                "question": "question",
+                "external_id": primary_url,
+                "top_k_each": 2,
+                "summary_k": 2,
+            }
+        )
         return {
             "structured_response": {
-                "selected_evidence_ids": [],
+                "selected_evidence_ids": [retrieved["evidence_items"][0]["id"]],
                 "paper_uses": [],
                 "limitations": [],
             }
         }
 
-    context, factory, mcp_calls = _context(behavior)
+    context, factory, _unused = _context(behavior, mcp_tools=mcp_tools)
 
     run_research_agent(STATE, context, create_agent_factory=factory)
 
-    assert mcp_calls[0] == (
-        "mcp__arxiv__download_paper",
-        {"arxiv_id": PRIMARY.external_id},
-    )
+    assert mcp_calls == [
+        (
+            "mcp__arxiv__download_paper",
+            {"arxiv_id": PRIMARY.external_id},
+        ),
+        (
+            "mcp__colbert__build_index",
+            {
+                "documents": [
+                    {
+                        "paper_id": PRIMARY.external_id,
+                        "text": "downloaded paper text",
+                    }
+                ]
+            },
+        ),
+        (
+            "mcp__colbert__planned_retrieval",
+            {
+                "question": "question",
+                "paper_id": PRIMARY.external_id,
+                "paper_title": PRIMARY.title,
+                "abstract": PRIMARY.abstract,
+                "top_k_each": 2,
+                "summary_k": 2,
+            },
+        ),
+    ]
 
 
 def test_model_invalid_external_id_never_reaches_downloader() -> None:
@@ -892,6 +933,51 @@ def test_second_structured_attempt_can_idempotently_repeat_retrieval() -> None:
     assert sum(
         name == "mcp__colbert__planned_retrieval" for name, _args in mcp_calls
     ) == 2
+
+
+def test_same_paper_local_ev_1_is_scoped_by_retrieval_request() -> None:
+    def retrieval(arguments: dict) -> str:
+        payload = _evidence_payload(arguments["paper_id"], "ev_1")
+        pool = payload["evidence_pool"]
+        assert isinstance(pool, dict)
+        pool["items"][0]["chunk_text"] = f"evidence for {arguments['question']}"
+        return json.dumps(payload)
+
+    mcp_tools, _calls = _mcp_tools(retrieval_result=retrieval)
+    selected_ids: list[str] = []
+
+    def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
+        tools["prepare_paper"].invoke({"external_id": PRIMARY.external_id})
+        for question in ("What is the method?", "What are the results?"):
+            retrieved = tools["retrieve_paper_evidence"].invoke(
+                {
+                    "question": question,
+                    "external_id": PRIMARY.external_id,
+                    "top_k_each": 2,
+                    "summary_k": 2,
+                }
+            )
+            evidence_id = retrieved["evidence_items"][0]["id"]
+            assert retrieved["summary_item_ids"] == [evidence_id]
+            selected_ids.append(evidence_id)
+        return {
+            "structured_response": {
+                "selected_evidence_ids": selected_ids,
+                "paper_uses": [],
+                "limitations": [],
+            }
+        }
+
+    context, factory, _unused = _context(behavior, mcp_tools=mcp_tools)
+
+    result = run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert len(set(selected_ids)) == 2
+    assert [item.id for item in result.evidence_items] == selected_ids
+    assert [item.chunk_text for item in result.evidence_items] == [
+        "evidence for What is the method?",
+        "evidence for What are the results?",
+    ]
 
 
 def test_repeated_global_evidence_id_rejects_conflicting_content() -> None:

@@ -317,10 +317,14 @@ def _build_prepare_tool(
         if not isinstance(text, str) or not text.strip():
             raise ResearchContractError("download MCP payload is missing paper text")
 
+        indexed_document = {
+            "paper_id": normalized_id,
+            "text": text,
+        }
         build_result = _call_mcp_json(
             context,
             name=_BUILD_TOOL,
-            arguments={"documents": [downloaded]},
+            arguments={"documents": [indexed_document]},
             stage="prepare",
         )
         indexed_ids = _indexed_paper_ids(build_result)
@@ -370,7 +374,13 @@ def _build_retrieval_tool(
             },
             stage="research",
         )
-        parsed_items, summary_ids = _decode_evidence_pool(payload, candidate)
+        parsed_items, summary_ids = _decode_evidence_pool(
+            payload,
+            candidate,
+            question=cleaned_question,
+            top_k_each=top_k_each,
+            summary_k=summary_k,
+        )
         new_items: list[EvidenceItem] = []
         for item in parsed_items:
             existing = evidence.get(item.id)
@@ -460,6 +470,10 @@ def _indexed_paper_ids(payload: Mapping[str, object]) -> set[str]:
 def _decode_evidence_pool(
     payload: Mapping[str, object],
     candidate: PaperCandidate,
+    *,
+    question: str,
+    top_k_each: int,
+    summary_k: int,
 ) -> tuple[list[EvidenceItem], list[str]]:
     pool = payload.get("evidence_pool")
     if not isinstance(pool, Mapping):
@@ -487,7 +501,13 @@ def _decode_evidence_pool(
             raise ResearchContractError(
                 "evidence MCP paper ID does not match the requested paper ID"
             )
-        evidence_id = _global_evidence_id(paper_id, raw_evidence_id)
+        evidence_id = _global_evidence_id(
+            paper_external_id=paper_id,
+            question=question,
+            top_k_each=top_k_each,
+            summary_k=summary_k,
+            raw_evidence_id=raw_evidence_id,
+        )
         score = _evidence_score(raw.get("best_score"))
         supports = _evidence_supports(raw.get("matched_queries"))
         try:
@@ -519,7 +539,13 @@ def _decode_evidence_pool(
             f"evidence_pool.summary_items references unknown ID: {sorted(dangling)[0]}"
         )
     return parsed, [
-        _global_evidence_id(candidate.external_id, raw_id)
+        _global_evidence_id(
+            paper_external_id=candidate.external_id,
+            question=question,
+            top_k_each=top_k_each,
+            summary_k=summary_k,
+            raw_evidence_id=raw_id,
+        )
         for raw_id in raw_summary_ids
     ]
 
@@ -684,8 +710,25 @@ def _canonical_arxiv_id(value: object, field_name: str) -> str:
     return normalized
 
 
-def _global_evidence_id(paper_external_id: str, raw_evidence_id: str) -> str:
-    identity = f"{paper_external_id}\0{raw_evidence_id}".encode("utf-8")
+def _global_evidence_id(
+    *,
+    paper_external_id: str,
+    question: str,
+    top_k_each: int,
+    summary_k: int,
+    raw_evidence_id: str,
+) -> str:
+    identity = json.dumps(
+        [
+            paper_external_id,
+            question,
+            top_k_each,
+            summary_k,
+            raw_evidence_id,
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
     return f"evg_{hashlib.sha256(identity).hexdigest()[:24]}"
 
 
