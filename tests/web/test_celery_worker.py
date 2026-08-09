@@ -1,6 +1,8 @@
 """Celery configuration and process-local worker runtime tests."""
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from paperpilot.tools.mcp_runtime import MCPRuntime
@@ -218,6 +220,8 @@ def test_worker_shutdown_closes_and_forgets_runtime(monkeypatch):
 def test_worker_process_init_forgets_parent_process_resources(monkeypatch):
     parent_mcp = ClosableRuntime("mcp")
     parent_checkpoint = ClosableRuntime("checkpoint")
+    parent_lock = threading.Lock()
+    parent_lock.acquire()
     monkeypatch.setattr(worker_tasks, "_runtime", parent_mcp)
     monkeypatch.setattr(
         worker_tasks,
@@ -225,10 +229,17 @@ def test_worker_process_init_forgets_parent_process_resources(monkeypatch):
         parent_checkpoint,
         raising=False,
     )
+    monkeypatch.setattr(worker_tasks, "_runtime_lock", parent_lock)
+    replacement_runtime = ClosableRuntime("replacement")
+    monkeypatch.setattr(worker_tasks, "_runtime_factory", lambda: replacement_runtime)
 
     worker_tasks._reset_worker_resources()
 
     assert worker_tasks._runtime is None
     assert worker_tasks._checkpoint_runtime is None
+    assert worker_tasks._runtime_lock is not parent_lock
+    assert worker_tasks._runtime_lock.locked() is False
+    assert worker_tasks._get_runtime() is replacement_runtime
     assert parent_mcp.close_count == 0
     assert parent_checkpoint.close_count == 0
+    parent_lock.release()

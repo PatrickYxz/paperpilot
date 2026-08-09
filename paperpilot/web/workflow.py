@@ -97,19 +97,32 @@ class WorkflowRunner:
 
     def run_real(self, task_id: str) -> None:
         """Route conversation work to LangGraph, or run the legacy one-shot agent."""
-        task = self.store.get_task(task_id)
-        if task is not None and task.conversation_id is not None:
-            if self.deep_reading_runner is None:
+        if self.deep_reading_runner is None:
+            try:
+                task = self.store.get_task(task_id)
+            except Exception as exc:
+                self._record_legacy_failure(task_id, exc)
+                return
+            if task is not None and task.conversation_id is not None:
                 raise RuntimeError(
                     "conversation task requires a configured deep-reading runner"
                 )
+            self._run_legacy_real(task_id)
+            return
+
+        task = self.store.get_task(task_id)
+        if task is not None and task.conversation_id is not None:
             # DeepReadingRunner deliberately lets infrastructure failures escape so
             # Celery can redeliver them. Keep this call outside the legacy broad
             # exception boundary below.
             self.deep_reading_runner.run(task_id)
             return
+        self._run_legacy_real(task_id)
 
+    def _run_legacy_real(self, task_id: str) -> None:
+        """Preserve the legacy runner's complete best-effort failure boundary."""
         try:
+            task = self.store.get_task(task_id)
             if task is None:
                 raise ValueError(f"task not found: {task_id}")
 
@@ -156,14 +169,17 @@ class WorkflowRunner:
                 },
             )
         except Exception as exc:
-            self.store.update_status(task_id, "failed")
-            self.store.add_event(
-                task_id=task_id,
-                type="failed",
-                stage="failure",
-                message=f"Real PaperPilot execution failed: {exc}",
-                payload={"execution_mode": "real"},
-            )
+            self._record_legacy_failure(task_id, exc)
+
+    def _record_legacy_failure(self, task_id: str, exc: Exception) -> None:
+        self.store.update_status(task_id, "failed")
+        self.store.add_event(
+            task_id=task_id,
+            type="failed",
+            stage="failure",
+            message=f"Real PaperPilot execution failed: {exc}",
+            payload={"execution_mode": "real"},
+        )
 
     def _sleep(self) -> None:
         if self.delay_seconds > 0:

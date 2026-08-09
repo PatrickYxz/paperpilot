@@ -133,12 +133,13 @@ def execute_research_task(
 def _reset_worker_resources(**kwargs) -> None:
     """Drop parent-process handles before the child can perform any work."""
     del kwargs
-    global _runtime, _checkpoint_runtime
+    global _runtime, _checkpoint_runtime, _runtime_lock
     # This signal runs synchronously during child initialization. Do not acquire
     # a lock copied from the parent: it could have been held by a vanished thread
     # at fork time.
     _runtime = None
     _checkpoint_runtime = None
+    _runtime_lock = threading.Lock()
 
 
 @worker_process_shutdown.connect

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -137,6 +138,34 @@ def _artifact_page_dict(batch: TaskArtifactBatch) -> dict:
     }
 
 
+@dataclass
+class _OwnedAppResources:
+    """Resources created by create_app and eligible for rollback cleanup."""
+
+    store: TaskStore | None = None
+    checkpoint: SqliteCheckpointRuntime | None = None
+    mcp: MCPRuntime | None = None
+    executor: TaskExecutorLike | None = None
+
+
+def _best_effort_construction_cleanup(resources: _OwnedAppResources) -> None:
+    """Close every constructed owned resource without masking build errors."""
+    closers = (
+        (resources.executor, "shutdown"),
+        (resources.checkpoint, "close"),
+        (resources.mcp, "close"),
+        (resources.store, "close"),
+    )
+    for resource, method_name in closers:
+        if resource is None:
+            continue
+        try:
+            getattr(resource, method_name)()
+        except BaseException:
+            # create_app's original construction exception remains primary.
+            pass
+
+
 def create_app(
     task_store: TaskStore | None = None,
     *,
@@ -148,9 +177,41 @@ def create_app(
     mcp_runtime: MCPRuntime | None = None,
     deep_reading_runner: DeepReadingRunner | None = None,
 ) -> FastAPI:
+    owned_resources = _OwnedAppResources()
+    try:
+        return _create_app(
+            task_store,
+            simulation_delay_seconds=simulation_delay_seconds,
+            workflow_runner=workflow_runner,
+            task_executor=task_executor,
+            runtime_config=runtime_config,
+            checkpoint_runtime=checkpoint_runtime,
+            mcp_runtime=mcp_runtime,
+            deep_reading_runner=deep_reading_runner,
+            owned_resources=owned_resources,
+        )
+    except BaseException:
+        _best_effort_construction_cleanup(owned_resources)
+        raise
+
+
+def _create_app(
+    task_store: TaskStore | None = None,
+    *,
+    simulation_delay_seconds: float = 0.4,
+    workflow_runner: WorkflowRunner | None = None,
+    task_executor: TaskExecutorLike | None = None,
+    runtime_config: WebRuntimeConfig | None = None,
+    checkpoint_runtime: SqliteCheckpointRuntime | None = None,
+    mcp_runtime: MCPRuntime | None = None,
+    deep_reading_runner: DeepReadingRunner | None = None,
+    owned_resources: _OwnedAppResources,
+) -> FastAPI:
     config = runtime_config or WebRuntimeConfig.from_env()
     owns_task_store = task_store is None
     store = task_store if task_store is not None else TaskStore()
+    if owns_task_store:
+        owned_resources.store = store
     owns_checkpoint_runtime = False
     owns_mcp_runtime = False
     checkpoint = checkpoint_runtime
@@ -159,6 +220,7 @@ def create_app(
     if (
         config.task_executor == "thread"
         and workflow_runner is None
+        and task_executor is None
         and deep_runner is None
     ):
         if checkpoint is None:
@@ -169,9 +231,11 @@ def create_app(
             )
             checkpoint = SqliteCheckpointRuntime.open(checkpoint_path)
             owns_checkpoint_runtime = True
+            owned_resources.checkpoint = checkpoint
         if mcp is None:
             mcp = MCPRuntime()
             owns_mcp_runtime = True
+            owned_resources.mcp = mcp
         deep_runner = DeepReadingRunner(
             task_store=store,
             checkpointer=checkpoint.saver,
@@ -185,7 +249,11 @@ def create_app(
         delay_seconds=simulation_delay_seconds,
         deep_reading_runner=deep_runner,
     )
-    executor = task_executor or build_task_executor(runner, config=config)
+    if task_executor is None:
+        executor = build_task_executor(runner, config=config)
+        owned_resources.executor = executor
+    else:
+        executor = task_executor
     auth = AuthService(store)
     configure_paperpilot_logging(config)
     runtime_logger = logging.getLogger(RUNTIME_LOGGER_NAME)

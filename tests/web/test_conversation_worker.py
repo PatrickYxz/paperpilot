@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import paperpilot.web.app as app_module
@@ -26,26 +27,42 @@ PRIMARY_PAPER = PaperCandidate(
 
 
 class FakeMCPRuntime:
-    def __init__(self, close_order: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        close_order: list[str] | None = None,
+        *,
+        close_error: Exception | None = None,
+    ) -> None:
         self.close_count = 0
         self.close_order = close_order
+        self.close_error = close_error
 
     def close(self) -> None:
         self.close_count += 1
         if self.close_order is not None:
             self.close_order.append("mcp")
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class FakeCheckpointRuntime:
-    def __init__(self, close_order: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        close_order: list[str] | None = None,
+        *,
+        close_error: Exception | None = None,
+    ) -> None:
         self.saver = object()
         self.close_count = 0
         self.close_order = close_order
+        self.close_error = close_error
 
     def close(self) -> None:
         self.close_count += 1
         if self.close_order is not None:
             self.close_order.append("checkpoint")
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class FakeDeepReadingRunner:
@@ -70,6 +87,18 @@ class RecordingExecutor:
     def shutdown(self) -> None:
         self.is_shutdown = True
         self.close_order.append("executor")
+
+
+class TrackingOwnedStore(TaskStore):
+    def __init__(self, db_path, close_order: list[str]) -> None:
+        super().__init__(db_path)
+        self.close_order = close_order
+        self.close_count = 0
+
+    def close(self) -> None:
+        self.close_count += 1
+        self.close_order.append("store")
+        super().close()
 
 
 def _new_conversation_task(store: TaskStore, *, suffix: str):
@@ -371,6 +400,11 @@ def test_app_default_runtime_uses_injected_store_directory_and_closes_in_order(
     monkeypatch.setattr(app_module, "MCPRuntime", lambda: mcp)
     monkeypatch.setattr(app_module, "DeepReadingRunner", RecordingDeepRunner)
     executor = RecordingExecutor(close_order)
+    monkeypatch.setattr(
+        app_module,
+        "build_task_executor",
+        lambda runner, *, config: executor,
+    )
     config = WebRuntimeConfig(
         task_executor="thread",
         summary_token_threshold=2468,
@@ -381,7 +415,6 @@ def test_app_default_runtime_uses_injected_store_directory_and_closes_in_order(
     with TestClient(
         create_app(
             store,
-            task_executor=executor,
             runtime_config=config,
         )
     ):
@@ -402,6 +435,183 @@ def test_app_default_runtime_uses_injected_store_directory_and_closes_in_order(
     assert checkpoint.close_count == 1
     assert mcp.close_count == 1
     store.close()
+
+
+def test_injected_executor_does_not_create_local_deep_reading_resources(
+    tmp_path,
+    monkeypatch,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    close_order: list[str] = []
+    executor = RecordingExecutor(close_order)
+    monkeypatch.setattr(
+        app_module.SqliteCheckpointRuntime,
+        "open",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("injected executor opened checkpoint")
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "MCPRuntime",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("injected executor constructed MCP runtime")
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "DeepReadingRunner",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("injected executor constructed DeepReadingRunner")
+        ),
+    )
+
+    with TestClient(
+        create_app(
+            store,
+            task_executor=executor,
+            runtime_config=WebRuntimeConfig(task_executor="thread"),
+        )
+    ) as client:
+        assert client.app.state.deep_reading_runner is None
+
+    assert close_order == ["executor"]
+    store.close()
+
+
+def test_app_construction_mcp_failure_closes_owned_checkpoint_and_store(
+    tmp_path,
+    monkeypatch,
+):
+    close_order: list[str] = []
+    store = TrackingOwnedStore(tmp_path / "tasks.sqlite3", close_order)
+    checkpoint = FakeCheckpointRuntime(close_order)
+    monkeypatch.setattr(app_module, "TaskStore", lambda: store)
+    monkeypatch.setattr(
+        app_module.SqliteCheckpointRuntime,
+        "open",
+        lambda _path: checkpoint,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "MCPRuntime",
+        lambda: (_ for _ in ()).throw(RuntimeError("MCP construction failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="MCP construction failed"):
+        create_app(runtime_config=WebRuntimeConfig(task_executor="thread"))
+
+    assert close_order == ["checkpoint", "store"]
+    assert checkpoint.close_count == 1
+    assert store.close_count == 1
+
+
+def test_app_construction_deep_runner_failure_preserves_error_and_best_effort_closes(
+    tmp_path,
+    monkeypatch,
+):
+    close_order: list[str] = []
+    store = TrackingOwnedStore(tmp_path / "tasks.sqlite3", close_order)
+    checkpoint = FakeCheckpointRuntime(
+        close_order,
+        close_error=RuntimeError("checkpoint close failed"),
+    )
+    mcp = FakeMCPRuntime(close_order)
+    monkeypatch.setattr(app_module, "TaskStore", lambda: store)
+    monkeypatch.setattr(
+        app_module.SqliteCheckpointRuntime,
+        "open",
+        lambda _path: checkpoint,
+    )
+    monkeypatch.setattr(app_module, "MCPRuntime", lambda: mcp)
+    monkeypatch.setattr(
+        app_module,
+        "DeepReadingRunner",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("DeepReadingRunner construction failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="DeepReadingRunner construction failed"):
+        create_app(runtime_config=WebRuntimeConfig(task_executor="thread"))
+
+    assert close_order == ["checkpoint", "mcp", "store"]
+    assert checkpoint.close_count == 1
+    assert mcp.close_count == 1
+    assert store.close_count == 1
+
+
+def test_app_construction_executor_failure_closes_owned_runtime_and_store(
+    tmp_path,
+    monkeypatch,
+):
+    close_order: list[str] = []
+    store = TrackingOwnedStore(tmp_path / "tasks.sqlite3", close_order)
+    checkpoint = FakeCheckpointRuntime(close_order)
+    mcp = FakeMCPRuntime(close_order)
+    monkeypatch.setattr(app_module, "TaskStore", lambda: store)
+    monkeypatch.setattr(
+        app_module.SqliteCheckpointRuntime,
+        "open",
+        lambda _path: checkpoint,
+    )
+    monkeypatch.setattr(app_module, "MCPRuntime", lambda: mcp)
+    monkeypatch.setattr(app_module, "DeepReadingRunner", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        app_module,
+        "build_task_executor",
+        lambda runner, *, config: (_ for _ in ()).throw(
+            RuntimeError("executor construction failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="executor construction failed"):
+        create_app(runtime_config=WebRuntimeConfig(task_executor="thread"))
+
+    assert close_order == ["checkpoint", "mcp", "store"]
+    assert checkpoint.close_count == 1
+    assert mcp.close_count == 1
+    assert store.close_count == 1
+
+
+def test_app_construction_fastapi_failure_closes_default_executor_then_resources(
+    tmp_path,
+    monkeypatch,
+):
+    close_order: list[str] = []
+    store = TrackingOwnedStore(tmp_path / "tasks.sqlite3", close_order)
+    checkpoint = FakeCheckpointRuntime(close_order)
+    mcp = FakeMCPRuntime(close_order)
+    executor = RecordingExecutor(close_order)
+    monkeypatch.setattr(app_module, "TaskStore", lambda: store)
+    monkeypatch.setattr(
+        app_module.SqliteCheckpointRuntime,
+        "open",
+        lambda _path: checkpoint,
+    )
+    monkeypatch.setattr(app_module, "MCPRuntime", lambda: mcp)
+    monkeypatch.setattr(app_module, "DeepReadingRunner", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        app_module,
+        "build_task_executor",
+        lambda runner, *, config: executor,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "FastAPI",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("FastAPI construction failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="FastAPI construction failed"):
+        create_app(runtime_config=WebRuntimeConfig(task_executor="thread"))
+
+    assert close_order == ["executor", "checkpoint", "mcp", "store"]
+    assert executor.is_shutdown is True
+    assert checkpoint.close_count == 1
+    assert mcp.close_count == 1
+    assert store.close_count == 1
 
 
 def test_app_does_not_close_injected_deep_reading_resources(tmp_path):

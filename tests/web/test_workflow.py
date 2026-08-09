@@ -233,6 +233,83 @@ def test_real_conversation_task_requires_configured_deep_reading_runner(tmp_path
     assert store.get_task(task.id).status == "pending"
 
 
+def test_legacy_initial_task_read_failure_is_caught_and_marks_failed(
+    tmp_path,
+    monkeypatch,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    task = store.create_task(question="Transient read failure")
+    real_get_task = store.get_task
+    get_calls = 0
+
+    def fail_once(task_id: str):
+        nonlocal get_calls
+        get_calls += 1
+        if get_calls == 1:
+            raise RuntimeError("temporary read error")
+        return real_get_task(task_id)
+
+    monkeypatch.setattr(
+        store,
+        "get_task",
+        fail_once,
+    )
+    runner = WorkflowRunner(store, delay_seconds=0, real_runner=lambda _query: [])
+
+    runner.run_real(task.id)
+
+    assert store.get_task(task.id).status == "failed"
+    events = store.list_events_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    ).items
+    assert events[-1].type == "failed"
+    assert events[-1].message == (
+        "Real PaperPilot execution failed: temporary read error"
+    )
+
+
+def test_configured_deep_runner_route_read_failure_propagates_without_status_write(
+    tmp_path,
+    monkeypatch,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    task = store.create_task(question="Cannot classify this task")
+    real_get_task = store.get_task
+    get_calls = 0
+
+    def fail_once(task_id: str):
+        nonlocal get_calls
+        get_calls += 1
+        if get_calls == 1:
+            raise RuntimeError("route database unavailable")
+        return real_get_task(task_id)
+
+    monkeypatch.setattr(store, "get_task", fail_once)
+    deep_runner = FakeDeepReadingRunner()
+    runner = WorkflowRunner(
+        store,
+        delay_seconds=0,
+        real_runner=lambda _query: [],
+        deep_reading_runner=deep_runner,
+    )
+
+    with pytest.raises(RuntimeError, match="route database unavailable"):
+        runner.run_real(task.id)
+
+    assert deep_runner.calls == []
+    assert store.get_task(task.id).status == "pending"
+    events = store.list_events_page(
+        task.id,
+        user_id=None,
+        after_id=0,
+        limit=100,
+    ).items
+    assert events == []
+
+
 def test_unknown_deep_reading_failure_propagates_without_legacy_failure_write(
     tmp_path,
 ):
