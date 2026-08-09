@@ -7,6 +7,10 @@ const logoutButton = document.querySelector("#logoutButton");
 const currentUser = document.querySelector("#currentUser");
 const currentUsername = document.querySelector("#currentUsername");
 const authMessage = document.querySelector("#authMessage");
+const workspace = document.querySelector("#workspace");
+const conversationView = document.querySelector("#conversationView");
+const conversationsTab = document.querySelector("#conversationsTab");
+const legacyTab = document.querySelector("#legacyTab");
 const workbench = document.querySelector("#workbench");
 const questionInput = document.querySelector("#question");
 const depthInput = document.querySelector("#depth");
@@ -74,24 +78,47 @@ async function requestJson(url, options = {}) {
   const payload = text ? JSON.parse(text) : null;
   if (!response.ok) {
     const detail = payload && payload.detail ? payload.detail : response.statusText;
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    const error = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    error.status = response.status;
+    throw error;
   }
   return payload;
+}
+
+function selectWorkspaceTab(tabName) {
+  const showConversations = tabName === "conversations";
+  conversationView.hidden = !showConversations;
+  workbench.hidden = showConversations;
+  conversationsTab.classList.toggle("active", showConversations);
+  conversationsTab.setAttribute("aria-selected", String(showConversations));
+  legacyTab.classList.toggle("active", !showConversations);
+  legacyTab.setAttribute("aria-selected", String(!showConversations));
+  if (!showConversations) {
+    loadTasks().catch((error) => setMessage(error.message, "error"));
+  }
+}
+
+function dispatchAuthLifecycle(name, detail = null) {
+  document.dispatchEvent(new CustomEvent(name, { detail }));
 }
 
 function showAuthenticated(user) {
   invalidateTaskListRequests();
   authForm.hidden = true;
   currentUser.hidden = false;
-  workbench.hidden = false;
+  workspace.hidden = false;
+  selectWorkspaceTab("conversations");
   currentUsername.textContent = user.username;
   setAuthMessage("");
+  dispatchAuthLifecycle("paperpilot:authenticated", user);
 }
 
 function showUnauthenticated(message = "") {
   invalidateTaskListRequests();
   authForm.hidden = false;
   currentUser.hidden = true;
+  workspace.hidden = true;
+  conversationView.hidden = false;
   workbench.hidden = true;
   currentUsername.textContent = "";
   resetSelectedTask(null);
@@ -101,6 +128,7 @@ function showUnauthenticated(message = "") {
   taskArtifacts.innerHTML = "";
   taskEvents.innerHTML = "";
   setAuthMessage(message);
+  dispatchAuthLifecycle("paperpilot:unauthenticated");
 }
 
 function formatDate(value) {
@@ -524,6 +552,14 @@ logoutButton.addEventListener("click", async () => {
   } finally {
     showUnauthenticated("Logged out.");
   }
+});
+
+conversationsTab.addEventListener("click", () => {
+  selectWorkspaceTab("conversations");
+});
+
+legacyTab.addEventListener("click", () => {
+  selectWorkspaceTab("legacy");
 });
 
 taskForm.addEventListener("submit", async (event) => {

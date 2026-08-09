@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PaperPilot Workbench</title>
     <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/conversations.css" />
   </head>
   <body>
     <header class="topbar">
@@ -36,7 +37,104 @@
       </div>
     </header>
 
-    <main id="workbench" class="layout" hidden>
+    <div id="workspace" hidden>
+      <nav class="workspace-tabs" aria-label="Workspace">
+        <button
+          id="conversationsTab"
+          type="button"
+          class="workspace-tab active"
+          aria-controls="conversationView"
+          aria-selected="true"
+        >
+          Conversations
+        </button>
+        <button
+          id="legacyTab"
+          type="button"
+          class="workspace-tab"
+          aria-controls="workbench"
+          aria-selected="false"
+        >
+          Legacy Workbench
+        </button>
+      </nav>
+
+      <main id="conversationView" class="conversation-layout">
+        <aside class="conversation-sidebar" aria-label="Paper and conversation navigation">
+          <section class="panel conversation-paper-panel" aria-labelledby="paperSearchTitle">
+            <h2 id="paperSearchTitle">Find a paper</h2>
+            <form id="paperSearch">
+              <label for="paperQuery">Title, topic, arXiv ID, or URL</label>
+              <div class="conversation-inline-form">
+                <input
+                  id="paperQuery"
+                  name="paperQuery"
+                  placeholder="retrieval augmented generation"
+                  required
+                />
+                <button type="submit">Search</button>
+              </div>
+            </form>
+            <p id="paperSearchMessage" class="message" role="status"></p>
+            <div id="paperCandidates" class="paper-candidates"></div>
+          </section>
+
+          <section class="panel conversation-history-panel" aria-labelledby="conversationListTitle">
+            <div class="section-heading">
+              <h2 id="conversationListTitle">Conversations</h2>
+              <button id="refreshConversations" type="button" class="secondary-button">Refresh</button>
+            </div>
+            <div id="conversationList" class="conversation-list"></div>
+          </section>
+        </aside>
+
+        <section class="panel conversation-reader" aria-labelledby="conversationTitle">
+          <header class="conversation-header">
+            <div>
+              <h2 id="conversationTitle">Select a conversation</h2>
+              <p id="conversationPaper" class="conversation-paper"></p>
+            </div>
+          </header>
+
+          <p id="conversationMessage" class="message" role="status"></p>
+          <div id="messageList" class="message-list" aria-live="polite"></div>
+
+          <section id="branchSelector" class="branch-selector" aria-labelledby="branchSelectorTitle" hidden>
+            <div class="section-heading">
+              <h2 id="branchSelectorTitle">其他版本</h2>
+              <button id="closeBranchSelector" type="button" class="secondary-button">Close</button>
+            </div>
+            <div id="branchOptions" class="branch-options"></div>
+          </section>
+
+          <section class="conversation-progress" aria-labelledby="conversationProgressTitle">
+            <h2 id="conversationProgressTitle">Progress</h2>
+            <div id="conversationEvents" class="conversation-events"></div>
+          </section>
+
+          <form id="messageComposer" class="message-composer">
+            <label for="conversationQuestion">Follow-up question</label>
+            <textarea
+              id="conversationQuestion"
+              name="conversationQuestion"
+              rows="4"
+              placeholder="Ask about the selected paper or compare it with another paper."
+              required
+            ></textarea>
+            <div class="composer-actions">
+              <label for="conversationDepth">Depth</label>
+              <select id="conversationDepth" name="conversationDepth">
+                <option value="quick">Quick</option>
+                <option value="standard" selected>Standard</option>
+                <option value="deep">Deep</option>
+              </select>
+              <button id="sendConversationMessage" type="submit">Send</button>
+            </div>
+          </form>
+        </section>
+      </main>
+
+      <main id="workbench" class="layout" hidden>
       <section class="panel create-panel" aria-labelledby="createTitle">
         <h2 id="createTitle">New Research Task</h2>
         <form id="taskForm">
@@ -120,8 +218,10 @@
         <div id="taskArtifacts" class="artifact-list"></div>
         <div id="taskEvents" class="event-list"></div>
       </section>
-    </main>
+      </main>
+    </div>
 
+    <script src="/static/conversations.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>
