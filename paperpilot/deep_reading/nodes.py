@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from paperpilot.core.adapter import Tool
 from paperpilot.papers import PaperCandidate, normalize_arxiv_id
+from paperpilot.tools.mcp_client import MCPToolError
 from paperpilot.web.task_store import (
     ConversationDetail,
     MessageRecord,
@@ -53,8 +54,8 @@ class DeepReadingContext:
     event_sink: EventSink
     summary_token_threshold: int = 32_000
     summary_recent_turns: int = 6
-    research_recursion_limit: int = 12
-    research_model_call_limit: int = 6
+    research_recursion_limit: int = 24
+    research_model_call_limit: int = 8
     research_tool_call_limit: int = 12
     research_max_output_tokens: int = 4096
     research_model_retries: int = 1
@@ -551,7 +552,12 @@ def _call_prepare_mcp_json(
             "arguments": _safe_prepare_event_arguments(arguments),
         },
     )
-    raw = tool.handler(arguments)
+    try:
+        raw = tool.handler(arguments)
+    except MCPToolError as exc:
+        raise ResearchContractError(
+            f"{name} reported a deterministic tool failure"
+        ) from exc
     if not isinstance(raw, str):
         raise ResearchContractError(f"{name} did not return JSON text")
     try:

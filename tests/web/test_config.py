@@ -25,8 +25,8 @@ def test_runtime_config_defaults_are_local_and_bounded():
     assert config.checkpoint_db_path == Path("data/langgraph/checkpoints.sqlite3")
     assert config.summary_token_threshold == 32_000
     assert config.summary_recent_turns == 6
-    assert config.research_recursion_limit == 12
-    assert config.research_model_call_limit == 6
+    assert config.research_recursion_limit == 24
+    assert config.research_model_call_limit == 8
     assert config.research_tool_call_limit == 12
     assert config.research_max_output_tokens == 4096
     assert config.research_model_retries == 1
@@ -49,8 +49,8 @@ def test_runtime_config_accepts_explicit_overrides():
             "PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH": "/tmp/paperpilot-checkpoints.sqlite3",
             "PAPERPILOT_SUMMARY_TOKEN_THRESHOLD": "64000",
             "PAPERPILOT_SUMMARY_RECENT_TURNS": "8",
-            "PAPERPILOT_RESEARCH_RECURSION_LIMIT": "20",
-            "PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT": "8",
+            "PAPERPILOT_RESEARCH_RECURSION_LIMIT": "30",
+            "PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT": "10",
             "PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT": "16",
             "PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS": "2048",
             "PAPERPILOT_RESEARCH_MODEL_RETRIES": "0",
@@ -71,8 +71,8 @@ def test_runtime_config_accepts_explicit_overrides():
     assert config.checkpoint_db_path == Path("/tmp/paperpilot-checkpoints.sqlite3")
     assert config.summary_token_threshold == 64_000
     assert config.summary_recent_turns == 8
-    assert config.research_recursion_limit == 20
-    assert config.research_model_call_limit == 8
+    assert config.research_recursion_limit == 30
+    assert config.research_model_call_limit == 10
     assert config.research_tool_call_limit == 16
     assert config.research_max_output_tokens == 2048
     assert config.research_model_retries == 0

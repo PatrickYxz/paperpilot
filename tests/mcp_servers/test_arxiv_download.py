@@ -51,6 +51,64 @@ def test_cache_hit(tmp_path, monkeypatch):
     spy.assert_not_called()
 
 
+def test_legacy_id_uses_unique_top_level_cache_and_second_call_hits_cache(
+    tmp_path,
+    monkeypatch,
+):
+    cache_dir = tmp_path / "papers"
+    monkeypatch.setattr(arxiv_mod, "_PAPERS_DIR", cache_dir)
+    pdf_bytes = FIXTURE_PDF.read_bytes()
+    urlopen = MagicMock(return_value=_fake_urlopen_ctx(pdf_bytes))
+
+    with patch("urllib.request.urlopen", urlopen):
+        first = arxiv_mod._download_paper_impl("cs.AI/0501001v3")
+        second = arxiv_mod._download_paper_impl("cs.AI/0501001v3")
+        assert urlopen.call_count == 1
+        other = arxiv_mod._download_paper_impl("cs.AI/0501002v3")
+
+    assert first == second
+    assert first["paper_id"] == "cs.AI/0501001v3"
+    assert other["paper_id"] == "cs.AI/0501002v3"
+    assert urlopen.call_count == 2
+    cache_files = sorted(cache_dir.iterdir())
+    assert len(cache_files) == 2
+    assert all(path.is_file() and path.parent == cache_dir for path in cache_files)
+    assert len({path.name for path in cache_files}) == 2
+    assert all("/" not in path.name for path in cache_files)
+    assert all("\\" not in path.name for path in cache_files)
+    assert all(".." not in path.name for path in cache_files)
+    assert not (cache_dir / "cs.AI").exists()
+
+
+@pytest.mark.parametrize(
+    "unsafe_id",
+    [
+        "",
+        "   ",
+        "not-an-arxiv-id",
+        "../../outside",
+        "cs.AI/../../outside",
+        r"..\outside",
+        "https://example.com/abs/2401.12345",
+    ],
+)
+def test_invalid_or_traversal_id_is_rejected_before_fetch_or_write(
+    unsafe_id,
+    tmp_path,
+    monkeypatch,
+):
+    cache_dir = tmp_path / "papers"
+    fetch = MagicMock(side_effect=AssertionError("fetch boundary was reached"))
+    monkeypatch.setattr(arxiv_mod, "_PAPERS_DIR", cache_dir)
+    monkeypatch.setattr(arxiv_mod, "_fetch_pdf", fetch)
+
+    with pytest.raises(ValueError, match="invalid arXiv id"):
+        arxiv_mod._download_paper_impl(unsafe_id)
+
+    fetch.assert_not_called()
+    assert not cache_dir.exists()
+
+
 def test_arxiv_404(tmp_path, monkeypatch):
     """arxiv 返回 404 → 抛 ArxivNotFoundError。"""
     monkeypatch.setattr(arxiv_mod, "_PAPERS_DIR", tmp_path / "papers")

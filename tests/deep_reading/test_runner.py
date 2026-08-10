@@ -32,9 +32,16 @@ from paperpilot.deep_reading.runner import (
 )
 from paperpilot.deep_reading.schemas import ConversationSummary
 from paperpilot.papers import PaperCandidate
+from paperpilot.tools.mcp_client import (
+    MCPToolError,
+    MCPToolTimeout,
+    MCPTransportError,
+)
 from paperpilot.tools.mcp_runtime import MCPRuntime
 from paperpilot.web.checkpoint import SqliteCheckpointRuntime
+from paperpilot.web.task_executor import TaskExecutor
 from paperpilot.web.task_store import TaskStore
+from paperpilot.web.workflow import WorkflowRunner
 
 
 PRIMARY = PaperCandidate(
@@ -445,6 +452,56 @@ def test_runner_passes_custom_runtime_bounds_into_graph_context(
         runner.run(turn.task.id)
 
         assert seen_bounds == [(1234, 3, 9, 8, 14, 2048, 0)]
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_runner_passes_default_research_bounds_into_graph_context(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    seen_bounds: list[tuple[int, int, int, int, int]] = []
+
+    def record_context(_state, runtime):
+        context = runtime.context
+        seen_bounds.append(
+            (
+                context.research_recursion_limit,
+                context.research_model_call_limit,
+                context.research_tool_call_limit,
+                context.research_max_output_tokens,
+                context.research_model_retries,
+            )
+        )
+        return {
+            "research_result": {
+                "evidence_items": [],
+                "used_papers": [],
+                "limitations": ["bounded test"],
+            }
+        }
+
+    monkeypatch.setattr(graph_module, "research_evidence", record_context)
+    runner = _runner(
+        store,
+        checkpoint_runtime,
+        mcp_runtime,
+        _ModelFactory([]),
+    )
+    try:
+        turn = _new_turn(store, user, conversation, "Use default runtime bounds")
+        runner.run(turn.task.id)
+
+        assert seen_bounds == [(24, 8, 12, 4096, 1)]
     finally:
         mcp_runtime.close()
         checkpoint_runtime.close()
@@ -1067,6 +1124,189 @@ def test_research_contract_error_is_terminal_and_public_event_is_safe(
         assert "secret-token" not in str(failure.to_dict())
         assert "full-paper-text" not in str(failure.to_dict())
     finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_mcp_tool_error_is_terminal_once_through_runner_and_task_executor(
+    tmp_path,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    failure = MCPToolError("remote-secret full-paper-text")
+    download_calls: list[dict[str, object]] = []
+
+    class FailingMCPClient(_FakeMCPClient):
+        def list_tools(self) -> list[Tool]:
+            tools = super().list_tools()
+
+            def fail_download(arguments: dict[str, object]) -> str:
+                download_calls.append(arguments)
+                raise failure
+
+            return [
+                Tool(
+                    name=tool.name,
+                    description=tool.description,
+                    input_schema=tool.input_schema,
+                    handler=(
+                        fail_download
+                        if tool.name == "mcp__arxiv__download_paper"
+                        else tool.handler
+                    ),
+                )
+                for tool in tools
+            ]
+
+    mcp_runtime = MCPRuntime(FailingMCPClient)
+    deep_runner = _runner(
+        store,
+        checkpoint_runtime,
+        mcp_runtime,
+        _ModelFactory([]),
+    )
+    workflow = WorkflowRunner(store, deep_reading_runner=deep_runner)
+    sleeps: list[float] = []
+    executor = TaskExecutor(
+        workflow,
+        max_workers=1,
+        queue_capacity=0,
+        max_retries=3,
+        sleeper=sleeps.append,
+    )
+    turn = _new_turn(store, user, conversation, "deterministic MCP failure")
+    try:
+        executor.submit(turn.task.id, "real").result(timeout=5)
+
+        task = store.get_task(turn.task.id, user_id=user.id)
+        assert task is not None and task.status == "failed"
+        events = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events is not None
+        failures = [event for event in events.items if event.type == "failed"]
+        assert len(failures) == 1
+        assert failures[0].stage == "deep_reading_terminal"
+        assert failures[0].payload == {
+            "error_code": "research_contract_invalid",
+            "error_type": "ResearchContractError",
+        }
+        assert "execution_retry_exhausted" not in {
+            event.stage for event in events.items
+        }
+        assert "remote-secret" not in str(failures[0].to_dict())
+        assert "full-paper-text" not in str(failures[0].to_dict())
+        assert download_calls == [{"arxiv_id": PRIMARY.external_id}]
+        assert sleeps == []
+    finally:
+        executor.shutdown()
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        MCPToolTimeout("MCP tool timeout"),
+        MCPTransportError("MCP transport unavailable"),
+    ],
+    ids=["timeout", "transport"],
+)
+def test_transient_mcp_failure_keeps_identity_through_bounded_task_retry(
+    failure,
+    tmp_path,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    download_calls: list[dict[str, object]] = []
+
+    class FailingMCPClient(_FakeMCPClient):
+        def list_tools(self) -> list[Tool]:
+            tools = super().list_tools()
+
+            def fail_download(arguments: dict[str, object]) -> str:
+                download_calls.append(arguments)
+                raise failure
+
+            return [
+                Tool(
+                    name=tool.name,
+                    description=tool.description,
+                    input_schema=tool.input_schema,
+                    handler=(
+                        fail_download
+                        if tool.name == "mcp__arxiv__download_paper"
+                        else tool.handler
+                    ),
+                )
+                for tool in tools
+            ]
+
+    mcp_runtime = MCPRuntime(FailingMCPClient)
+    deep_runner = _runner(
+        store,
+        checkpoint_runtime,
+        mcp_runtime,
+        _ModelFactory([]),
+    )
+    workflow = WorkflowRunner(store, deep_reading_runner=deep_runner)
+    sleeps: list[float] = []
+    executor = TaskExecutor(
+        workflow,
+        max_workers=1,
+        queue_capacity=0,
+        max_retries=1,
+        retry_backoff_seconds=1,
+        retry_backoff_max_seconds=1,
+        sleeper=sleeps.append,
+    )
+    turn = _new_turn(store, user, conversation, "transient MCP failure")
+    try:
+        with pytest.raises(type(failure)) as exc_info:
+            executor.submit(turn.task.id, "real").result(timeout=5)
+
+        assert exc_info.value is failure
+        assert download_calls == [
+            {"arxiv_id": PRIMARY.external_id},
+            {"arxiv_id": PRIMARY.external_id},
+        ]
+        assert sleeps == [1]
+        task = store.get_task(turn.task.id, user_id=user.id)
+        assert task is not None and task.status == "failed"
+        events = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events is not None
+        failures = [event for event in events.items if event.type == "failed"]
+        assert len(failures) == 1
+        assert failures[0].stage == "execution_retry_exhausted"
+        assert failures[0].payload == {
+            "backend": "thread",
+            "attempts": 2,
+            "max_retries": 1,
+            "error_type": type(failure).__name__,
+        }
+        assert "deep_reading_terminal" not in {
+            event.stage for event in events.items
+        }
+    finally:
+        executor.shutdown()
         mcp_runtime.close()
         checkpoint_runtime.close()
         store.close()

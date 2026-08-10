@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Sequence
 
 import pytest
 from langchain.agents.middleware import (
@@ -15,8 +16,13 @@ from langchain.agents.middleware import (
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from langchain.agents.structured_output import StructuredOutputError, ToolStrategy
-from langchain.messages import HumanMessage
+from langchain.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
+from pydantic import PrivateAttr
 
 from paperpilot.core.adapter import Tool
 from paperpilot.deep_reading.nodes import DeepReadingContext
@@ -27,7 +33,11 @@ from paperpilot.deep_reading.research_agent import (
     run_research_agent,
 )
 from paperpilot.papers import PaperCandidate
-from paperpilot.tools.mcp_client import MCPTransportError
+from paperpilot.tools.mcp_client import (
+    MCPToolError,
+    MCPToolTimeout,
+    MCPTransportError,
+)
 
 
 PRIMARY = PaperCandidate(
@@ -123,6 +133,125 @@ class _AgentFactory:
         return self.agent
 
 
+class _ScriptedResearchChatModel(BaseChatModel):
+    """Drive LangChain's real Agent/ToolNode loop without provider I/O."""
+
+    script: str = "full"
+    _invoke_count: int = PrivateAttr(default=0)
+    _tool_trace: list[str] = PrivateAttr(default_factory=list)
+    _bound_tool_names: list[str] = PrivateAttr(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-research-test-model"
+
+    @property
+    def invoke_count(self) -> int:
+        return self._invoke_count
+
+    @property
+    def tool_trace(self) -> list[str]:
+        return list(self._tool_trace)
+
+    @property
+    def bound_tool_names(self) -> list[str]:
+        return list(self._bound_tool_names)
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> BaseChatModel:
+        del tool_choice, kwargs
+        names: list[str] = []
+        for bound_tool in tools:
+            if isinstance(bound_tool, BaseTool):
+                names.append(bound_tool.name)
+            elif isinstance(bound_tool, type):
+                names.append(bound_tool.__name__)
+            else:
+                names.append(str(bound_tool.get("name", "provider-tool")))
+        self._bound_tool_names = names
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: object | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del stop, run_manager, kwargs
+        self._invoke_count += 1
+        if self.script == "prepare_only":
+            name = "prepare_paper"
+            arguments: dict[str, object] = {"external_id": PRIMARY.external_id}
+        elif self._invoke_count == 1:
+            name = "search_related_papers"
+            arguments = {"query": "related method", "limit": 1}
+        elif self._invoke_count == 2:
+            last_tool = _last_tool_message(messages)
+            assert last_tool.name == "search_related_papers"
+            found = json.loads(str(last_tool.content))
+            assert found[0]["external_id"] == RELATED.external_id
+            name = "prepare_paper"
+            arguments = {"external_id": RELATED.external_id}
+        elif self._invoke_count == 3:
+            last_tool = _last_tool_message(messages)
+            assert last_tool.name == "prepare_paper"
+            name = "retrieve_paper_evidence"
+            arguments = {
+                "question": "How do the methods differ?",
+                "external_id": RELATED.external_id,
+                "top_k_each": 3,
+                "summary_k": 2,
+            }
+        elif self._invoke_count == 4:
+            last_tool = _last_tool_message(messages)
+            assert last_tool.name == "retrieve_paper_evidence"
+            retrieved = json.loads(str(last_tool.content))
+            evidence_id = retrieved["evidence_items"][0]["id"]
+            name = AgentResearchDecision.__name__
+            arguments = {
+                "selected_evidence_ids": [evidence_id],
+                "paper_uses": [
+                    {
+                        "external_id": RELATED.external_id,
+                        "role": "comparison",
+                        "evidence_ids": [evidence_id],
+                    }
+                ],
+                "limitations": ["Only one related paper was compared."],
+            }
+        else:  # pragma: no cover - a bounded successful run must stop at call four
+            raise AssertionError("real Agent made an unexpected fifth model call")
+
+        self._tool_trace.append(name)
+        message = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": name,
+                    "args": arguments,
+                    "id": f"scripted-call-{self._invoke_count}",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _last_tool_message(messages: list[BaseMessage]) -> ToolMessage:
+    selected = next(
+        (message for message in reversed(messages) if isinstance(message, ToolMessage)),
+        None,
+    )
+    assert selected is not None
+    return selected
+
+
 def _evidence_payload(
     external_id: str,
     evidence_id: str,
@@ -214,6 +343,7 @@ def _mcp_tools(
 def _context(
     behavior: Callable[[Mapping[str, Any], int], object],
     *,
+    model: object | None = None,
     mcp_tools: dict[str, Tool] | None = None,
     search: Callable[[str, int], list[PaperCandidate]] | None = None,
     event_sink: Callable[[str, dict[str, object]], None] | None = None,
@@ -229,12 +359,11 @@ def _context(
         current_user_message_id="message-1",
         base_checkpoint_id="checkpoint-base",
         task_store=store or _Store(),  # type: ignore[arg-type]
-        model=object(),
+        model=object() if model is None else model,
         mcp_tools=tools,
         paper_search=search or (lambda _query, _limit: [RELATED, UNUSED]),
         event_sink=event_sink
         or (lambda kind, payload: events.append((kind, payload))),
-        research_recursion_limit=12,
     )
     return context, factory, mcp_calls
 
@@ -314,7 +443,7 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
     assert response_format.schema is AgentResearchDecision
     assert response_format.handle_errors is False
     assert factory.agent is not None
-    assert factory.agent.invocations[0][1] == {"recursion_limit": 12}
+    assert factory.agent.invocations[0][1] == {"recursion_limit": 24}
     assert mcp_calls == [
         (
             "mcp__arxiv__download_paper",
@@ -345,6 +474,66 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
     ]
 
 
+def test_real_agent_completes_three_tool_chain_in_exactly_four_model_calls() -> None:
+    model = _ScriptedResearchChatModel()
+    context, _factory, mcp_calls = _context(
+        lambda _tools, _attempt: None,
+        model=model,
+        search=lambda _query, _limit: [RELATED],
+    )
+
+    result = run_research_agent(STATE, context)
+
+    assert model.invoke_count == 4
+    assert model.tool_trace == [
+        "search_related_papers",
+        "prepare_paper",
+        "retrieve_paper_evidence",
+        AgentResearchDecision.__name__,
+    ]
+    assert model.bound_tool_names == [
+        "search_related_papers",
+        "prepare_paper",
+        "retrieve_paper_evidence",
+        AgentResearchDecision.__name__,
+    ]
+    assert [name for name, _arguments in mcp_calls] == [
+        "mcp__arxiv__download_paper",
+        "mcp__colbert__build_index",
+        "mcp__colbert__planned_retrieval",
+    ]
+    assert len(result.evidence_items) == 1
+    assert result.evidence_items[0].chunk_text == f"Evidence from {RELATED.external_id}"
+    assert result.used_papers[0].paper == RELATED
+    assert result.limitations == ["Only one related paper was compared."]
+
+
+def test_real_agent_rejects_old_three_model_call_attempt_budget() -> None:
+    model = _ScriptedResearchChatModel()
+    context, _factory, _mcp_calls = _context(
+        lambda _tools, _attempt: None,
+        model=model,
+        search=lambda _query, _limit: [RELATED],
+    )
+    old_budget_context = replace(
+        context,
+        research_model_call_limit=6,
+        research_recursion_limit=24,
+    )
+
+    with pytest.raises(DeepReadingTaskError) as exc_info:
+        run_research_agent(STATE, old_budget_context)
+
+    assert exc_info.value.error_code == "agent_budget_exhausted"
+    assert isinstance(exc_info.value.__cause__, ModelCallLimitExceededError)
+    assert model.invoke_count == 3
+    assert model.tool_trace == [
+        "search_related_papers",
+        "prepare_paper",
+        "retrieve_paper_evidence",
+    ]
+
+
 def test_agent_installs_official_per_attempt_limits_and_model_retry() -> None:
     def behavior(_tools: Mapping[str, Any], _attempt: int) -> object:
         return {
@@ -365,7 +554,7 @@ def test_agent_installs_official_per_attempt_limits_and_model_retry() -> None:
     model_limit, tool_limit, model_retry = middleware
     assert isinstance(model_limit, ModelCallLimitMiddleware)
     assert model_limit.thread_limit is None
-    assert model_limit.run_limit == 3
+    assert model_limit.run_limit == 4
     assert model_limit.exit_behavior == "error"
     assert isinstance(tool_limit, ToolCallLimitMiddleware)
     assert tool_limit.tool_name is None
@@ -954,7 +1143,7 @@ def test_invalid_structured_response_is_attempted_at_most_twice() -> None:
     tool_limit = next(
         item for item in middleware if isinstance(item, ToolCallLimitMiddleware)
     )
-    assert len(factory.agent.invocations) * model_limit.run_limit <= 6
+    assert len(factory.agent.invocations) * model_limit.run_limit <= 8
     assert len(factory.agent.invocations) * tool_limit.run_limit <= 12
 
 
@@ -1211,3 +1400,61 @@ def test_transport_error_is_not_retried_or_wrapped() -> None:
 
     assert factory.agent is not None
     assert len(factory.agent.invocations) == 1
+
+
+def test_real_tool_node_converts_mcp_tool_error_to_contract_failure() -> None:
+    failure = MCPToolError("remote-secret full-paper-text")
+
+    def fail_download(_arguments: dict[str, object]) -> str:
+        raise failure
+
+    mcp_tools, calls = _mcp_tools(download_result=fail_download)
+    model = _ScriptedResearchChatModel(script="prepare_only")
+    context, _factory, _unused = _context(
+        lambda _tools, _attempt: None,
+        model=model,
+        mcp_tools=mcp_tools,
+    )
+
+    with pytest.raises(ResearchContractError) as exc_info:
+        run_research_agent(STATE, context)
+
+    assert exc_info.value.__cause__ is failure
+    assert "remote-secret" not in str(exc_info.value)
+    assert "full-paper-text" not in str(exc_info.value)
+    assert model.invoke_count == 1
+    assert model.tool_trace == ["prepare_paper"]
+    assert calls == [
+        ("mcp__arxiv__download_paper", {"arxiv_id": PRIMARY.external_id})
+    ]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        MCPToolTimeout("tool timed out"),
+        MCPTransportError("transport closed"),
+    ],
+    ids=["timeout", "transport"],
+)
+def test_real_tool_node_preserves_transient_mcp_failure_identity(failure) -> None:
+    def fail_download(_arguments: dict[str, object]) -> str:
+        raise failure
+
+    mcp_tools, calls = _mcp_tools(download_result=fail_download)
+    model = _ScriptedResearchChatModel(script="prepare_only")
+    context, _factory, _unused = _context(
+        lambda _tools, _attempt: None,
+        model=model,
+        mcp_tools=mcp_tools,
+    )
+
+    with pytest.raises(type(failure)) as exc_info:
+        run_research_agent(STATE, context)
+
+    assert exc_info.value is failure
+    assert model.invoke_count == 1
+    assert model.tool_trace == ["prepare_paper"]
+    assert calls == [
+        ("mcp__arxiv__download_paper", {"arxiv_id": PRIMARY.external_id})
+    ]

@@ -10,13 +10,14 @@ import ssl
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import quote
 
 import arxiv
 import certifi
 import fitz
 from mcp.server.fastmcp import FastMCP
 
-from paperpilot.papers import search_arxiv_candidates
+from paperpilot.papers import normalize_arxiv_id, search_arxiv_candidates
 
 mcp = FastMCP("arxiv")
 _client = arxiv.Client(page_size=50, delay_seconds=3)
@@ -82,26 +83,36 @@ def download_paper(arxiv_id: str) -> dict:
 
     Args:
         arxiv_id: arXiv 标识符,如 "2401.12345" 或带版本 "2401.12345v2"。
-            旧式 "cs.AI/0501001" 也允许,但调用方需保证 id 不含路径分隔符以外的特殊字符。
+            旧式 "cs.AI/0501001" 和规范 arXiv URL 也允许。
 
     Returns:
-        dict 含 paper_id(原样返回)、text(纯文本,空白未规范化)。
+        dict 含 paper_id(canonical arXiv ID)、text(纯文本,空白未规范化)。
     """
     return _download_paper_impl(arxiv_id)
 
 
 def _download_paper_impl(arxiv_id: str) -> dict:
     """download_paper 的纯函数实现,绕过 FastMCP 装饰器,方便单测调用。"""
-    cache_path = _PAPERS_DIR / f"{arxiv_id}.txt"
-    if cache_path.exists():
-        return {"paper_id": arxiv_id, "text": cache_path.read_text(encoding="utf-8")}
+    canonical_id = normalize_arxiv_id(arxiv_id)
+    if canonical_id is None:
+        raise ValueError(f"invalid arXiv id: {arxiv_id!r}")
 
-    pdf_bytes = _fetch_pdf(arxiv_id)
-    text = _extract_text(arxiv_id, pdf_bytes)
+    cache_key = quote(canonical_id, safe="")
+    if not cache_key or any(part in cache_key for part in ("/", "\\", "..")):
+        raise ValueError("invalid arXiv id: unsafe cache key")
+    cache_path = _PAPERS_DIR / f"{cache_key}.txt"
+    if cache_path.exists():
+        return {
+            "paper_id": canonical_id,
+            "text": cache_path.read_text(encoding="utf-8"),
+        }
+
+    pdf_bytes = _fetch_pdf(canonical_id)
+    text = _extract_text(canonical_id, pdf_bytes)
 
     _PAPERS_DIR.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(text, encoding="utf-8")
-    return {"paper_id": arxiv_id, "text": text}
+    return {"paper_id": canonical_id, "text": text}
 
 
 def _fetch_pdf(arxiv_id: str) -> bytes:

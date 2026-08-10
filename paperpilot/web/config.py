@@ -27,8 +27,8 @@ class WebRuntimeConfig:
     checkpoint_db_path: Path = Path("data/langgraph/checkpoints.sqlite3")
     summary_token_threshold: int = 32_000
     summary_recent_turns: int = 6
-    research_recursion_limit: int = 12
-    research_model_call_limit: int = 6
+    research_recursion_limit: int = 24
+    research_model_call_limit: int = 8
     research_tool_call_limit: int = 12
     research_max_output_tokens: int = 4096
     research_model_retries: int = 1
@@ -130,13 +130,13 @@ class WebRuntimeConfig:
             research_recursion_limit=_read_int(
                 values,
                 "PAPERPILOT_RESEARCH_RECURSION_LIMIT",
-                default=12,
+                default=24,
                 minimum=1,
             ),
             research_model_call_limit=_read_int(
                 values,
                 "PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT",
-                default=6,
+                default=8,
                 minimum=2,
             ),
             research_tool_call_limit=_read_int(

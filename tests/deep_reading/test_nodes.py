@@ -41,6 +41,11 @@ from paperpilot.deep_reading.schemas import (
 )
 from paperpilot.core.adapter import Tool
 from paperpilot.papers import PaperCandidate
+from paperpilot.tools.mcp_client import (
+    MCPToolError,
+    MCPToolTimeout,
+    MCPTransportError,
+)
 from paperpilot.web.task_store import TaskStore, UsedPaperInput
 from paperpilot.deep_reading.state import (
     GRAPH_VERSION,
@@ -414,6 +419,15 @@ def _context(
 
 def test_context_is_frozen_and_rejects_unbounded_configuration() -> None:
     context = _context(_FakeModel())
+    default_context = _node_context(store=_NodeStore(), model=_FakeModel())
+
+    assert (
+        default_context.research_recursion_limit,
+        default_context.research_model_call_limit,
+        default_context.research_tool_call_limit,
+        default_context.research_max_output_tokens,
+        default_context.research_model_retries,
+    ) == (24, 8, 12, 4096, 1)
 
     with pytest.raises(FrozenInstanceError):
         context.task_id = "changed"  # type: ignore[misc]
@@ -876,6 +890,106 @@ def test_prepare_primary_paper_rejects_bad_identity_before_build() -> None:
             )
 
         assert calls == ([] if download_result is None else ["download"])
+
+
+@pytest.mark.parametrize(
+    "failing_tool_name",
+    ["mcp__arxiv__download_paper", "mcp__colbert__build_index"],
+    ids=["download", "build"],
+)
+def test_prepare_primary_paper_converts_only_mcp_tool_error(
+    failing_tool_name: str,
+) -> None:
+    failure = MCPToolError("remote-secret full-paper-text")
+    calls: list[str] = []
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def download(arguments: dict[str, object]) -> str:
+        calls.append("mcp__arxiv__download_paper")
+        if failing_tool_name == "mcp__arxiv__download_paper":
+            raise failure
+        return json.dumps(
+            {"paper_id": arguments["arxiv_id"], "text": "trusted paper text"}
+        )
+
+    def build(arguments: dict[str, object]) -> str:
+        calls.append("mcp__colbert__build_index")
+        if failing_tool_name == "mcp__colbert__build_index":
+            raise failure
+        return json.dumps(
+            {"fresh_papers": [arguments["documents"][0]["paper_id"]]}
+        )
+
+    context = _node_context(
+        store=_NodeStore(),
+        model=_FakeModel(),
+        tools={
+            "mcp__arxiv__download_paper": _tool(
+                "mcp__arxiv__download_paper", download
+            ),
+            "mcp__colbert__build_index": _tool(
+                "mcp__colbert__build_index", build
+            ),
+        },
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    with pytest.raises(ResearchContractError) as exc_info:
+        prepare_primary_paper(_bound_state(), Runtime(context=context))
+
+    assert exc_info.value.__cause__ is failure
+    assert "remote-secret" not in str(exc_info.value)
+    assert "full-paper-text" not in str(exc_info.value)
+    assert calls[-1] == failing_tool_name
+    assert "remote-secret" not in str(events)
+    assert "full-paper-text" not in str(events)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        MCPToolTimeout("MCP timeout"),
+        MCPTransportError("MCP transport closed"),
+        ConnectionError("connection reset"),
+        TimeoutError("socket timeout"),
+        OSError("filesystem unavailable"),
+        RuntimeError("unknown infrastructure failure"),
+        ValueError("unknown dependency failure"),
+    ],
+    ids=[
+        "mcp-timeout",
+        "mcp-transport",
+        "connection",
+        "timeout",
+        "os-error",
+        "unknown-runtime",
+        "unknown-value",
+    ],
+)
+def test_prepare_primary_paper_preserves_infrastructure_failure_identity(
+    failure,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def download(arguments: dict[str, object]) -> str:
+        calls.append(arguments)
+        raise failure
+
+    context = _node_context(
+        store=_NodeStore(),
+        model=_FakeModel(),
+        tools={
+            "mcp__arxiv__download_paper": _tool(
+                "mcp__arxiv__download_paper", download
+            ),
+        },
+    )
+
+    with pytest.raises(type(failure)) as exc_info:
+        prepare_primary_paper(_bound_state(), Runtime(context=context))
+
+    assert exc_info.value is failure
+    assert calls == [{"arxiv_id": "2401.12345v1"}]
 
 
 def test_write_answer_uses_bounded_trusted_context_and_writes_json_draft() -> None:

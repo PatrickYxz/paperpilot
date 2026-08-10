@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from paperpilot.core.adapter import Tool
 from paperpilot.papers import PaperCandidate, normalize_arxiv_id
+from paperpilot.tools.mcp_client import MCPToolError
 
 from .schemas import EvidenceItem, PaperUse, ResearchResult
 from .state import DeepReadingState
@@ -509,7 +510,12 @@ def _call_mcp_json(
         name=name,
         arguments=_event_arguments(arguments),
     )
-    raw = custom_tool.handler(arguments)
+    try:
+        raw = custom_tool.handler(arguments)
+    except MCPToolError as exc:
+        raise ResearchContractError(
+            f"{name} reported a deterministic tool failure"
+        ) from exc
     try:
         if not isinstance(raw, str):
             raise ResearchContractError(f"{name} did not return JSON text")

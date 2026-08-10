@@ -16,7 +16,7 @@
 - 依赖范围必须保持：`langgraph>=1.2.9,<1.3`、`langchain>=1.3.14,<1.4`、`langgraph-checkpoint-sqlite>=3.1,<3.2`、`langchain-deepseek>=1.1,<1.2`、`pydantic>=2.13,<3`。
 - `LANGGRAPH_STRICT_MSGPACK` 缺省按安全值 `true` 处理；显式设置为 false 时启动失败。
 - 新 Graph 的工具调用与 structured output 模型固定使用 `deepseek-chat`；不得使用 `deepseek-reasoner`。
-- 长上下文配置固定为 `PAPERPILOT_SUMMARY_TOKEN_THRESHOLD=32000`、`PAPERPILOT_SUMMARY_RECENT_TURNS=6`、`PAPERPILOT_RESEARCH_RECURSION_LIMIT=12`，并在 `WebRuntimeConfig.from_env()` 中验证为正整数。
+- 长上下文配置固定为 `PAPERPILOT_SUMMARY_TOKEN_THRESHOLD=32000`、`PAPERPILOT_SUMMARY_RECENT_TURNS=6`、`PAPERPILOT_RESEARCH_RECURSION_LIMIT=24`，并在 `WebRuntimeConfig.from_env()` 中验证为正整数。
 - `InMemorySaver` 只允许出现在单元测试；重启、回滚、fork 和并发承诺必须用真实 `SqliteSaver` 验证。
 - 自动化测试全部使用 fake model/fake tools，不读取 `DEEPSEEK_API_KEY`；真实模型烟雾测试必须再次获得用户明确批准。
 - 同一 Conversation 同时最多一个 `pending`/`running` Task；不同 Conversation 可以并行。
@@ -1519,6 +1519,83 @@ Expected: 目标与完整 suite 0 failed；只保留既有 slow deselection/第�
 
 ---
 
+### Task 19: 修复真实 Agent 主路径预算、旧式 arXiv 缓存与 MCP 工具终态
+
+**背景与用户裁决：**
+- Task 18 后的整分支真实框架审查确认 3 个 Important：默认每次 `agent.invoke()` 只有 3 个模型调用且 recursion limit 为 12，无法完成 `search -> prepare -> retrieve -> structured decision`；合法旧式 arXiv ID 中的 `/` 会被直接当成缓存子目录；已知服务端 `MCPToolError` 会被误作基础设施异常执行 Task 级重试。
+- 用户选择预算方案 1：总逻辑模型调用预算从 6 提高到 8，两次 structured attempts 各 4；`PAPERPILOT_RESEARCH_RECURSION_LIMIT` 默认从 12 提高到 24。工具调用总预算保持 12（各 attempt 6），单响应 4096 output tokens，模型失败 middleware retry 1。
+- 该选择仍只使用 LangChain/LangGraph 官方预算机制，不新增自定义累计 usage middleware。
+
+**Files:**
+- Modify: `paperpilot/web/config.py`
+- Modify: `paperpilot/deep_reading/nodes.py`
+- Modify: `paperpilot/deep_reading/research_agent.py`
+- Modify: `paperpilot/deep_reading/runner.py`
+- Modify: `paperpilot/mcp_servers/arxiv.py`
+- Modify: `.env.example`
+- Modify: `README.md`
+- Modify: `tests/web/test_config.py`
+- Modify: `tests/web/test_conversation_worker.py`
+- Modify: `tests/deep_reading/test_nodes.py`
+- Modify: `tests/deep_reading/test_research_agent.py`
+- Modify: `tests/deep_reading/test_runner.py`
+- Modify: `tests/mcp_servers/test_arxiv_download.py`
+- Modify: `tests/web/test_runtime_config.py`
+- Modify: `docs/codex-only-plans/2026-08-07-paperpilot-conversation-langgraph-vertical-slice-plan.md`
+
+**Exact contract — real Agent budget:**
+- 默认 `research_model_call_limit=8`，`research_tool_call_limit=12`，`research_max_output_tokens=4096`，`research_model_retries=1`，`research_recursion_limit=24`；对应环境变量名称保持 Task 17 既有名称。
+- 两次 structured-response attempts 的 model run limit 固定按总量分配为 4 + 4；tool run limit 为 6 + 6。配置仍允许高于默认的值，但每次 attempt 的分配之和不得超过配置总量。
+- 保持 `ChatDeepSeek(max_tokens=4096, max_retries=0)` 和 `ModelRetryMiddleware(max_retries=1, on_failure="error")`；provider retry 与 Task 16 retry 仍为独立边界。
+- 新增一个无网络、真实 `create_agent()`/ToolNode/官方 middleware 的成功路径测试：脚本模型必须实际经历 `search_related_papers -> prepare_paper -> retrieve_paper_evidence -> AgentResearchDecision`，断言恰好 4 个逻辑模型调用、3 个工具调用、没有 GraphRecursionError/ModelCallLimitExceededError，结果只使用权威 ledger 数据。
+- 同一真实框架测试必须证明旧默认 `run_limit=3` 或等价突变会失败，以确保测试不是只检查 middleware 对象。
+- README 更新理论 generated-token 上界：单 execution attempt 为 `8 * 4096 = 32,768`；Task 16 默认最多 4 个 execution attempts，极端 replay 为 `131,072`。明确这不是 usage metadata 精确账单。
+
+**Exact contract — legacy arXiv cache:**
+- `_download_paper_impl()` 在任何网络或文件写入前使用 `normalize_arxiv_id()` 校验并取得 canonical ID；非法、空白、路径穿越或非 arXiv 值立即抛稳定 `ValueError`。
+- 缓存键必须由 canonical ID 生成且不含 `/`、`\\`、`..` 或平台路径分隔符；最终缓存文件必须直接位于 `_PAPERS_DIR` 下。不得通过简单创建任意 parent 接受嵌套/穿越路径。
+- 现代 ID 的既有缓存文件命名和 cache hit 行为保持兼容；旧式 `cs.AI/0501001v3` 必须能首次下载写入、第二次 cache hit 不联网，并返回 canonical `paper_id`。
+- 旧式 ID 的安全键不得与另一个合法 ID 冲突；测试不依赖具体编码算法，但必须断言单文件位于顶层目录且没有 `cs.AI/` 子目录。
+
+**Exact contract — MCPToolError taxonomy:**
+- `paperpilot.tools.mcp_client.MCPToolError` 表示 MCP server 已返回的确定性工具失败。`prepare_primary_paper()` 的直接 MCP 调用以及 Research Agent 的 download/build/retrieval 工具调用都必须只捕获该类型并转换为安全 `ResearchContractError`，以原 `MCPToolError` 对象作为 `__cause__`。
+- 公共 terminal 事件继续使用 `deep_reading_terminal/research_contract_invalid`，不得写入 `MCPToolError` 原文、远端 payload、论文正文、密钥或 traceback。
+- `MCPToolTimeout`、`MCPTransportError`、`ConnectionError`、`TimeoutError`、`OSError` 和未知基础设施异常必须保持同一对象 identity 逃出，由 Task 16 重试；不得 broad-catch RuntimeError/Exception/ValueError 或按消息文本分类。
+- 用真实 `create_agent()`/ToolNode 无网络测试证明普通 `MCPToolError` 能从 ToolNode 重新抛出后被业务工具包装为 `ResearchContractError`；transport/timeout 同一对象逃出。
+- Runner/TaskExecutor 集成回归证明 `MCPToolError` 只执行一次、立即写一个安全 terminal event、不会产生 `execution_retry_exhausted`；transport/timeout 仍进入既有有界 retry。
+
+- [ ] **Step 1: 先写真实 Agent、旧式缓存与 MCP 错误测试并验证 RED**
+
+先增加真实 `create_agent()` 四模型轮次成功路径、旧式 ID 首次写入/缓存命中/路径穿越拒绝、nodes/Research Agent/Runner 的 MCPToolError terminal 与 transport identity 测试。运行目标测试，确认 RED 来自 3-call/12-recursion 默认、含斜杠缓存路径和缺少 MCPToolError 转换，而非 fixture/导入/收集错误。
+
+- [ ] **Step 2: 调整框架预算与配置传播**
+
+把默认 model calls 调为 8、recursion 调为 24；其余 12/4096/1 不变。更新 Config、Runner/Context 默认、Web/Worker 传播测试、README/.env，并保持高于默认配置可用。
+
+- [ ] **Step 3: 实现 canonical、安全且兼容的 arXiv 缓存键**
+
+先规范化再生成单层安全文件名；保留现代 ID 缓存兼容，拒绝所有非法路径输入。不得联网测试，使用既有 PDF fixture/fetch fake。
+
+- [ ] **Step 4: 实现 MCPToolError terminal 转换**
+
+只在两个既有 MCP JSON 调用边界捕获 `MCPToolError`，转换成安全 `ResearchContractError` 并保留 cause；所有 transient 类型原样逃出。
+
+- [ ] **Step 5: 运行目标、完整与持久化门禁**
+
+Run: `LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m pytest tests/deep_reading/test_nodes.py tests/deep_reading/test_research_agent.py tests/deep_reading/test_runner.py tests/mcp_servers/test_arxiv_download.py tests/web/test_config.py tests/web/test_conversation_worker.py tests/web/test_runtime_config.py -q`
+
+Run: `LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m pytest tests -q`
+
+Run: fresh Alembic/checkpoint setup、`tests/web/test_checkpoint.py -q`、`uv pip check --python .venv/bin/python`、`git diff --check e2b0f82..HEAD`。
+
+Expected: 目标与完整 suite 0 failed；只保留既有 deselection/warnings；持久化、依赖和 diff 门禁 exit 0。
+
+- [ ] **Step 6: 提交、独立任务复审与最终 merge review**
+
+提交一个 Task 19 commit，生成 `e2b0f82..HEAD` task package，逐项审查真实 Agent 成功、旧式缓存安全、MCPToolError terminal/transient。任务复审通过后生成 `bf003b2..HEAD` 整分支 package；若无 Critical/Important，进入分支交付。
+
+---
+
 ## 计划自检映射
 
 | 设计要求 | 实施 Task |
@@ -1532,11 +1609,12 @@ Expected: 目标与完整 suite 0 failed；只保留既有 slow deselection/第�
 | 幂等发布、两个崩溃窗口、Celery redelivery 与普通异常有限重试 | 7、11、12、16 |
 | Thread 原子所有权、terminal/transient 异常分类、Agent 调用与 token 预算 | 17 |
 | structured parser terminal 分类与 provider transient passthrough | 18 |
+| 真实三工具 Agent 预算、旧式 arXiv 安全缓存、MCPToolError 终态 | 19 |
 | 连续追问、rollback 零模型调用、后续 fork | 11、13、15 |
 | 进度轮询 + 完整 Assistant Message | 13、14 |
 | 旧 `/api/tasks` 兼容 | 12、13、15 |
 | 不实现 Store/token streaming/cancel/Postgres | Global Constraints、15 |
-| 无付费模型自动测试与完整回归 | 1–18，重点 15–18 |
+| 无付费模型自动测试与完整回归 | 1–19，重点 15–19 |
 
 ## 执行停止条件
 
