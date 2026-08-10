@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import urllib.error
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -78,6 +79,42 @@ def test_legacy_id_uses_unique_top_level_cache_and_second_call_hits_cache(
     assert all("\\" not in path.name for path in cache_files)
     assert all(".." not in path.name for path in cache_files)
     assert not (cache_dir / "cs.AI").exists()
+
+
+def test_legacy_ids_differing_only_by_case_use_casefold_distinct_caches(
+    tmp_path,
+    monkeypatch,
+):
+    cache_dir = tmp_path / "papers"
+    monkeypatch.setattr(arxiv_mod, "_PAPERS_DIR", cache_dir)
+    fetch = MagicMock(side_effect=lambda canonical_id: canonical_id.encode("utf-8"))
+    monkeypatch.setattr(arxiv_mod, "_fetch_pdf", fetch)
+    monkeypatch.setattr(
+        arxiv_mod,
+        "_extract_text",
+        lambda canonical_id, pdf_bytes: pdf_bytes.decode("utf-8"),
+    )
+
+    upper_first = arxiv_mod._download_paper_impl("cs.AI/0501001v3")
+    lower_first = arxiv_mod._download_paper_impl("cs.ai/0501001v3")
+    upper_cached = arxiv_mod._download_paper_impl("cs.AI/0501001v3")
+    lower_cached = arxiv_mod._download_paper_impl("cs.ai/0501001v3")
+
+    assert upper_first == upper_cached == {
+        "paper_id": "cs.AI/0501001v3",
+        "text": "cs.AI/0501001v3",
+    }
+    assert lower_first == lower_cached == {
+        "paper_id": "cs.ai/0501001v3",
+        "text": "cs.ai/0501001v3",
+    }
+    assert fetch.call_count == 2
+    cache_names = [path.name for path in cache_dir.iterdir()]
+    assert set(cache_names) == {
+        f"legacy-{sha256(canonical_id.encode('utf-8')).hexdigest()}.txt"
+        for canonical_id in ("cs.AI/0501001v3", "cs.ai/0501001v3")
+    }
+    assert len({name.casefold() for name in cache_names}) == 2
 
 
 @pytest.mark.parametrize(

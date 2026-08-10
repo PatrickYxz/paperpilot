@@ -9,6 +9,7 @@ from __future__ import annotations
 import ssl
 import urllib.error
 import urllib.request
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import quote
 
@@ -97,7 +98,11 @@ def _download_paper_impl(arxiv_id: str) -> dict:
     if canonical_id is None:
         raise ValueError(f"invalid arXiv id: {arxiv_id!r}")
 
-    cache_key = quote(canonical_id, safe="")
+    cache_key = (
+        f"legacy-{sha256(canonical_id.encode('utf-8')).hexdigest()}"
+        if "/" in canonical_id
+        else quote(canonical_id, safe="")
+    )
     if not cache_key or any(part in cache_key for part in ("/", "\\", "..")):
         raise ValueError("invalid arXiv id: unsafe cache key")
     cache_path = _PAPERS_DIR / f"{cache_key}.txt"

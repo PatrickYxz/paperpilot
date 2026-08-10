@@ -1596,6 +1596,44 @@ Expected: 目标与完整 suite 0 failed；只保留既有 deselection/warnings�
 
 ---
 
+### Task 20: 消除 macOS 大小写不敏感的 legacy arXiv 缓存别名
+
+**背景：**
+- Task 19 已修复 legacy ID 的 `/` 嵌套与 traversal，但最终 merge review 在目标 macOS 文件系统复现：`normalize_arxiv_id()` 同时保留 `cs.AI/0501001v3` 与 `cs.ai/0501001v3`，`quote()` 生成的文件名只在字母大小写上不同；大小写不敏感卷会把二者当成同一文件。
+- 第二个 ID 因此可能在联网前误命中第一个缓存，返回错误论文正文并污染索引/evidence/引用归属。
+
+**Files:**
+- Modify: `paperpilot/mcp_servers/arxiv.py`
+- Modify: `tests/mcp_servers/test_arxiv_download.py`
+- Modify: `docs/codex-only-plans/2026-08-07-paperpilot-conversation-langgraph-vertical-slice-plan.md`
+
+**Exact contract:**
+- 现代数字 ID（如 `2401.12345v2`）继续使用既有 `<canonical_id>.txt` 文件名，保持缓存兼容。
+- 仅 legacy ID（canonical ID 含 `/`）使用 `legacy-<sha256(canonical_id.encode("utf-8")).hexdigest()>.txt`；digest 固定小写十六进制，文件直接位于 `_PAPERS_DIR`。
+- `cs.AI/0501001v3` 与 `cs.ai/0501001v3` 的缓存文件名在 `.casefold()` 后也必须不同；两者分别首次 fetch/write，之后各自 cache hit，正文和返回 `paper_id` 不串读。
+- 继续保留 Task 19 的 normalize-before-cache/fetch/write、非法/traversal 拒绝、modern cache hit、顶层单文件与无网络测试。
+- 不修改 arXiv 下载 URL、返回 schema、MCP API、Agent、预算、异常分类、依赖或其他缓存。
+
+- [x] **Step 1: 写大小写别名回归并验证 RED**
+
+在同一临时 `_PAPERS_DIR` 中依次请求两个大小写变体，fetch fake 为它们返回不同正文；断言旧实现的两个路径 `.casefold()` 相同或第二个错误命中第一个，从而 RED。测试不得依赖当前磁盘本身是否大小写敏感。
+
+- [x] **Step 2: 实现 legacy SHA-256 键**
+
+仅在现有 cache-key helper/局部逻辑中替换 legacy 编码；modern 路径完全不变。不得增加抽象层或迁移已有缓存。
+
+- [ ] **Step 3: 运行目标、完整与 scoped review**
+
+Run: `./.venv/bin/python -m pytest tests/mcp_servers/test_arxiv_download.py -q`
+
+Run: `LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m pytest tests -q`
+
+Run: `git diff --check 5b74f46..HEAD`
+
+提交一个窄范围 commit，生成 `5b74f46..HEAD` package。独立 reviewer 只裁定大小写别名 Important 是否关闭及 fix diff 是否有新 Critical/Important；通过后分支可进入交付。
+
+---
+
 ## 计划自检映射
 
 | 设计要求 | 实施 Task |
@@ -1610,11 +1648,12 @@ Expected: 目标与完整 suite 0 failed；只保留既有 deselection/warnings�
 | Thread 原子所有权、terminal/transient 异常分类、Agent 调用与 token 预算 | 17 |
 | structured parser terminal 分类与 provider transient passthrough | 18 |
 | 真实三工具 Agent 预算、旧式 arXiv 安全缓存、MCPToolError 终态 | 19 |
+| macOS 大小写不敏感的 legacy arXiv 缓存唯一性 | 20 |
 | 连续追问、rollback 零模型调用、后续 fork | 11、13、15 |
 | 进度轮询 + 完整 Assistant Message | 13、14 |
 | 旧 `/api/tasks` 兼容 | 12、13、15 |
 | 不实现 Store/token streaming/cancel/Postgres | Global Constraints、15 |
-| 无付费模型自动测试与完整回归 | 1–19，重点 15–19 |
+| 无付费模型自动测试与完整回归 | 1–20，重点 15–20 |
 
 ## 执行停止条件
 
