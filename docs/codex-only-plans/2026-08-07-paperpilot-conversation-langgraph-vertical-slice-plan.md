@@ -1622,7 +1622,7 @@ Expected: 目标与完整 suite 0 failed；只保留既有 deselection/warnings�
 
 仅在现有 cache-key helper/局部逻辑中替换 legacy 编码；modern 路径完全不变。不得增加抽象层或迁移已有缓存。
 
-- [ ] **Step 3: 运行目标、完整与 scoped review**
+- [x] **Step 3: 运行目标、完整与 scoped review**
 
 Run: `./.venv/bin/python -m pytest tests/mcp_servers/test_arxiv_download.py -q`
 
