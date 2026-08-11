@@ -101,13 +101,46 @@ def _static_formatted_value(node: ast.FormattedValue) -> str | None:
         return None
 
 
-def _dynamic_import_argument(node: ast.Call) -> ast.expr | None:
+def _importlib_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
+    function_bindings: set[str] = set()
+    module_bindings: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            module_bindings.update(
+                alias.asname or "importlib"
+                for alias in node.names
+                if alias.name == "importlib"
+            )
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 0
+            and node.module == "importlib"
+        ):
+            function_bindings.update(
+                alias.asname or "import_module"
+                for alias in node.names
+                if alias.name == "import_module"
+            )
+    return function_bindings, module_bindings
+
+
+def _dynamic_import_argument(
+    node: ast.Call,
+    *,
+    function_bindings: set[str],
+    module_bindings: set[str],
+) -> ast.expr | None:
     is_dynamic_import = (
         isinstance(node.func, ast.Name)
-        and node.func.id in {"__import__", "import_module"}
+        and (
+            node.func.id == "__import__"
+            or node.func.id in function_bindings
+        )
     ) or (
         isinstance(node.func, ast.Attribute)
         and node.func.attr == "import_module"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in module_bindings
     )
     if not is_dynamic_import:
         return None
@@ -121,6 +154,7 @@ def _dynamic_import_argument(node: ast.Call) -> ast.expr | None:
 
 def _forbidden_references(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    function_bindings, module_bindings = _importlib_bindings(tree)
     references: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -135,7 +169,11 @@ def _forbidden_references(path: Path) -> set[str]:
                     if alias.name != "*"
                 )
         elif isinstance(node, ast.Call):
-            argument = _dynamic_import_argument(node)
+            argument = _dynamic_import_argument(
+                node,
+                function_bindings=function_bindings,
+                module_bindings=module_bindings,
+            )
             if argument is not None and (module_name := _static_string(argument)):
                 references.add(module_name.strip())
     return {reference for reference in references if _is_forbidden(reference)}
@@ -230,6 +268,55 @@ def test_scanner_qualifies_import_from_aliases(
     ],
 )
 def test_scanner_folds_static_dynamic_import_strings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    expected: set[str],
+) -> None:
+    assert _scan_source(
+        tmp_path,
+        monkeypatch,
+        relative_path="paperpilot/module.py",
+        source=source,
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "from importlib import import_module as load_module\n"
+            'load_module("paperpilot.agent")\n',
+            {"paperpilot.agent"},
+        ),
+        (
+            "from importlib import import_module as load_module\n"
+            'load_module(name="paperpilot.core")\n',
+            {"paperpilot.core"},
+        ),
+        (
+            "import importlib as il\n"
+            'il.import_module(name="paperpilot.core")\n',
+            {"paperpilot.core"},
+        ),
+        (
+            "def import_module(name):\n"
+            "    return name\n"
+            'import_module("paperpilot.agent")\n',
+            set(),
+        ),
+        (
+            'registry.import_module("paperpilot.core")\n',
+            set(),
+        ),
+        (
+            "import utilities as il\n"
+            'il.import_module("paperpilot.agent")\n',
+            set(),
+        ),
+    ],
+)
+def test_scanner_requires_real_importlib_bindings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     source: str,
