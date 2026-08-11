@@ -13,7 +13,14 @@ from paperpilot.web.config import WebRuntimeConfig
 from paperpilot.web.observability import ACCESS_LOGGER_NAME
 from paperpilot.web.task_executor import SynchronousTaskExecutor
 from paperpilot.web.task_store import TaskStore
-from paperpilot.web.workflow import WorkflowRunner
+
+
+class _UnusedRunner:
+    def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+        raise AssertionError(f"unexpected task execution: {task_id}, {allow_running}")
+
+    def fail_retry_exhausted(self, *_args, **_kwargs) -> None:
+        raise AssertionError("unexpected retry exhaustion")
 
 
 class FailingExecutor:
@@ -63,8 +70,7 @@ class RecordHandler(logging.Handler):
 
 def _client(tmp_path) -> TestClient:
     store = TaskStore(tmp_path / "tasks.sqlite3")
-    runner = WorkflowRunner(store, delay_seconds=0)
-    executor = SynchronousTaskExecutor(runner)
+    executor = SynchronousTaskExecutor(_UnusedRunner())
     return TestClient(create_app(store, task_executor=executor))
 
 
@@ -205,8 +211,7 @@ def test_health_routes_are_public_hidden_and_split_dependencies(tmp_path):
 
 def test_ready_fails_for_database_but_live_remains_ok(tmp_path):
     store = FailingHealthStore(tmp_path / "tasks.sqlite3")
-    runner = WorkflowRunner(store, delay_seconds=0)
-    executor = SynchronousTaskExecutor(runner)
+    executor = SynchronousTaskExecutor(_UnusedRunner())
     client = TestClient(create_app(store, task_executor=executor))
 
     assert client.get("/health/live").status_code == 200
@@ -224,8 +229,7 @@ def test_ready_fails_for_database_but_live_remains_ok(tmp_path):
 
 def test_ready_fails_for_checkpoint_but_live_does_not_probe_it(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
-    runner = WorkflowRunner(store, delay_seconds=0)
-    executor = SynchronousTaskExecutor(runner)
+    executor = SynchronousTaskExecutor(_UnusedRunner())
     checkpoint = FailingHealthCheckpoint()
     client = TestClient(
         create_app(
@@ -255,8 +259,7 @@ def test_ready_fails_for_checkpoint_but_live_does_not_probe_it(tmp_path):
 
 def test_ready_fails_after_executor_shutdown(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
-    runner = WorkflowRunner(store, delay_seconds=0)
-    executor = SynchronousTaskExecutor(runner)
+    executor = SynchronousTaskExecutor(_UnusedRunner())
     executor.shutdown()
     client = TestClient(create_app(store, task_executor=executor))
 

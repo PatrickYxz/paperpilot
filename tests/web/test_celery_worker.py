@@ -7,21 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from paperpilot.papers import PaperCandidate
-from paperpilot.tools.mcp_runtime import MCPRuntime
 from paperpilot.web.config import WebRuntimeConfig
 from paperpilot.web.celery_app import create_celery_app
 from paperpilot.web.task_store import TaskStore
 from paperpilot.web import worker_tasks
-
-
-class RuntimeFactory:
-    def __init__(self) -> None:
-        self.instances: list[MCPRuntime] = []
-
-    def __call__(self) -> MCPRuntime:
-        runtime = MCPRuntime(lambda: None)  # The fake runner never leases tools.
-        self.instances.append(runtime)
-        return runtime
 
 
 class ClosableRuntime:
@@ -46,14 +35,6 @@ class TrackingTaskStore(TaskStore):
         super().close()
 
 
-class RaisingWorkflowRunner:
-    def __init__(self, store: TaskStore) -> None:
-        self.store = store
-
-    def run_simulated(self, task_id: str) -> None:
-        raise RuntimeError("workflow failed before cleanup")
-
-
 class RetryScheduled(RuntimeError):
     pass
 
@@ -63,10 +44,16 @@ class NonRetryableWorkerError(RuntimeError):
 
 
 class FailingDeepReadingRunner:
-    def __init__(self, exc: Exception) -> None:
+    def __init__(self, exc: Exception, store=None) -> None:
         self.exc = exc
+        self.store = store
 
-    def run(self, task_id: str) -> None:
+    def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+        if self.store is not None:
+            assert self.store.claim_task(
+                task_id,
+                allow_running=allow_running,
+            ) is not None
         raise self.exc
 
 
@@ -122,13 +109,48 @@ def _configure_failing_conversation(
     monkeypatch.setattr(
         worker_tasks,
         "_build_deep_reading_runner",
-        lambda *_args, **_kwargs: FailingDeepReadingRunner(execution_error),
+        lambda store, *_args, **_kwargs: FailingDeepReadingRunner(
+            execution_error,
+            store,
+        ),
     )
     monkeypatch.setattr(
         worker_tasks.WebRuntimeConfig,
         "from_env",
         lambda: WebRuntimeConfig(),
     )
+
+
+def test_mode_free_celery_worker_passes_retry_recovery_flag(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    config = WebRuntimeConfig()
+
+    def record_execution(task_id, *, redelivered=False, config=None):
+        calls.append(
+            {
+                "task_id": task_id,
+                "redelivered": redelivered,
+                "config": config,
+            }
+        )
+
+    monkeypatch.setattr(worker_tasks, "_execute_research_task", record_execution)
+    monkeypatch.setattr(worker_tasks.WebRuntimeConfig, "from_env", lambda: config)
+
+    result = worker_tasks.execute_research_task.apply(
+        args=["task_running"],
+        retries=1,
+        throw=False,
+    )
+
+    assert result.successful()
+    assert calls == [
+        {
+            "task_id": "task_running",
+            "redelivered": True,
+            "config": config,
+        }
+    ]
 
 
 def test_celery_app_uses_long_task_safety_settings(monkeypatch):
@@ -179,7 +201,7 @@ def test_celery_task_retries_real_conversation_execution_exception(
     retry_calls = _capture_retry(monkeypatch)
 
     result = worker_tasks.execute_research_task.apply(
-        args=[task.id, "real"],
+        args=[task.id],
         throw=False,
     )
 
@@ -229,30 +251,12 @@ def test_celery_task_retries_real_conversation_resource_failure(
     retry_calls = _capture_retry(monkeypatch)
 
     result = worker_tasks.execute_research_task.apply(
-        args=[task.id, "real"],
+        args=[task.id],
         throw=False,
     )
 
     assert isinstance(result.result, RetryScheduled)
     assert retry_calls[0]["exc"] is execution_error
-
-
-def test_celery_task_does_not_retry_invalid_execution_mode(monkeypatch):
-    retry_calls = _capture_retry(monkeypatch)
-    monkeypatch.setattr(
-        worker_tasks.WebRuntimeConfig,
-        "from_env",
-        lambda: WebRuntimeConfig(),
-    )
-
-    result = worker_tasks.execute_research_task.apply(
-        args=["task_invalid", "invalid"],
-        throw=False,
-    )
-
-    assert result.failed()
-    assert isinstance(result.result, ValueError)
-    assert retry_calls == []
 
 
 def test_celery_task_does_not_retry_missing_task(monkeypatch, tmp_path):
@@ -268,7 +272,7 @@ def test_celery_task_does_not_retry_missing_task(monkeypatch, tmp_path):
     )
 
     result = worker_tasks.execute_research_task.apply(
-        args=["task_missing", "real"],
+        args=["task_missing"],
         throw=False,
     )
 
@@ -292,7 +296,7 @@ def test_celery_task_does_not_retry_store_construction_failure(monkeypatch):
     )
 
     result = worker_tasks.execute_research_task.apply(
-        args=["task_store", "real"],
+        args=["task_store"],
         throw=False,
     )
 
@@ -301,12 +305,15 @@ def test_celery_task_does_not_retry_store_construction_failure(monkeypatch):
     assert retry_calls == []
 
 
-def test_celery_task_does_not_retry_claim_failure(monkeypatch):
-    claim_error = NonRetryableWorkerError("claim unavailable")
+def test_celery_task_retries_claim_infrastructure_failure(monkeypatch):
+    claim_error = OSError("claim unavailable")
     retry_calls = _capture_retry(monkeypatch)
 
     class ClaimFailingStore:
         close_calls = 0
+
+        def get_task(self, task_id):
+            return SimpleNamespace(id=task_id)
 
         def claim_task(self, task_id, *, allow_running=False):
             raise claim_error
@@ -316,6 +323,17 @@ def test_celery_task_does_not_retry_claim_failure(monkeypatch):
 
     store = ClaimFailingStore()
     monkeypatch.setattr(worker_tasks, "_store_factory", lambda: store)
+    monkeypatch.setattr(worker_tasks, "_get_runtime", lambda: object())
+
+    class ClaimFailingRunner:
+        def run(self, task_id, *, allow_running=False):
+            return store.claim_task(task_id, allow_running=allow_running)
+
+    monkeypatch.setattr(
+        worker_tasks,
+        "_build_deep_reading_runner",
+        lambda *_args, **_kwargs: ClaimFailingRunner(),
+    )
     monkeypatch.setattr(
         worker_tasks.WebRuntimeConfig,
         "from_env",
@@ -323,13 +341,12 @@ def test_celery_task_does_not_retry_claim_failure(monkeypatch):
     )
 
     result = worker_tasks.execute_research_task.apply(
-        args=["task_claim", "real"],
+        args=["task_claim"],
         throw=False,
     )
 
-    assert result.failed()
-    assert result.result is claim_error
-    assert retry_calls == []
+    assert isinstance(result.result, RetryScheduled)
+    assert retry_calls[0]["exc"] is claim_error
     assert store.close_calls == 1
 
 
@@ -348,6 +365,18 @@ def test_celery_task_does_not_retry_standalone_cleanup_failure(monkeypatch):
             raise cleanup_error
 
     monkeypatch.setattr(worker_tasks, "_store_factory", CleanupFailingStore)
+    monkeypatch.setattr(worker_tasks, "_get_runtime", lambda: object())
+
+    class NoopRunner:
+        def run(self, task_id, *, allow_running=False):
+            del task_id, allow_running
+            return False
+
+    monkeypatch.setattr(
+        worker_tasks,
+        "_build_deep_reading_runner",
+        lambda *_args, **_kwargs: NoopRunner(),
+    )
     monkeypatch.setattr(
         worker_tasks.WebRuntimeConfig,
         "from_env",
@@ -355,73 +384,12 @@ def test_celery_task_does_not_retry_standalone_cleanup_failure(monkeypatch):
     )
 
     result = worker_tasks.execute_research_task.apply(
-        args=["task_cleanup", "real"],
+        args=["task_cleanup"],
         throw=False,
     )
 
     assert result.failed()
     assert result.result is cleanup_error
-    assert retry_calls == []
-
-
-def test_celery_task_does_not_retry_simulated_workflow_failure(
-    monkeypatch,
-    tmp_path,
-):
-    db_path = tmp_path / "simulated-failure.sqlite3"
-    seed = TaskStore(db_path)
-    task = seed.create_task(question="simulated failure")
-    seed.close()
-    retry_calls = _capture_retry(monkeypatch)
-    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: TaskStore(db_path))
-    monkeypatch.setattr(worker_tasks, "WorkflowRunner", RaisingWorkflowRunner)
-    monkeypatch.setattr(
-        worker_tasks.WebRuntimeConfig,
-        "from_env",
-        lambda: WebRuntimeConfig(),
-    )
-
-    result = worker_tasks.execute_research_task.apply(
-        args=[task.id, "simulated"],
-        throw=False,
-    )
-
-    assert result.failed()
-    assert isinstance(result.result, RuntimeError)
-    assert retry_calls == []
-
-
-def test_celery_task_does_not_retry_legacy_workflow_failure(monkeypatch, tmp_path):
-    db_path = tmp_path / "legacy-failure.sqlite3"
-    seed = TaskStore(db_path)
-    task = seed.create_task(question="legacy failure")
-    seed.close()
-    execution_error = NonRetryableWorkerError("legacy failed")
-    retry_calls = _capture_retry(monkeypatch)
-
-    class RaisingLegacyWorkflowRunner:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def run_real(self, task_id):
-            raise execution_error
-
-    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: TaskStore(db_path))
-    monkeypatch.setattr(worker_tasks, "_get_runtime", lambda: object())
-    monkeypatch.setattr(worker_tasks, "WorkflowRunner", RaisingLegacyWorkflowRunner)
-    monkeypatch.setattr(
-        worker_tasks.WebRuntimeConfig,
-        "from_env",
-        lambda: WebRuntimeConfig(),
-    )
-
-    result = worker_tasks.execute_research_task.apply(
-        args=[task.id, "real"],
-        throw=False,
-    )
-
-    assert result.failed()
-    assert result.result is execution_error
     assert retry_calls == []
 
 
@@ -456,46 +424,12 @@ def test_conversation_execution_error_wins_over_cleanup_failure(
     retry_calls = _capture_retry(monkeypatch)
 
     result = worker_tasks.execute_research_task.apply(
-        args=[task.id, "real"],
+        args=[task.id],
         throw=False,
     )
 
     assert isinstance(result.result, RetryScheduled)
     assert retry_calls[0]["exc"] is execution_error
-
-
-def test_celery_retry_request_can_reclaim_running_task(monkeypatch):
-    calls: list[dict[str, object]] = []
-
-    def record_execution(task_id, execution_mode, *, redelivered=False, config=None):
-        calls.append(
-            {
-                "task_id": task_id,
-                "execution_mode": execution_mode,
-                "redelivered": redelivered,
-                "config": config,
-            }
-        )
-
-    config = WebRuntimeConfig()
-    monkeypatch.setattr(worker_tasks, "_execute_research_task", record_execution)
-    monkeypatch.setattr(worker_tasks.WebRuntimeConfig, "from_env", lambda: config)
-
-    result = worker_tasks.execute_research_task.apply(
-        args=["task_running", "real"],
-        retries=1,
-        throw=False,
-    )
-
-    assert result.successful()
-    assert calls == [
-        {
-            "task_id": "task_running",
-            "execution_mode": "real",
-            "redelivered": True,
-            "config": config,
-        }
-    ]
 
 
 def test_celery_retry_exhaustion_fails_real_sqlite_conversation(monkeypatch, tmp_path):
@@ -512,7 +446,7 @@ def test_celery_retry_exhaustion_fails_real_sqlite_conversation(monkeypatch, tmp
     )
 
     result = worker_tasks.execute_research_task.apply(
-        args=[task.id, "real"],
+        args=[task.id],
         retries=3,
         throw=False,
     )
@@ -546,112 +480,43 @@ def test_celery_retry_exhaustion_fails_real_sqlite_conversation(monkeypatch, tmp
 
 def test_worker_closes_task_store_after_success(tmp_path, monkeypatch):
     store = TrackingTaskStore(tmp_path / "success.sqlite3")
-    task = store.create_task(question="close after success")
+    task = _new_conversation_task(store)
     monkeypatch.setattr(worker_tasks, "_store_factory", lambda: store)
+    monkeypatch.setattr(worker_tasks, "_get_runtime", lambda: object())
 
-    worker_tasks._execute_research_task(task.id, "simulated")
+    class SuccessfulRunner:
+        def run(self, task_id, *, allow_running=False):
+            del task_id, allow_running
+            return True
+
+    monkeypatch.setattr(
+        worker_tasks,
+        "_build_deep_reading_runner",
+        lambda *_args, **_kwargs: SuccessfulRunner(),
+    )
+
+    worker_tasks._execute_research_task(task.id)
 
     assert store.close_calls == 1
 
 
 def test_worker_closes_task_store_after_failure(tmp_path, monkeypatch):
     store = TrackingTaskStore(tmp_path / "failure.sqlite3")
-    task = store.create_task(question="close after failure")
+    task = _new_conversation_task(store)
+    failure = RuntimeError("runner failed before cleanup")
     monkeypatch.setattr(worker_tasks, "_store_factory", lambda: store)
-    monkeypatch.setattr(worker_tasks, "WorkflowRunner", RaisingWorkflowRunner)
-
-    with pytest.raises(RuntimeError, match="workflow failed before cleanup"):
-        worker_tasks._execute_research_task(task.id, "simulated")
-
-    assert store.close_calls == 1
-
-
-def test_worker_reuses_one_runtime_for_two_real_tasks(tmp_path, monkeypatch):
-    store = TaskStore(tmp_path / "tasks.sqlite3")
-    first = store.create_task(question="first")
-    second = store.create_task(question="second")
-    runtime_factory = RuntimeFactory()
-    seen_runtimes: list[MCPRuntime] = []
-
-    def fake_run(query, *, on_event=None, mcp_runtime=None):
-        seen_runtimes.append(mcp_runtime)
-        return [{"role": "assistant", "content": f"answer: {query}"}]
-
-    monkeypatch.setattr(worker_tasks, "_runtime", None)
-    monkeypatch.setattr(worker_tasks, "_runtime_factory", runtime_factory)
-    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: store)
-    monkeypatch.setattr(worker_tasks, "run_conversation", fake_run)
-
-    worker_tasks._execute_research_task(first.id, "real")
-    worker_tasks._execute_research_task(second.id, "real")
-
-    assert len(runtime_factory.instances) == 1
-    assert seen_runtimes == [runtime_factory.instances[0], runtime_factory.instances[0]]
-    assert store.get_task(first.id).status == "completed"
-    assert store.get_task(second.id).status == "completed"
-
-
-def test_simulated_worker_task_does_not_create_runtime(tmp_path, monkeypatch):
-    store = TaskStore(tmp_path / "tasks.sqlite3")
-    task = store.create_task(question="simulation")
-    runtime_factory = RuntimeFactory()
-
-    monkeypatch.setattr(worker_tasks, "_runtime", None)
-    monkeypatch.setattr(worker_tasks, "_runtime_factory", runtime_factory)
-    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: store)
-
-    worker_tasks._execute_research_task(task.id, "simulated")
-
-    assert runtime_factory.instances == []
-    assert store.get_task(task.id).status == "completed"
-
-
-def test_worker_skips_redelivered_completed_task(tmp_path, monkeypatch):
-    store = TaskStore(tmp_path / "tasks.sqlite3")
-    task = store.create_task(question="already complete")
-    store.update_status(task.id, "completed")
-    runtime_factory = RuntimeFactory()
-
-    monkeypatch.setattr(worker_tasks, "_runtime", None)
-    monkeypatch.setattr(worker_tasks, "_runtime_factory", runtime_factory)
-    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: store)
-
-    worker_tasks._execute_research_task(task.id, "real")
-
-    assert runtime_factory.instances == []
-    event_page = store.list_events_page(
-        task.id,
-        user_id=None,
-        after_id=0,
-        limit=100,
+    monkeypatch.setattr(worker_tasks, "_get_runtime", lambda: object())
+    monkeypatch.setattr(
+        worker_tasks,
+        "_build_deep_reading_runner",
+        lambda *_args, **_kwargs: FailingDeepReadingRunner(failure),
     )
-    assert event_page is not None
-    assert event_page.items == []
 
+    with pytest.raises(worker_tasks._RetryableConversationExecution) as exc_info:
+        worker_tasks._execute_research_task(task.id)
 
-def test_only_redelivered_message_can_recover_running_task(tmp_path, monkeypatch):
-    store = TaskStore(tmp_path / "tasks.sqlite3")
-    task = store.create_task(question="recover me")
-    store.update_status(task.id, "running")
-    runtime_factory = RuntimeFactory()
-    seen: list[str] = []
-
-    def fake_run(query, *, on_event=None, mcp_runtime=None):
-        seen.append(query)
-        return [{"role": "assistant", "content": "recovered"}]
-
-    monkeypatch.setattr(worker_tasks, "_runtime", None)
-    monkeypatch.setattr(worker_tasks, "_runtime_factory", runtime_factory)
-    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: store)
-    monkeypatch.setattr(worker_tasks, "run_conversation", fake_run)
-
-    worker_tasks._execute_research_task(task.id, "real")
-    assert seen == []
-
-    worker_tasks._execute_research_task(task.id, "real", redelivered=True)
-
-    assert seen == ["recover me"]
-    assert store.get_task(task.id).status == "completed"
+    assert exc_info.value.original is failure
+    assert store.close_calls == 1
 
 
 def test_worker_shutdown_closes_and_forgets_runtime(monkeypatch):

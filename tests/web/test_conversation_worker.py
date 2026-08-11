@@ -10,12 +10,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 import paperpilot.web.app as app_module
+from paperpilot.deep_reading.runner import DeepReadingRunner
 from paperpilot.papers import PaperCandidate
 from paperpilot.web import worker_tasks
 from paperpilot.web.app import create_app
 from paperpilot.web.config import WebRuntimeConfig
 from paperpilot.web.task_store import TaskStore
-from paperpilot.web.workflow import WorkflowRunner
 
 
 PRIMARY_PAPER = PaperCandidate(
@@ -76,10 +76,11 @@ class FakeCheckpointRuntime:
 
 class FakeDeepReadingRunner:
     def __init__(self) -> None:
-        self.calls: list[str] = []
+        self.calls: list[tuple[str, bool]] = []
 
-    def run(self, task_id: str) -> None:
-        self.calls.append(task_id)
+    def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+        self.calls.append((task_id, allow_running))
+        return True
 
 
 class RecordingExecutor:
@@ -90,7 +91,7 @@ class RecordingExecutor:
     def reserve(self):  # pragma: no cover - lifecycle test never submits
         raise AssertionError("unexpected submission")
 
-    def submit(self, task_id: str, execution_mode: str):  # pragma: no cover
+    def submit(self, task_id: str):  # pragma: no cover
         raise AssertionError("unexpected submission")
 
     def shutdown(self) -> None:
@@ -182,12 +183,15 @@ def test_worker_reuses_process_mcp_and_checkpoint_for_conversation_tasks(
     monkeypatch.setattr(worker_tasks.WebRuntimeConfig, "from_env", lambda: config)
     monkeypatch.setattr(worker_tasks, "DeepReadingRunner", RecordingDeepRunner)
 
-    worker_tasks._execute_research_task(first.id, "real")
-    worker_tasks._execute_research_task(second.id, "real")
+    worker_tasks._execute_research_task(first.id)
+    worker_tasks._execute_research_task(second.id)
 
     assert len(mcp_instances) == 1
     assert len(checkpoint_instances) == 1
-    assert [runner.calls for runner in deep_runners] == [[first.id], [second.id]]
+    assert [runner.calls for runner in deep_runners] == [
+        [(first.id, False)],
+        [(second.id, False)],
+    ]
     assert checkpoint_paths == [config.checkpoint_db_path]
     assert [
         (kwargs["mcp_runtime"], kwargs["checkpointer"])
@@ -197,8 +201,8 @@ def test_worker_reuses_process_mcp_and_checkpoint_for_conversation_tasks(
         (mcp_instances[0], checkpoint_instances[0].saver),
     ]
     check = TaskStore(db_path)
-    assert check.get_task(first.id).status == "running"
-    assert check.get_task(second.id).status == "running"
+    assert check.get_task(first.id).status == "pending"
+    assert check.get_task(second.id).status == "pending"
     check.close()
 
 
@@ -213,8 +217,9 @@ def test_worker_recovers_redelivered_running_conversation_but_skips_completed(
     seed.update_status(running.id, "running")
     seed.update_status(completed.id, "completed")
     seed.close()
-    deep_runner = FakeDeepReadingRunner()
     builds: list[str] = []
+    invocations: list[tuple[str, bool]] = []
+    executions: list[str] = []
 
     monkeypatch.setattr(worker_tasks, "_runtime", None)
     monkeypatch.setattr(worker_tasks, "_checkpoint_runtime", None, raising=False)
@@ -230,20 +235,39 @@ def test_worker_recovers_redelivered_running_conversation_but_skips_completed(
     monkeypatch.setattr(worker_tasks.WebRuntimeConfig, "from_env", lambda: config)
 
     def make_runner(**kwargs):
-        builds.append(kwargs["task_store"].get_task(running.id).status)
-        return deep_runner
+        store = kwargs["task_store"]
+        task_id = running.id if len(builds) < 2 else completed.id
+        builds.append(store.get_task(task_id).status)
+
+        class RecoveringRunner:
+            def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+                invocations.append((task_id, allow_running))
+                claimed = store.claim_task(
+                    task_id,
+                    allow_running=allow_running,
+                )
+                if claimed is None:
+                    return False
+                executions.append(task_id)
+                return True
+
+        return RecoveringRunner()
 
     monkeypatch.setattr(worker_tasks, "DeepReadingRunner", make_runner)
 
-    worker_tasks._execute_research_task(running.id, "real")
-    assert deep_runner.calls == []
-    assert builds == []
+    worker_tasks._execute_research_task(running.id)
+    assert executions == []
 
-    worker_tasks._execute_research_task(running.id, "real", redelivered=True)
-    worker_tasks._execute_research_task(completed.id, "real", redelivered=True)
+    worker_tasks._execute_research_task(running.id, redelivered=True)
+    worker_tasks._execute_research_task(completed.id, redelivered=True)
 
-    assert deep_runner.calls == [running.id]
-    assert builds == ["running"]
+    assert invocations == [
+        (running.id, False),
+        (running.id, True),
+        (completed.id, True),
+    ]
+    assert executions == [running.id]
+    assert builds == ["running", "running", "completed"]
 
 
 def test_late_retry_exhaustion_preserves_completed_conversation_without_event(
@@ -252,9 +276,13 @@ def test_late_retry_exhaustion_preserves_completed_conversation_without_event(
     store = TaskStore(tmp_path / "completed-race.sqlite3")
     task = _new_conversation_task(store, suffix="9")
     store.update_status(task.id, "completed")
-    runner = WorkflowRunner(store)
+    runner = DeepReadingRunner(
+        task_store=store,
+        checkpointer=object(),
+        mcp_runtime=object(),
+    )
 
-    runner.fail_conversation_execution(
+    runner.fail_retry_exhausted(
         task.id,
         backend="celery",
         attempts=4,
@@ -272,43 +300,6 @@ def test_late_retry_exhaustion_preserves_completed_conversation_without_event(
     assert events is not None
     assert [event for event in events.items if event.type == "failed"] == []
     store.close()
-
-
-def test_legacy_real_worker_does_not_create_checkpoint_runtime(tmp_path, monkeypatch):
-    db_path = tmp_path / "tasks.sqlite3"
-    seed = TaskStore(db_path)
-    task = seed.create_task(question="Legacy one-shot task")
-    seed.close()
-    checkpoint_instances: list[FakeCheckpointRuntime] = []
-
-    monkeypatch.setattr(worker_tasks, "_runtime", None)
-    monkeypatch.setattr(worker_tasks, "_checkpoint_runtime", None, raising=False)
-    monkeypatch.setattr(worker_tasks, "_runtime_factory", FakeMCPRuntime)
-    monkeypatch.setattr(
-        worker_tasks.WebRuntimeConfig,
-        "from_env",
-        lambda: (_ for _ in ()).throw(AssertionError("config read for legacy task")),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        worker_tasks,
-        "_checkpoint_runtime_factory",
-        lambda: checkpoint_instances.append(FakeCheckpointRuntime()),
-        raising=False,
-    )
-    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: TaskStore(db_path))
-    monkeypatch.setattr(
-        worker_tasks,
-        "run_conversation",
-        lambda query, **_kwargs: [{"role": "assistant", "content": query}],
-    )
-
-    worker_tasks._execute_research_task(task.id, "real")
-
-    assert checkpoint_instances == []
-    check = TaskStore(db_path)
-    assert check.get_task(task.id).status == "completed"
-    check.close()
 
 
 def test_worker_build_passes_one_custom_config_to_checkpoint_and_runner(
@@ -391,36 +382,6 @@ def test_worker_import_does_not_read_deep_reading_runtime_config() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-
-
-def test_simulated_and_completed_worker_tasks_do_not_read_runtime_config(
-    tmp_path,
-    monkeypatch,
-):
-    db_path = tmp_path / "tasks.sqlite3"
-    seed = TaskStore(db_path)
-    simulated = seed.create_task(question="simulated")
-    completed = _new_conversation_task(seed, suffix="5")
-    seed.update_status(completed.id, "completed")
-    seed.close()
-
-    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: TaskStore(db_path))
-    monkeypatch.setattr(
-        worker_tasks.WebRuntimeConfig,
-        "from_env",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("config read for non-conversation execution")
-        ),
-        raising=False,
-    )
-
-    worker_tasks._execute_research_task(simulated.id, "simulated")
-    worker_tasks._execute_research_task(completed.id, "real", redelivered=True)
-
-    check = TaskStore(db_path)
-    assert check.get_task(simulated.id).status == "completed"
-    assert check.get_task(completed.id).status == "completed"
-    check.close()
 
 
 def test_app_default_runtime_uses_injected_store_directory_and_closes_in_order(

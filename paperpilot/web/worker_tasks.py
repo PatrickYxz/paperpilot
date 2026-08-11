@@ -8,7 +8,6 @@ from pathlib import Path
 
 from celery.signals import worker_process_init, worker_process_shutdown
 
-from paperpilot.conversation import run as run_conversation
 from paperpilot.deep_reading.runner import DeepReadingRunner
 from paperpilot.tools.mcp_runtime import MCPRuntime
 from paperpilot.web.celery_app import (
@@ -17,12 +16,8 @@ from paperpilot.web.celery_app import (
 )
 from paperpilot.web.checkpoint import SqliteCheckpointRuntime
 from paperpilot.web.config import WebRuntimeConfig
-from paperpilot.web.task_executor import (
-    ExecutionMode,
-    task_retry_countdown_seconds,
-)
+from paperpilot.web.task_executor import task_retry_countdown_seconds
 from paperpilot.web.task_store import TaskStore
-from paperpilot.web.workflow import WorkflowRunner
 
 _runtime: MCPRuntime | None = None
 _checkpoint_runtime: SqliteCheckpointRuntime | None = None
@@ -87,51 +82,28 @@ def _build_deep_reading_runner(
 
 def _execute_research_task(
     task_id: str,
-    execution_mode: ExecutionMode,
     *,
     redelivered: bool = False,
     config: WebRuntimeConfig | None = None,
 ) -> None:
-    if execution_mode not in {"simulated", "real"}:
-        raise ValueError(f"invalid execution mode: {execution_mode!r}")
     store = _store_factory()
     retryable_error: _RetryableConversationExecution | None = None
     try:
-        claimed = store.claim_task(task_id, allow_running=redelivered)
-        if claimed is None and store.get_task(task_id) is None:
+        if store.get_task(task_id) is None:
             raise ValueError(f"task not found: {task_id}")
-        if claimed is None:
-            return
-        if execution_mode == "simulated":
-            WorkflowRunner(store).run_simulated(task_id)
-            return
-
-        if claimed.conversation_id is not None:
-            try:
-                runtime = _get_runtime()
-                deep_reading_runner = _build_deep_reading_runner(
-                    store,
-                    runtime,
-                    config=config,
-                )
-                WorkflowRunner(
-                    store,
-                    deep_reading_runner=deep_reading_runner,
-                ).run_real(task_id)
-            except Exception as exc:
-                raise _RetryableConversationExecution(exc) from exc
-            return
-
-        runtime = _get_runtime()
-
-        def real_runner(query: str, *, on_event=None) -> list[dict]:
-            return run_conversation(
-                query,
-                on_event=on_event,
-                mcp_runtime=runtime,
+        try:
+            runtime = _get_runtime()
+            deep_reading_runner = _build_deep_reading_runner(
+                store,
+                runtime,
+                config=config,
             )
-
-        WorkflowRunner(store, real_runner=real_runner).run_real(task_id)
+            deep_reading_runner.run(
+                task_id,
+                allow_running=redelivered,
+            )
+        except Exception as exc:
+            raise _RetryableConversationExecution(exc) from exc
     except _RetryableConversationExecution as exc:
         retryable_error = exc
         raise
@@ -159,7 +131,6 @@ def _execute_research_task(
 def execute_research_task(
     self,
     task_id: str,
-    execution_mode: ExecutionMode,
 ) -> None:
     config = WebRuntimeConfig.from_env()
     delivery_info = self.request.delivery_info or {}
@@ -167,7 +138,6 @@ def execute_research_task(
     try:
         _execute_research_task(
             task_id,
-            execution_mode,
             redelivered=(
                 bool(delivery_info.get("redelivered")) or retries > 0
             ),
@@ -201,7 +171,7 @@ def execute_research_task(
             )
 
         try:
-            _fail_conversation_execution(
+            _fail_retry_exhausted(
                 task_id,
                 attempts=retries + 1,
                 max_retries=config.task_max_retries,
@@ -219,7 +189,7 @@ def execute_research_task(
         raise exc
 
 
-def _fail_conversation_execution(
+def _fail_retry_exhausted(
     task_id: str,
     *,
     attempts: int,
@@ -228,7 +198,11 @@ def _fail_conversation_execution(
 ) -> None:
     store = _store_factory()
     try:
-        WorkflowRunner(store).fail_conversation_execution(
+        DeepReadingRunner(
+            task_store=store,
+            checkpointer=object(),
+            mcp_runtime=object(),
+        ).fail_retry_exhausted(
             task_id,
             backend="celery",
             attempts=attempts,

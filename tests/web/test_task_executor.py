@@ -7,7 +7,6 @@ from concurrent.futures import Future
 
 import pytest
 
-from paperpilot.papers import PaperCandidate
 from paperpilot.web import task_executor as task_executor_module
 from paperpilot.web.config import WebRuntimeConfig
 from paperpilot.web.task_executor import (
@@ -19,23 +18,17 @@ from paperpilot.web.task_executor import (
     TaskSubmissionReservation,
     build_task_executor,
 )
-from paperpilot.web.task_store import TaskStore
-from paperpilot.web.workflow import WorkflowRunner
-
-
 class FakeRunner:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, bool]] = []
+        self.exhaustions: list[dict[str, object]] = []
 
-    def run_simulated(self, task_id: str) -> None:
-        self.calls.append(("simulated", task_id))
+    def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+        self.calls.append((task_id, allow_running))
+        return True
 
-    def run_real(self, task_id: str) -> None:
-        self.calls.append(("real", task_id))
-
-    def claim_conversation_task(self, task_id: str) -> str:
-        del task_id
-        return "not_conversation"
+    def fail_retry_exhausted(self, task_id: str, **kwargs) -> None:
+        self.exhaustions.append({"task_id": task_id, **kwargs})
 
 
 class FakeTaskSender:
@@ -53,12 +46,14 @@ class BlockingRunner:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def run_simulated(self, task_id: str) -> None:
+    def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+        del task_id, allow_running
         self.started.set()
         assert self.release.wait(timeout=2)
+        return True
 
-    def run_real(self, task_id: str) -> None:
-        self.run_simulated(task_id)
+    def fail_retry_exhausted(self, *_args, **_kwargs) -> None:
+        raise AssertionError("blocking runner must not exhaust retries")
 
 
 def _reserve_eventually(executor):
@@ -71,157 +66,77 @@ def _reserve_eventually(executor):
     raise AssertionError("executor capacity was not restored")
 
 
-def _new_conversation_task(store: TaskStore):
-    user = store.create_user(
-        username="retry-user",
-        password_hash="hash",
-        password_salt="salt",
+def test_mode_free_reservation_submits_only_task_id() -> None:
+    submissions: list[str] = []
+    reservation = TaskSubmissionReservation(
+        lambda task_id: submissions.append(task_id)
     )
-    conversation = store.create_conversation(
-        user_id=user.id,
-        paper=PaperCandidate(
-            external_id="2401.99991v1",
-            title="Retry paper",
-            authors=["Ada Lovelace"],
-            abstract="Retry abstract.",
-            source_url="https://arxiv.org/abs/2401.99991v1",
-        ),
-    )
-    return store.create_conversation_turn(
-        user_id=user.id,
-        conversation_id=conversation.id,
-        content="Retry this conversation safely.",
-        depth="standard",
-        expected_head_message_id=None,
-    ).task
+
+    reservation.submit("task_1")
+
+    assert submissions == ["task_1"]
+    with pytest.raises(TypeError):
+        TaskSubmissionReservation(lambda task_id: task_id).submit(
+            "task_2",
+            "real",
+        )
 
 
-def test_synchronous_executor_runs_simulated_task(tmp_path):
-    store = TaskStore(tmp_path / "tasks.sqlite3")
-    user = store.create_user(
-        username="executor-user",
-        password_hash="hash",
-        password_salt="salt",
-    )
-    task = store.create_task(question="Run workflow", depth="quick", user_id=user.id)
-    runner = WorkflowRunner(store, delay_seconds=0)
+def test_mode_free_thread_executor_submits_only_task_id() -> None:
+    calls: list[tuple[str, bool]] = []
+
+    class Runner:
+        def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+            calls.append((task_id, allow_running))
+            return True
+
+        def fail_retry_exhausted(self, *_args, **_kwargs) -> None:
+            raise AssertionError("successful execution must not be failed")
+
+    executor = TaskExecutor(Runner(), max_workers=1)
+    try:
+        assert executor.submit("task_2").result(timeout=1) is None
+        assert calls == [("task_2", False)]
+        with pytest.raises(TypeError):
+            executor.submit("task_3", "real")
+    finally:
+        executor.shutdown()
+
+
+def test_synchronous_executor_runs_conversation_task():
+    runner = FakeRunner()
     executor = SynchronousTaskExecutor(runner)
 
-    future = executor.submit(task.id, "simulated")
+    future = executor.submit("task_sync")
 
     assert future.result(timeout=1) is None
-    assert store.get_task(task.id).status == "completed"
+    assert runner.calls == [("task_sync", False)]
 
 
 def test_threaded_executor_submits_work_to_runner():
     runner = FakeRunner()
     executor = TaskExecutor(runner, max_workers=2)
 
-    future = executor.submit("task_1", "real")
+    future = executor.submit("task_1")
 
     assert future.result(timeout=1) is None
-    assert runner.calls == [("real", "task_1")]
+    assert runner.calls == [("task_1", False)]
     assert executor.max_workers == 2
     executor.shutdown()
 
 
-def test_thread_executor_claims_conversation_before_graph_entry(tmp_path):
-    store = TaskStore(tmp_path / "thread-claim.sqlite3")
-    task = _new_conversation_task(store)
-
-    class BlockingDeepRunner:
+def test_thread_retries_recover_running_task_and_backoff():
+    class FlakyRunner(FakeRunner):
         def __init__(self) -> None:
-            self.started = threading.Event()
-            self.release = threading.Event()
-            self.statuses: list[str] = []
+            super().__init__()
 
-        def run(self, task_id: str) -> None:
-            current = store.get_task(task_id)
-            assert current is not None
-            self.statuses.append(current.status)
-            self.started.set()
-            assert self.release.wait(timeout=2)
-
-    deep_runner = BlockingDeepRunner()
-    runner = WorkflowRunner(store, deep_reading_runner=deep_runner)
-    executor = TaskExecutor(runner, max_workers=1)
-    future = executor.submit(task.id, "real")
-    try:
-        assert deep_runner.started.wait(timeout=1)
-        assert deep_runner.statuses == ["running"]
-    finally:
-        deep_runner.release.set()
-        executor.shutdown()
-
-    assert future.result(timeout=1) is None
-    store.close()
-
-
-def test_concurrent_thread_submissions_claim_conversation_only_once(tmp_path):
-    store = TaskStore(tmp_path / "thread-claim-race.sqlite3")
-    task = _new_conversation_task(store)
-
-    class BlockingDeepRunner:
-        def __init__(self) -> None:
-            self._lock = threading.Lock()
-            self.calls = 0
-            self.first_started = threading.Event()
-            self.second_started = threading.Event()
-            self.release = threading.Event()
-
-        def run(self, task_id: str) -> None:
-            del task_id
-            with self._lock:
-                self.calls += 1
-                call_number = self.calls
-            self.first_started.set()
-            if call_number == 2:
-                self.second_started.set()
-            assert self.release.wait(timeout=2)
-
-    deep_runner = BlockingDeepRunner()
-    runner = WorkflowRunner(store, deep_reading_runner=deep_runner)
-    executor = TaskExecutor(runner, max_workers=2)
-    first = executor.submit(task.id, "real")
-    try:
-        assert deep_runner.first_started.wait(timeout=1)
-        second = executor.submit(task.id, "real")
-        assert not deep_runner.second_started.wait(timeout=0.25)
-        assert second.result(timeout=1) is None
-    finally:
-        deep_runner.release.set()
-        executor.shutdown()
-
-    assert first.result(timeout=1) is None
-    assert deep_runner.calls == 1
-    store.close()
-
-
-def test_thread_retries_reuse_one_conversation_claim_and_backoff(tmp_path):
-    store = TaskStore(tmp_path / "thread-claim-retry.sqlite3")
-    task = _new_conversation_task(store)
-
-    class FlakyDeepRunner:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def run(self, task_id: str) -> None:
-            del task_id
-            self.calls += 1
-            if self.calls <= 3:
+        def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+            super().run(task_id, allow_running=allow_running)
+            if len(self.calls) <= 3:
                 raise ConnectionError("temporary checkpoint outage")
+            return True
 
-    class RecordingWorkflowRunner(WorkflowRunner):
-        def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **kwargs)
-            self.claim_calls = 0
-
-        def claim_conversation_task(self, task_id: str) -> str:
-            self.claim_calls += 1
-            return super().claim_conversation_task(task_id)
-
-    deep_runner = FlakyDeepRunner()
-    runner = RecordingWorkflowRunner(store, deep_reading_runner=deep_runner)
+    runner = FlakyRunner()
     sleeps: list[float] = []
     executor = TaskExecutor(
         runner,
@@ -230,16 +145,18 @@ def test_thread_retries_reuse_one_conversation_claim_and_backoff(tmp_path):
         sleeper=sleeps.append,
     )
     try:
-        future = executor.submit(task.id, "real")
+        future = executor.submit("task_retry")
         assert future.result(timeout=1) is None
     finally:
         executor.shutdown()
 
-    assert runner.claim_calls == 1
-    assert deep_runner.calls == 4
+    assert runner.calls == [
+        ("task_retry", False),
+        ("task_retry", True),
+        ("task_retry", True),
+        ("task_retry", True),
+    ]
     assert sleeps == [1, 2, 4]
-    assert store.get_task(task.id).status == "running"
-    store.close()
 
 
 def test_retry_countdown_uses_exponential_backoff_with_cap():
@@ -258,10 +175,11 @@ def test_thread_executor_retries_real_work_until_second_or_third_attempt(
     failures_before_success,
 ):
     class FlakyRunner(FakeRunner):
-        def run_real(self, task_id: str) -> None:
-            self.calls.append(("real", task_id))
+        def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+            super().run(task_id, allow_running=allow_running)
             if len(self.calls) <= failures_before_success:
                 raise ConnectionError("temporary checkpoint outage")
+            return True
 
     runner = FlakyRunner()
     sleeps: list[float] = []
@@ -274,37 +192,31 @@ def test_thread_executor_retries_real_work_until_second_or_third_attempt(
         sleeper=sleeps.append,
     )
     try:
-        future = executor.submit("task_retry", "real")
+        future = executor.submit("task_retry")
 
         assert future.result(timeout=1) is None
-        assert runner.calls == [
-            ("real", "task_retry")
-        ] * (failures_before_success + 1)
+        assert runner.calls == [("task_retry", False)] + [
+            ("task_retry", True)
+        ] * failures_before_success
         assert sleeps == [2, 4][:failures_before_success]
     finally:
         executor.shutdown()
 
 
-def test_thread_executor_exhaustion_fails_conversation_once_without_leaking(
-    tmp_path,
-):
-    store = TaskStore(tmp_path / "thread-retry.sqlite3")
-    task = _new_conversation_task(store)
-
-    class FailingDeepRunner:
+def test_thread_executor_exhaustion_finalizes_once_without_leaking():
+    class FailingRunner(FakeRunner):
         def __init__(self) -> None:
-            self.calls = 0
+            super().__init__()
 
-        def run(self, task_id: str) -> None:
-            self.calls += 1
+        def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+            super().run(task_id, allow_running=allow_running)
             raise ConnectionError("secret-token paper-content")
 
-    deep_runner = FailingDeepRunner()
-    runner = WorkflowRunner(store, deep_reading_runner=deep_runner)
+    runner = FailingRunner()
     sleeps: list[float] = []
     executor = TaskExecutor(runner, max_workers=1, sleeper=sleeps.append)
     try:
-        future = executor.submit(task.id, "real")
+        future = executor.submit("task_exhausted")
 
         with pytest.raises(ConnectionError, match="secret-token paper-content"):
             future.result(timeout=1)
@@ -313,30 +225,20 @@ def test_thread_executor_exhaustion_fails_conversation_once_without_leaking(
     finally:
         executor.shutdown()
 
-    assert deep_runner.calls == 4
+    assert runner.calls == [
+        ("task_exhausted", False),
+        ("task_exhausted", True),
+        ("task_exhausted", True),
+        ("task_exhausted", True),
+    ]
     assert sleeps == [1, 2, 4]
-    assert store.get_task(task.id).status == "failed"
-    events = store.list_events_page(
-        task.id,
-        user_id=None,
-        after_id=0,
-        limit=100,
-    )
-    assert events is not None
-    failures = [event for event in events.items if event.type == "failed"]
-    assert len(failures) == 1
-    failure = failures[0]
-    assert failure.stage == "execution_retry_exhausted"
-    assert failure.message == "Conversation execution failed after retry limit."
-    assert failure.payload == {
-        "backend": "thread",
-        "attempts": 4,
-        "max_retries": 3,
-        "error_type": "ConnectionError",
-    }
-    assert "secret-token" not in str(failure.to_dict())
-    assert "paper-content" not in str(failure.to_dict())
-    store.close()
+    assert len(runner.exhaustions) == 1
+    exhaustion = runner.exhaustions[0]
+    assert exhaustion["task_id"] == "task_exhausted"
+    assert exhaustion["backend"] == "thread"
+    assert exhaustion["attempts"] == 4
+    assert exhaustion["max_retries"] == 3
+    assert isinstance(exhaustion["exc"], ConnectionError)
 
 
 def test_thread_executor_bounds_running_plus_queued_work():
@@ -345,7 +247,7 @@ def test_thread_executor_bounds_running_plus_queued_work():
     try:
         reservations = [executor.reserve() for _ in range(3)]
         futures = [
-            reservation.submit(f"task_{index}", "simulated")
+            reservation.submit(f"task_{index}")
             for index, reservation in enumerate(reservations)
         ]
         assert runner.started.wait(timeout=1)
@@ -402,7 +304,7 @@ def test_submitted_reservation_release_does_not_restore_capacity_early():
     executor = TaskExecutor(runner, max_workers=1, queue_capacity=0)
     try:
         reservation = executor.reserve()
-        future = reservation.submit("task_running", "simulated")
+        future = reservation.submit("task_running")
         assert runner.started.wait(timeout=1)
 
         reservation.release()
@@ -420,11 +322,17 @@ def test_submitted_reservation_release_does_not_restore_capacity_early():
 
 def test_failed_future_releases_capacity():
     class FailingRunner(FakeRunner):
-        def run_simulated(self, task_id: str) -> None:
+        def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+            del task_id, allow_running
             raise RuntimeError("workflow failed")
 
-    executor = TaskExecutor(FailingRunner(), max_workers=1, queue_capacity=0)
-    future = executor.submit("task_failed", "simulated")
+    executor = TaskExecutor(
+        FailingRunner(),
+        max_workers=1,
+        queue_capacity=0,
+        max_retries=0,
+    )
+    future = executor.submit("task_failed")
 
     with pytest.raises(RuntimeError, match="workflow failed"):
         future.result(timeout=1)
@@ -437,9 +345,9 @@ def test_cancelled_queued_future_releases_its_queue_slot():
     runner = BlockingRunner()
     executor = TaskExecutor(runner, max_workers=1, queue_capacity=1)
     try:
-        running = executor.submit("task_running", "simulated")
+        running = executor.submit("task_running")
         assert runner.started.wait(timeout=1)
-        queued = executor.submit("task_queued", "simulated")
+        queued = executor.submit("task_queued")
 
         assert queued.cancel() is True
         replacement = _reserve_eventually(executor)
@@ -454,7 +362,8 @@ def test_cancelled_queued_future_releases_its_queue_slot():
 def test_reservation_submit_failure_releases_exactly_once():
     release_count = 0
 
-    def fail(task_id, execution_mode):
+    def fail(task_id):
+        del task_id
         raise ConnectionError("submit failed")
 
     def release_once():
@@ -463,12 +372,12 @@ def test_reservation_submit_failure_releases_exactly_once():
 
     reservation = TaskSubmissionReservation(fail, release_once)
     with pytest.raises(ConnectionError, match="submit failed"):
-        reservation.submit("task_1", "real")
+        reservation.submit("task_1")
     reservation.release()
 
     assert release_count == 1
     with pytest.raises(RuntimeError, match="already used"):
-        reservation.submit("task_1", "real")
+        reservation.submit("task_1")
 
 
 def test_capacity_reservation_rejects_non_future_and_releases_once():
@@ -484,7 +393,7 @@ def test_capacity_reservation_rejects_non_future_and_releases_once():
         TypeError,
         match="capacity-tracked task submitter must return a Future",
     ):
-        reservation.submit("task_1", "real")
+        reservation.submit("task_1")
     reservation.release()
 
     assert release_count == 1
@@ -507,7 +416,7 @@ def test_callback_registration_failure_releases_once():
     )
 
     with pytest.raises(RuntimeError, match="callback registration failed"):
-        reservation.submit("task_1", "real")
+        reservation.submit("task_1")
     reservation.release()
 
     assert release_count == 1
@@ -531,7 +440,7 @@ def test_callback_invocation_then_registration_failure_does_not_release_twice():
     )
 
     with pytest.raises(RuntimeError, match="callback failed after invocation"):
-        reservation.submit("task_1", "real")
+        reservation.submit("task_1")
     reservation.release()
 
     assert release_count == 1
@@ -548,7 +457,7 @@ def test_already_completed_future_releases_deterministically():
 
     reservation = TaskSubmissionReservation(lambda *_: future, release_once)
 
-    result = reservation.submit("task_1", "real")
+    result = reservation.submit("task_1")
 
     assert result is future
     assert release_count == 1
@@ -566,7 +475,8 @@ def test_release_during_submit_transition_does_not_release_early():
     submission_results: list[object] = []
     submission_errors: list[BaseException] = []
 
-    def submitter(task_id, execution_mode):
+    def submitter(task_id):
+        del task_id
         submitter_started.set()
         assert allow_submitter_return.wait(timeout=1)
         return future
@@ -580,7 +490,7 @@ def test_release_during_submit_transition_does_not_release_early():
 
     def submit_reservation():
         try:
-            submission_results.append(reservation.submit("task_1", "real"))
+            submission_results.append(reservation.submit("task_1"))
         except BaseException as exc:
             submission_errors.append(exc)
 
@@ -628,7 +538,7 @@ def test_submit_accepted_before_shutdown_completes_and_releases():
         shutdown_finished.set()
 
     try:
-        future = executor.submit("task_running", "simulated")
+        future = executor.submit("task_running")
         assert runner.started.wait(timeout=1)
         shutdown_thread = threading.Thread(target=shutdown_executor)
         shutdown_thread.start()
@@ -652,7 +562,7 @@ def test_shutdown_before_reserved_submit_releases_submit_failure_once():
     executor.shutdown()
 
     with pytest.raises(RuntimeError, match="cannot schedule new futures"):
-        reservation.submit("task_1", "simulated")
+        reservation.submit("task_1")
 
     reservation.release()
 
@@ -681,12 +591,12 @@ def test_celery_executor_sends_json_safe_task_reference():
     sender = FakeTaskSender()
     executor = CeleryTaskExecutor(sender)
 
-    result = executor.submit("task_1", "real")
+    result = executor.submit("task_1")
 
     assert sender.calls == [
         {
             "name": "paperpilot.web.execute_research_task",
-            "args": ["task_1", "real"],
+            "args": ["task_1"],
             "task_id": "task_1",
         }
     ]

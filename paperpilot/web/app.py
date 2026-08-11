@@ -31,7 +31,6 @@ from paperpilot.web.task_executor import (
     build_task_executor,
 )
 from paperpilot.web.task_store import TaskStore, WebUser
-from paperpilot.web.workflow import WorkflowRunner
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -140,9 +139,8 @@ def _create_app(
             research_model_retries=config.research_model_retries,
         )
 
-    runner = WorkflowRunner(store, deep_reading_runner=deep_runner)
     if task_executor is None:
-        executor = build_task_executor(runner, config=config)
+        executor = build_task_executor(deep_runner, config=config)
         owned_resources.executor = executor
     else:
         executor = task_executor

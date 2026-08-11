@@ -5,7 +5,7 @@ import logging
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import BoundedSemaphore, Lock
-from typing import Callable, Literal, Protocol, cast
+from typing import Callable, Protocol, cast
 
 from paperpilot.web.celery_app import (
     EXECUTE_RESEARCH_TASK_NAME,
@@ -13,18 +13,14 @@ from paperpilot.web.celery_app import (
 )
 from paperpilot.web.config import WebRuntimeConfig
 
-ExecutionMode = Literal["simulated", "real"]
 _LOGGER = logging.getLogger("paperpilot.web.runtime")
 
 
-class WorkflowRunnerLike(Protocol):
-    def run_simulated(self, task_id: str) -> None: ...
+class ConversationTaskRunnerLike(Protocol):
+    def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+        """Claim and execute one Conversation-bound task."""
 
-    def run_real(self, task_id: str) -> None: ...
-
-    def claim_conversation_task(self, task_id: str) -> str: ...
-
-    def fail_conversation_execution(
+    def fail_retry_exhausted(
         self,
         task_id: str,
         *,
@@ -32,7 +28,8 @@ class WorkflowRunnerLike(Protocol):
         attempts: int,
         max_retries: int,
         exc: Exception,
-    ) -> None: ...
+    ) -> None:
+        """Persist retry exhaustion unless the task already completed."""
 
 
 class TaskExecutorAtCapacityError(RuntimeError):
@@ -43,7 +40,7 @@ class TaskExecutorShuttingDownError(RuntimeError):
     """Raised after executor shutdown begins."""
 
 
-Submitter = Callable[[str, ExecutionMode], object]
+Submitter = Callable[[str], object]
 ReleaseCallback = Callable[[], None]
 
 
@@ -60,14 +57,14 @@ class TaskSubmissionReservation:
         self._lock = Lock()
         self._state = "reserved"
 
-    def submit(self, task_id: str, execution_mode: ExecutionMode) -> object:
+    def submit(self, task_id: str) -> object:
         with self._lock:
             if self._state != "reserved":
                 raise RuntimeError("task submission reservation was already used")
             self._state = "submitting"
 
         try:
-            result = self._submitter(task_id, execution_mode)
+            result = self._submitter(task_id)
         except BaseException:
             self._release_after_submit_failure()
             raise
@@ -138,7 +135,7 @@ class TaskExecutorLike(Protocol):
 
     def reserve(self) -> TaskSubmissionReservation: ...
 
-    def submit(self, task_id: str, execution_mode: ExecutionMode) -> object: ...
+    def submit(self, task_id: str) -> object: ...
 
     def shutdown(self) -> None: ...
 
@@ -158,7 +155,7 @@ class TaskExecutor:
 
     def __init__(
         self,
-        runner: WorkflowRunnerLike,
+        runner: ConversationTaskRunnerLike,
         *,
         max_workers: int = 2,
         queue_capacity: int = 4,
@@ -206,8 +203,8 @@ class TaskExecutor:
                 raise TaskExecutorAtCapacityError("task executor is at capacity")
         return TaskSubmissionReservation(self._submit_reserved, self._capacity.release)
 
-    def submit(self, task_id: str, execution_mode: ExecutionMode) -> Future[None]:
-        return cast(Future[None], self.reserve().submit(task_id, execution_mode))
+    def submit(self, task_id: str) -> Future[None]:
+        return cast(Future[None], self.reserve().submit(task_id))
 
     def shutdown(self) -> None:
         with self._state_lock:
@@ -216,35 +213,16 @@ class TaskExecutor:
             self._shutdown = True
         self._pool.shutdown(wait=True)
 
-    def _submit_reserved(
-        self,
-        task_id: str,
-        execution_mode: ExecutionMode,
-    ) -> Future[None]:
-        return self._pool.submit(self._run, task_id, execution_mode)
+    def _submit_reserved(self, task_id: str) -> Future[None]:
+        return self._pool.submit(self._run_with_retries, task_id)
 
-    def _run(self, task_id: str, execution_mode: ExecutionMode) -> None:
-        if execution_mode == "real":
-            claim = getattr(self.runner, "claim_conversation_task", None)
-            if claim is not None:
-                claim_result = claim(task_id)
-                if claim_result == "not_claimed":
-                    return
-                if claim_result not in {"claimed", "not_conversation"}:
-                    raise RuntimeError(
-                        f"invalid Conversation claim result: {claim_result!r}"
-                    )
-            self._run_real_with_retries(task_id)
-            return
-        if execution_mode == "simulated":
-            self.runner.run_simulated(task_id)
-            return
-        raise ValueError(f"invalid execution mode: {execution_mode!r}")
-
-    def _run_real_with_retries(self, task_id: str) -> None:
+    def _run_with_retries(self, task_id: str) -> None:
         for attempt_index in range(self.max_retries + 1):
             try:
-                self.runner.run_real(task_id)
+                if attempt_index == 0:
+                    self.runner.run(task_id)
+                else:
+                    self.runner.run(task_id, allow_running=True)
                 return
             except Exception as exc:
                 if attempt_index < self.max_retries:
@@ -270,7 +248,7 @@ class TaskExecutor:
                     continue
 
                 try:
-                    self.runner.fail_conversation_execution(
+                    self.runner.fail_retry_exhausted(
                         task_id,
                         backend="thread",
                         attempts=attempt_index + 1,
@@ -292,9 +270,9 @@ class TaskExecutor:
 class SynchronousTaskExecutor:
     """Executor used by tests to run submitted work deterministically."""
 
-    def __init__(self, runner: WorkflowRunnerLike) -> None:
+    def __init__(self, runner: ConversationTaskRunnerLike) -> None:
         self.runner = runner
-        self.submissions: list[tuple[str, ExecutionMode]] = []
+        self.submissions: list[str] = []
         self._state_lock = Lock()
         self._shutdown = False
 
@@ -309,27 +287,18 @@ class SynchronousTaskExecutor:
                 raise TaskExecutorShuttingDownError("task executor is shutting down")
         return TaskSubmissionReservation(self._submit_reserved)
 
-    def submit(self, task_id: str, execution_mode: ExecutionMode) -> Future[None]:
-        return cast(Future[None], self.reserve().submit(task_id, execution_mode))
+    def submit(self, task_id: str) -> Future[None]:
+        return cast(Future[None], self.reserve().submit(task_id))
 
     def shutdown(self) -> None:
         with self._state_lock:
             self._shutdown = True
 
-    def _submit_reserved(
-        self,
-        task_id: str,
-        execution_mode: ExecutionMode,
-    ) -> Future[None]:
-        self.submissions.append((task_id, execution_mode))
+    def _submit_reserved(self, task_id: str) -> Future[None]:
+        self.submissions.append(task_id)
         future: Future[None] = Future()
         try:
-            if execution_mode == "real":
-                self.runner.run_real(task_id)
-            elif execution_mode == "simulated":
-                self.runner.run_simulated(task_id)
-            else:
-                raise ValueError(f"invalid execution mode: {execution_mode!r}")
+            self.runner.run(task_id)
         except Exception as exc:
             future.set_exception(exc)
         else:
@@ -356,23 +325,23 @@ class CeleryTaskExecutor:
                 raise TaskExecutorShuttingDownError("task executor is shutting down")
         return TaskSubmissionReservation(self._submit_reserved)
 
-    def submit(self, task_id: str, execution_mode: ExecutionMode) -> object:
-        return self.reserve().submit(task_id, execution_mode)
+    def submit(self, task_id: str) -> object:
+        return self.reserve().submit(task_id)
 
     def shutdown(self) -> None:
         with self._state_lock:
             self._shutdown = True
 
-    def _submit_reserved(self, task_id: str, execution_mode: ExecutionMode) -> object:
+    def _submit_reserved(self, task_id: str) -> object:
         return self.sender.send_task(
             EXECUTE_RESEARCH_TASK_NAME,
-            args=[task_id, execution_mode],
+            args=[task_id],
             task_id=task_id,
         )
 
 
 def build_task_executor(
-    runner: WorkflowRunnerLike,
+    runner: ConversationTaskRunnerLike,
     *,
     config: WebRuntimeConfig | None = None,
 ) -> TaskExecutorLike:

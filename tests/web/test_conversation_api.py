@@ -25,7 +25,6 @@ from paperpilot.web.task_executor import (
     TaskSubmissionReservation,
 )
 from paperpilot.web.task_store import TaskStore
-from paperpilot.web.workflow import WorkflowRunner
 
 
 PRIMARY = PaperCandidate(
@@ -67,7 +66,8 @@ class FakeDeepReadingRunner:
         self.read_calls.append((conversation_id, checkpoint_id))
         return self.checkpoints.get((conversation_id, checkpoint_id))
 
-    def run(self, task_id: str) -> None:
+    def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+        del allow_running
         self.model_calls += 1
         raise AssertionError(f"Web API must not run the model directly: {task_id}")
 
@@ -75,7 +75,7 @@ class FakeDeepReadingRunner:
 class RecordingExecutor:
     def __init__(self) -> None:
         self.is_shutdown = False
-        self.submissions: list[tuple[str, str]] = []
+        self.submissions: list[str] = []
         self.releases = 0
 
     def reserve(self) -> TaskSubmissionReservation:
@@ -84,14 +84,14 @@ class RecordingExecutor:
 
         return TaskSubmissionReservation(self._submit, release)
 
-    def _submit(self, task_id: str, execution_mode: str) -> object:
-        self.submissions.append((task_id, execution_mode))
+    def _submit(self, task_id: str) -> object:
+        self.submissions.append(task_id)
         future: Future[None] = Future()
         future.set_result(None)
         return future
 
-    def submit(self, task_id: str, execution_mode: str) -> object:
-        return self.reserve().submit(task_id, execution_mode)
+    def submit(self, task_id: str) -> object:
+        return self.reserve().submit(task_id)
 
     def shutdown(self) -> None:
         self.is_shutdown = True
@@ -103,7 +103,7 @@ class RejectingExecutor(RecordingExecutor):
 
 
 class FailingExecutor(RecordingExecutor):
-    def _submit(self, task_id: str, execution_mode: str) -> object:
+    def _submit(self, task_id: str) -> object:
         raise ConnectionError("broker unavailable")
 
 
@@ -112,7 +112,7 @@ class ClaimingFailingExecutor(RecordingExecutor):
         super().__init__()
         self.store = store
 
-    def _submit(self, task_id: str, execution_mode: str) -> object:
+    def _submit(self, task_id: str) -> object:
         assert self.store.claim_task(task_id) is not None
         raise ConnectionError("publish result was ambiguous")
 
@@ -122,7 +122,7 @@ class WorkerFailingThenAmbiguousExecutor(RecordingExecutor):
         super().__init__()
         self.store = store
 
-    def _submit(self, task_id: str, execution_mode: str) -> object:
+    def _submit(self, task_id: str) -> object:
         assert self.store.claim_task(task_id) is not None
         failed = self.store.fail_conversation_task(
             task_id=task_id,
@@ -518,9 +518,7 @@ def test_conversation_lifecycle_survives_restart_rollback_and_branch_switch(
         runner: DeepReadingRunner,
         task_id: str,
     ) -> None:
-        claimed = store.claim_task(task_id)
-        assert claimed is not None and claimed.status == "running"
-        WorkflowRunner(store, deep_reading_runner=runner).run_real(task_id)
+        assert runner.run(task_id) is True
         completed = store.get_task(task_id)
         assert completed is not None and completed.status == "completed"
 
@@ -743,10 +741,10 @@ def test_conversation_lifecycle_survives_restart_rollback_and_branch_switch(
                 ("bounded paper search", 5),
                 (PRIMARY.external_id, 1),
             ]
-            assert executor_1.submissions == [(first_task_id, "real")]
+            assert executor_1.submissions == [first_task_id]
             assert executor_2.submissions == [
-                (second_task_id, "real"),
-                (third_task_id, "real"),
+                second_task_id,
+                third_task_id,
             ]
             assert all(
                 variable not in os.environ
@@ -975,7 +973,7 @@ def test_message_submission_reserves_then_persists_then_submits_real(tmp_path):
     assert payload["user_message"]["content"] == "Compare its method."
     assert payload["task"]["status"] == "pending"
     assert payload["stable_head_message_id"] is None
-    assert harness.executor.submissions == [(payload["task"]["id"], "real")]
+    assert harness.executor.submissions == [payload["task"]["id"]]
     stored = harness.store.get_task(payload["task"]["id"])
     assert stored is not None and stored.conversation_id == conversation["id"]
     assert harness.runner.model_calls == 0

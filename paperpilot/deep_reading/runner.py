@@ -121,29 +121,86 @@ class DeepReadingRunner:
         self._research_max_output_tokens = research_max_output_tokens
         self._research_model_retries = research_model_retries
 
-    def run(self, task_id: str) -> None:
-        """Execute or recover one Task; only expected task errors become failed."""
+    def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+        """Claim and execute one Conversation-bound Task."""
+        claimed = self._task_store.claim_task(
+            task_id,
+            allow_running=allow_running,
+        )
+        if claimed is None:
+            existing = self._task_store.get_task(task_id)
+            if existing is None:
+                raise ValueError(f"task not found: {task_id}")
+            return False
+        if claimed.conversation_id is None:
+            raise TaskBindingError("task is not bound to a Conversation")
         try:
             self._run(task_id)
         except DeepReadingTaskError as exc:
-            _LOGGER.error(
-                "Deep-reading terminal contract failure",
-                exc_info=(type(exc), exc, exc.__traceback__),
-                extra={
-                    "event": "task.deep_reading_terminal",
-                    "reason": exc.error_code,
-                    "exception_type": type(exc).__name__,
-                },
-            )
+            self._fail_terminal(task_id, exc)
+        return True
+
+    def fail_retry_exhausted(
+        self,
+        task_id: str,
+        *,
+        backend: str,
+        attempts: int,
+        max_retries: int,
+        exc: Exception,
+    ) -> None:
+        """Idempotently fail active Conversation work after retry exhaustion."""
+        _LOGGER.error(
+            "Conversation execution failed after retry limit",
+            exc_info=(type(exc), exc, exc.__traceback__),
+            extra={
+                "event": "task.execution_retry_exhausted",
+                "executor": backend,
+                "reason": "retry_limit",
+                "exception_type": type(exc).__name__,
+            },
+        )
+        try:
             self._task_store.fail_conversation_task(
                 task_id=task_id,
-                message=exc.public_message,
-                stage="deep_reading_terminal",
+                message="Conversation execution failed after retry limit.",
+                stage="execution_retry_exhausted",
                 payload={
-                    "error_code": exc.error_code,
+                    "backend": backend,
+                    "attempts": attempts,
+                    "max_retries": max_retries,
                     "error_type": type(exc).__name__,
                 },
             )
+        except ValueError:
+            task = self._task_store.get_task(task_id)
+            if (
+                task is not None
+                and task.conversation_id is not None
+                and task.status == "completed"
+            ):
+                return
+            raise
+
+    def _fail_terminal(self, task_id: str, exc: DeepReadingTaskError) -> None:
+        _LOGGER.error(
+            "Deep-reading terminal contract failure",
+            exc_info=(type(exc), exc, exc.__traceback__),
+            extra={
+                "event": "task.deep_reading_terminal",
+                "reason": exc.error_code,
+                "exception_type": type(exc).__name__,
+            },
+        )
+        self._task_store.fail_conversation_task(
+            task_id=task_id,
+            message=exc.public_message,
+            stage="deep_reading_terminal",
+            payload={
+                "error_code": exc.error_code,
+                "error_type": type(exc).__name__,
+            },
+        )
 
     def read_checkpoint(
         self,

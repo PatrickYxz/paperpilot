@@ -41,7 +41,6 @@ from paperpilot.tools.mcp_runtime import MCPRuntime
 from paperpilot.web.checkpoint import SqliteCheckpointRuntime
 from paperpilot.web.task_executor import TaskExecutor
 from paperpilot.web.task_store import TaskStore
-from paperpilot.web.workflow import WorkflowRunner
 
 
 PRIMARY = PaperCandidate(
@@ -398,6 +397,159 @@ def test_success_finalizes_business_head_and_exposes_frozen_checkpoint(tmp_path)
         store.close()
 
 
+def test_atomic_claim_precedes_graph_invoke_and_prevents_duplicate_work(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = _runner(store, checkpoint_runtime, mcp_runtime, _ModelFactory([]))
+    turn = _new_turn(store, user, conversation, "Claim exactly once")
+    order: list[str] = []
+    real_claim = store.claim_task
+    real_build_graph = runner_module.build_deep_reading_graph
+
+    def recording_claim(task_id: str, *, allow_running: bool = False):
+        order.append("claim")
+        return real_claim(task_id, allow_running=allow_running)
+
+    class RecordingGraph:
+        def __init__(self, graph) -> None:
+            self._graph = graph
+
+        def __getattr__(self, name: str):
+            return getattr(self._graph, name)
+
+        def invoke(self, *args, **kwargs):
+            order.append("invoke")
+            return self._graph.invoke(*args, **kwargs)
+
+    monkeypatch.setattr(store, "claim_task", recording_claim)
+    monkeypatch.setattr(
+        runner_module,
+        "build_deep_reading_graph",
+        lambda checkpointer: RecordingGraph(real_build_graph(checkpointer)),
+    )
+    try:
+        assert runner.run(turn.task.id) is True
+        assert order.index("claim") < order.index("invoke")
+
+        order.clear()
+        assert runner.run(turn.task.id) is False
+        assert order == ["claim"]
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_atomic_claim_running_task_requires_explicit_recovery(
+    tmp_path,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = _runner(store, checkpoint_runtime, mcp_runtime, _ModelFactory([]))
+    turn = _new_turn(store, user, conversation, "Recover only on redelivery")
+    assert store.claim_task(turn.task.id) is not None
+    try:
+        assert runner.run(turn.task.id) is False
+        assert runner.run(turn.task.id, allow_running=True) is True
+        assert store.get_task(turn.task.id, user_id=user.id).status == "completed"
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_retry_exhausted_failure_is_idempotent_and_preserves_completed_race(
+    tmp_path,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = _runner(store, checkpoint_runtime, mcp_runtime, _ModelFactory([]))
+    failed_turn = _new_turn(store, user, conversation, "Exhaust this task")
+    assert store.claim_task(failed_turn.task.id) is not None
+    failure = ConnectionError("secret infrastructure detail")
+    try:
+        runner.fail_retry_exhausted(
+            failed_turn.task.id,
+            backend="thread",
+            attempts=4,
+            max_retries=3,
+            exc=failure,
+        )
+        runner.fail_retry_exhausted(
+            failed_turn.task.id,
+            backend="thread",
+            attempts=4,
+            max_retries=3,
+            exc=failure,
+        )
+        events = store.list_events_page(
+            failed_turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events is not None
+        failures = [event for event in events.items if event.type == "failed"]
+        assert len(failures) == 1
+        assert failures[0].stage == "execution_retry_exhausted"
+        assert failures[0].payload == {
+            "backend": "thread",
+            "attempts": 4,
+            "max_retries": 3,
+            "error_type": "ConnectionError",
+        }
+        assert "secret infrastructure detail" not in str(failures[0].to_dict())
+
+        completed_conversation = store.create_conversation(
+            user_id=user.id,
+            paper=PRIMARY,
+        )
+        completed_turn = _new_turn(
+            store,
+            user,
+            completed_conversation,
+            "Already completed",
+        )
+        store.update_status(completed_turn.task.id, "completed")
+        runner.fail_retry_exhausted(
+            completed_turn.task.id,
+            backend="celery",
+            attempts=4,
+            max_retries=3,
+            exc=failure,
+        )
+        completed_events = store.list_events_page(
+            completed_turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert completed_events is not None
+        assert [event for event in completed_events.items if event.type == "failed"] == []
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
 def test_runner_passes_custom_runtime_bounds_into_graph_context(
     tmp_path,
     monkeypatch,
@@ -701,7 +853,7 @@ def test_redelivery_after_publish_checkpoint_failure_does_not_duplicate_rows(
         assert _artifact_count(store, turn.task.id, user.id) == 1
 
         monkeypatch.setattr(checkpoint_runtime.saver, "put", real_put)
-        runner.run(turn.task.id)
+        runner.run(turn.task.id, allow_running=True)
         task = store.get_task(turn.task.id, user_id=user.id)
         assert task is not None and task.status == "completed"
         assert task.final_checkpoint_id is not None
@@ -759,7 +911,7 @@ def test_redelivery_after_finalization_failure_uses_only_trusted_complete_snapsh
         factory_calls_after_crash = model_factory.factory_calls
         mcp_starts_after_crash = mcp_client.start_count
 
-        runner.run(turn.task.id)
+        runner.run(turn.task.id, allow_running=True)
         task = store.get_task(turn.task.id, user_id=user.id)
         assert task is not None and task.status == "completed"
         assert len(calls) == calls_after_crash
@@ -833,7 +985,7 @@ def test_corrupt_complete_recovery_snapshot_is_terminal_before_model_or_mcp(
         calls_before = model_factory.factory_calls
         leases_before = mcp_client.list_tools_count
 
-        runner.run(turn.task.id)
+        runner.run(turn.task.id, allow_running=True)
 
         assert model_factory.factory_calls == calls_before
         assert mcp_client.list_tools_count == leases_before
@@ -1067,7 +1219,7 @@ def test_incomplete_matching_snapshot_is_not_used_for_recovery(
         calls_before = model_factory.factory_calls
         monkeypatch.setattr(store, "finalize_conversation_task", real_finalize)
 
-        runner.run(turn.task.id)
+        runner.run(turn.task.id, allow_running=True)
 
         assert model_factory.factory_calls == calls_before + 1
         assert store.get_task(turn.task.id, user_id=user.id).status == "completed"
@@ -1170,10 +1322,9 @@ def test_mcp_tool_error_is_terminal_once_through_runner_and_task_executor(
         mcp_runtime,
         _ModelFactory([]),
     )
-    workflow = WorkflowRunner(store, deep_reading_runner=deep_runner)
     sleeps: list[float] = []
     executor = TaskExecutor(
-        workflow,
+        deep_runner,
         max_workers=1,
         queue_capacity=0,
         max_retries=3,
@@ -1181,7 +1332,7 @@ def test_mcp_tool_error_is_terminal_once_through_runner_and_task_executor(
     )
     turn = _new_turn(store, user, conversation, "deterministic MCP failure")
     try:
-        executor.submit(turn.task.id, "real").result(timeout=5)
+        executor.submit(turn.task.id).result(timeout=5)
 
         task = store.get_task(turn.task.id, user_id=user.id)
         assert task is not None and task.status == "failed"
@@ -1262,10 +1413,9 @@ def test_transient_mcp_failure_keeps_identity_through_bounded_task_retry(
         mcp_runtime,
         _ModelFactory([]),
     )
-    workflow = WorkflowRunner(store, deep_reading_runner=deep_runner)
     sleeps: list[float] = []
     executor = TaskExecutor(
-        workflow,
+        deep_runner,
         max_workers=1,
         queue_capacity=0,
         max_retries=1,
@@ -1276,7 +1426,7 @@ def test_transient_mcp_failure_keeps_identity_through_bounded_task_retry(
     turn = _new_turn(store, user, conversation, "transient MCP failure")
     try:
         with pytest.raises(type(failure)) as exc_info:
-            executor.submit(turn.task.id, "real").result(timeout=5)
+            executor.submit(turn.task.id).result(timeout=5)
 
         assert exc_info.value is failure
         assert download_calls == [
@@ -1437,7 +1587,7 @@ def test_summary_provider_connection_error_escapes_runner_with_identity(
 
         assert exc_info.value is failure
         task = store.get_task(turn.task.id, user_id=user.id)
-        assert task is not None and task.status == "pending"
+        assert task is not None and task.status == "running"
         events = store.list_events_page(
             turn.task.id,
             user_id=user.id,
@@ -1459,6 +1609,10 @@ def test_invalid_task_status_records_stable_terminal_code(monkeypatch) -> None:
     failures: list[dict[str, object]] = []
 
     class RecordingStore:
+        def claim_task(self, task_id, *, allow_running=False):
+            del allow_running
+            return SimpleNamespace(id=task_id, conversation_id="conversation-status")
+
         def fail_conversation_task(self, **kwargs):
             failures.append(kwargs)
 
@@ -1566,7 +1720,7 @@ def test_database_and_provider_errors_escape_for_task_retry(
             runner.run(turn.task.id)
 
         assert exc_info.value is failure
-        assert store.get_task(turn.task.id, user_id=user.id).status == "pending"
+        assert store.get_task(turn.task.id, user_id=user.id).status == "running"
         events = store.list_events_page(
             turn.task.id,
             user_id=user.id,
@@ -1603,7 +1757,7 @@ def test_saver_error_escapes_for_task_retry(tmp_path, monkeypatch) -> None:
             runner.run(turn.task.id)
 
         assert exc_info.value is failure
-        assert store.get_task(turn.task.id, user_id=user.id).status == "pending"
+        assert store.get_task(turn.task.id, user_id=user.id).status == "running"
     finally:
         mcp_runtime.close()
         checkpoint_runtime.close()
@@ -1659,7 +1813,7 @@ def test_only_deep_reading_task_error_is_marked_failed(tmp_path, monkeypatch) ->
         )
         with pytest.raises(RuntimeError, match="unknown graph failure"):
             unknown_runner.run(unknown_turn.task.id)
-        assert store.get_task(unknown_turn.task.id, user_id=user.id).status == "pending"
+        assert store.get_task(unknown_turn.task.id, user_id=user.id).status == "running"
     finally:
         mcp_runtime.close()
         checkpoint_runtime.close()

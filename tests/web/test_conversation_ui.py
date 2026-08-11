@@ -8,16 +8,22 @@ from fastapi.testclient import TestClient
 from paperpilot.web.app import create_app
 from paperpilot.web.task_executor import SynchronousTaskExecutor
 from paperpilot.web.task_store import TaskStore
-from paperpilot.web.workflow import WorkflowRunner
+
+
+class _UnusedRunner:
+    def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+        raise AssertionError(f"unexpected task execution: {task_id}, {allow_running}")
+
+    def fail_retry_exhausted(self, *_args, **_kwargs) -> None:
+        raise AssertionError("unexpected retry exhaustion")
 
 
 def _client(tmp_path) -> TestClient:
     store = TaskStore(tmp_path / "tasks.sqlite3")
-    runner = WorkflowRunner(store, delay_seconds=0)
     return TestClient(
         create_app(
             store,
-            task_executor=SynchronousTaskExecutor(runner),
+            task_executor=SynchronousTaskExecutor(_UnusedRunner()),
         )
     )
 

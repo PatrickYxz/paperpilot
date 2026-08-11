@@ -229,7 +229,7 @@ def build_conversation_router(
             "stable_head_message_id": detail.conversation.head_message_id,
         }
         try:
-            reservation.submit(turn.task.id, "real")
+            reservation.submit(turn.task.id)
         except Exception as exc:
             try:
                 failed = store.fail_pending_task(turn.task.id)
@@ -248,7 +248,6 @@ def build_conversation_router(
                         stage="queue",
                         message="Task queue submission failed.",
                         payload={
-                            "execution_mode": "real",
                             "error_type": type(exc).__name__,
                         },
                     )
