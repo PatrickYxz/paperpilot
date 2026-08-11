@@ -810,11 +810,16 @@ git commit -m "refactor(web): expose only Conversation APIs"
 - Modify: `paperpilot/web/celery_app.py`
 - Modify: `paperpilot/web/app.py`
 - Modify: `paperpilot/web/routes/conversations.py`
+- Delete: `paperpilot/web/workflow.py`
 - Modify: `tests/deep_reading/test_runner.py`
+- Modify: `tests/web/test_auth.py`
 - Modify: `tests/web/test_task_executor.py`
 - Modify: `tests/web/test_conversation_worker.py`
 - Modify: `tests/web/test_celery_worker.py`
 - Modify: `tests/web/test_conversation_api.py`
+- Modify: `tests/web/test_conversation_ui.py`
+- Modify: `tests/web/test_web_app.py`
+- Delete: `tests/web/test_workflow.py`
 
 **Interfaces:**
 - Consumes: TaskStore atomic `claim_task`, DeepReadingRunner terminal/transient semantics, Task retry configuration, TaskSubmissionReservation capacity ownership.
@@ -849,8 +854,8 @@ def run(self, task_id: str, *, allow_running: bool = False) -> bool:
         if existing is None:
             raise ValueError(f"task not found: {task_id}")
         return False
-    if claimed.conversation_id is None or claimed.user_message_id is None:
-        raise TaskBindingError("task is not bound to a Conversation message")
+    if claimed.conversation_id is None:
+        raise TaskBindingError("task is not bound to a Conversation")
     try:
         self._run(task_id)
     except DeepReadingTaskError as exc:
@@ -858,7 +863,7 @@ def run(self, task_id: str, *, allow_running: bool = False) -> bool:
     return True
 ```
 
-Keep infrastructure exceptions escaping. Extract the current terminal logging/failure body to `_fail_terminal`; do not broad-catch unknown exceptions.
+`ResearchTask` intentionally has no duplicated `user_message_id` column. Keep the existing `_load_business_binding` lookup as the authoritative validation that the claimed Task has a bound user Message in the same Conversation. Keep infrastructure exceptions escaping. Extract the current terminal logging/failure body to `_fail_terminal`; do not broad-catch unknown exceptions.
 
 - [ ] **Step 4: Write Executor RED tests for mode-free submission**
 
@@ -892,7 +897,7 @@ class ConversationTaskRunnerLike(Protocol):
         """Persist retry exhaustion unless the task already completed."""
 ```
 
-Remove `ExecutionMode`. `Submitter` becomes `Callable[[str], object]`. Thread execution calls `runner.run(task_id)` and retries only exceptions that escape it. Preserve Future capacity release and logging.
+Remove `ExecutionMode`. `Submitter` becomes `Callable[[str], object]`. Thread attempt zero calls `runner.run(task_id)`; retry attempts call `runner.run(task_id, allow_running=True)` so a transient infrastructure failure does not strand the already claimed Task in `running`. Retry only exceptions that escape the Runner. Preserve Future capacity release and logging. Tests may record the `allow_running` keyword separately, but the public submitter receives only a Task ID.
 
 - [ ] **Step 6: Move retry-exhaustion finalization to DeepReadingRunner**
 
@@ -920,17 +925,20 @@ Build one TaskStore, checkpoint runtime, MCP runtime, and DeepReadingRunner; cal
 
 - [ ] **Step 8: Update Conversation submission**
 
-Change `reservation.submit(turn.task.id, "real")` to `reservation.submit(turn.task.id)`. Delete every simulated/real mode assertion from retained new API tests.
+Change `reservation.submit(turn.task.id, "real")` to `reservation.submit(turn.task.id)`. Delete every simulated/real mode assertion from retained new API tests and remove new Conversation event writes containing `execution_mode`. The legacy `TaskStore.create_queued_task` method and its historical tests remain until Task 7; they are not a new product write path.
+
+Delete `paperpilot/web/workflow.py` and `tests/web/test_workflow.py` in this Task after migrating every retained direct caller to `DeepReadingRunner` or a narrow fake implementing `ConversationTaskRunnerLike`. Update app/auth/UI/Web tests that constructed `WorkflowRunner` only as setup. This deletion is intentionally moved forward from Task 7 so the Task 5 runtime boundary and full suite can be green together.
 
 - [ ] **Step 9: Run Thread/Celery/Runner GREEN gates**
 
 ```bash
 ./.venv/bin/python -m pytest tests/deep_reading/test_runner.py tests/web/test_task_executor.py tests/web/test_conversation_worker.py tests/web/test_celery_worker.py tests/web/test_conversation_api.py -q
-rg -n "ExecutionMode|run_simulated|WorkflowRunner|execution_mode" paperpilot/deep_reading paperpilot/web
+rg -n "ExecutionMode|run_simulated|WorkflowRunner" paperpilot/deep_reading paperpilot/web
+rg -n "execution_mode" paperpilot/deep_reading paperpilot/web --glob '*.py' --glob '!task_store.py'
 git diff --check
 ```
 
-Expected: no legacy execution matches in retained code. Event payloads may retain historical database fields only if read from old rows; no new product write includes mode.
+Expected: no direct legacy runner/mode symbols in retained code and no Python runtime `execution_mode` write outside the explicitly deferred legacy `TaskStore` method. The old static workbench is removed in Task 6; the legacy TaskStore creation method and tests are removed in Task 7. Historical database fields remain readable, but no new Conversation product write includes mode.
 
 - [ ] **Step 10: Commit**
 
@@ -1053,7 +1061,6 @@ git commit -m "refactor(ui): keep only the Conversation workspace"
 - Delete: `paperpilot/document_store.py`
 - Delete: `paperpilot/message_codec.py`
 - Delete: `paperpilot/session_store.py`
-- Delete: `paperpilot/web/workflow.py`
 - Delete: `paperpilot/web/event_mapper.py`
 - Modify: `paperpilot/web/task_store.py`
 - Modify: retained tests importing `paperpilot.tools.types.Tool`
@@ -1069,7 +1076,6 @@ git commit -m "refactor(ui): keep only the Conversation workspace"
 - Delete: `tests/test_message_codec.py`
 - Delete: `tests/test_session_store.py`
 - Delete: `tests/web/test_event_mapper.py`
-- Delete: `tests/web/test_workflow.py`
 
 **Interfaces:**
 - Consumes: Tasks 1–6 have removed every retained production dependency on these paths.
