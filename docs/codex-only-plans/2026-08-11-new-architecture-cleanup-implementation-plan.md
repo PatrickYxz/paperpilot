@@ -1274,6 +1274,13 @@ def test_legacy_anthropic_sdk_is_not_a_direct_requirement() -> None:
         line.strip().startswith("anthropic")
         for line in requirements.splitlines()
     )
+
+
+def test_lock_is_generated_for_python_312_across_supported_platforms() -> None:
+    header = Path("requirements-lock.txt").read_text(encoding="utf-8").splitlines()[:3]
+    command = " ".join(header)
+    assert "--universal" in command
+    assert "--python-version 3.12" in command
 ```
 
 Extend architecture tests to parse the variable names from `.env.example`. Assert the active runtime keys listed in Step 5 are present and the removed keys `DEFAULT_MODEL`, `MAX_ITERATIONS`, `BUDGET_TOKENS`, and the stale alias `S2_API_KEY` are absent. Do not add pytest assertions over README prose; verify human-facing documentation with the explicit one-time checks in Steps 6–7 and Task 10 instead.
@@ -1293,12 +1300,12 @@ Rewrite the `requirements.txt` section headings around retained runtime concerns
 Regenerate with the project’s uv environment:
 
 ```bash
-uv pip compile requirements.txt -o requirements-lock.txt
+uv pip compile requirements.txt --universal --python-version 3.12 -o requirements-lock.txt
 uv pip sync requirements-lock.txt --python .venv/bin/python
 uv pip check --python .venv/bin/python
 ```
 
-Expected: compatible environment; `anthropic` absent from direct and resolved requirements unless a retained transitive dependency demonstrably requires it.
+Expected: one Python 3.12 universal lock preserves conditional Linux/Windows/macOS dependencies for local thread and Celery deployment; current environment compatible; `anthropic` absent from direct and resolved requirements unless a retained transitive dependency demonstrably requires it.
 
 - [ ] **Step 4: Validate or remove the retained TaskStore benchmark**
 
