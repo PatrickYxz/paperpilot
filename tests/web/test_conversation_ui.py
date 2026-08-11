@@ -202,8 +202,11 @@ def test_rollback_success_notice_is_guarded_after_conversation_reload(tmp_path):
     assert "isCurrentConversation(conversationId, reloadVersion)" in guard_body
 
 
-def test_assistant_messages_and_alternatives_render_full_escaped_content(tmp_path):
+def test_assistant_messages_and_alternatives_render_full_content_as_text(tmp_path):
     script = _client(tmp_path).get("/static/app.js").text
+    make_element_body = script.split("function makeElement", 1)[1].split(
+        "function setAuthMessage", 1
+    )[0]
     render_message_body = script.split("function renderMessage", 1)[1].split(
         "function renderMessages", 1
     )[0]
@@ -216,8 +219,14 @@ def test_assistant_messages_and_alternatives_render_full_escaped_content(tmp_pat
     for truncation_operation in (".slice(", ".substring(", ".substr("):
         assert truncation_operation not in render_message_body
         assert truncation_operation not in alternatives_body
-    for escaped_character in ("&amp;", "&lt;", "&gt;", "&quot;", "&#039;"):
-        assert escaped_character in script
+    assert "element.textContent = text;" in make_element_body
+    for unsafe_html_sink in (
+        "innerHTML",
+        "outerHTML",
+        "insertAdjacentHTML",
+        "document.write",
+    ):
+        assert unsafe_html_sink not in script
 
 
 def test_conversation_task_updates_route_is_the_polling_boundary(tmp_path):
