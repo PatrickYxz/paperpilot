@@ -116,6 +116,24 @@ def test_plan_with_llm_falls_back_on_structured_parse_error() -> None:
     assert plan.queries[0].query == "Q?"
 
 
+def test_plan_with_llm_falls_back_on_business_invalid_structured_output() -> None:
+    data = valid_plan_dict(question="Q?")
+    data["evidence_requirements"] = []
+    data["queries"] = []
+    model = FakeStructuredModel({
+        "raw": object(),
+        "parsed": RetrievalQueryPlanOutput.model_validate(data),
+        "parsing_error": None,
+    })
+
+    plan, meta = plan_with_llm(question="Q?", model=model)
+
+    assert len(model.runnable.calls) == 1
+    assert meta["fallback_used"] is True
+    assert meta["fallback_reason"] == "planner_validation_failed: ValueError"
+    assert plan.queries[0].query == "Q?"
+
+
 def test_plan_with_llm_falls_back_on_provider_failure_without_retry() -> None:
     model = FakeStructuredModel(RuntimeError("unavailable"))
 

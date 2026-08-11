@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from paperpilot.retrieval.evidence_pool import EvidenceItem, EvidencePool
 from paperpilot.retrieval.llm_query_planner import build_retrieval_model
 from paperpilot.retrieval.query_plan import EvidenceRequirement, QueryPlan
+from paperpilot.retrieval.query_plan_validator import MAX_EVIDENCE_REQUIREMENTS
 
 SUPPORT_VALUES = {"direct", "partial", "no"}
 CONFIDENCE_VALUES = {"high", "medium", "low"}
@@ -293,6 +294,7 @@ def run_evidence_verification(
     )
     decisions: list[EvidenceVerificationDecision] = []
     parse_errors: list[str] = []
+    structured_invoke_count = 0
 
     try:
         for requirement in plan.evidence_requirements:
@@ -305,11 +307,14 @@ def run_evidence_verification(
             )
             if not candidates:
                 continue
+            if structured_invoke_count >= MAX_EVIDENCE_REQUIREMENTS:
+                break
             prompt = build_verifier_prompt(
                 plan=plan,
                 requirement=requirement,
                 candidates=candidates,
             )
+            structured_invoke_count += 1
             result = runnable.invoke([HumanMessage(content=prompt)])
             parsing_error = result.get("parsing_error")
             parsed = result.get("parsed")

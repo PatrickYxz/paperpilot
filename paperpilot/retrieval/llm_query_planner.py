@@ -157,7 +157,13 @@ def plan_with_llm(
     if parsing_error is not None or not isinstance(parsed, RetrievalQueryPlanOutput):
         error_name = type(parsing_error).__name__ if parsing_error else "missing_parsed"
         return _fallback(question, f"planner_parse_failed: {error_name}")
-    plan = validate_query_plan(parsed.model_dump(mode="json"), question=question)
+    try:
+        plan = validate_query_plan(
+            parsed.model_dump(mode="json"),
+            question=question,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _fallback(question, f"planner_validation_failed: {type(exc).__name__}")
     return plan, {"fallback_used": False, "fallback_reason": None}
 
 

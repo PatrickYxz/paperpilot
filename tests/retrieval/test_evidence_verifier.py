@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from paperpilot.retrieval.evidence_pool import EvidenceItem, EvidencePool, MatchedQuery
 from paperpilot.retrieval.evidence_verifier import (
     EvidenceVerificationDecision,
@@ -588,6 +590,37 @@ def test_run_evidence_verification_calls_once_per_required_requirement() -> None
     assert model.structured_invoke_count <= 6
     assert result.verified_summary_items == ["ev_1", "ev_2"]
     assert result.verification_error is None
+
+
+def test_run_evidence_verification_caps_required_requirement_calls_at_six() -> None:
+    requirements = [
+        EvidenceRequirement(f"req_{index}", f"Requirement {index}", True)
+        for index in range(7)
+    ]
+    plan = replace(_plan(), evidence_requirements=requirements)
+    pool = _pool([
+        _item(
+            f"ev_{index}",
+            f"Evidence for requirement {index}.",
+            1.0,
+            [f"req_{index}"],
+        )
+        for index in range(7)
+    ])
+    model = FakeVerifierModel([
+        EvidenceVerificationOutput(decisions=[])
+        for _ in range(7)
+    ])
+
+    run_evidence_verification(
+        plan=plan,
+        pool=pool,
+        model=model,
+        summary_k=4,
+        verifier_candidate_k=6,
+    )
+
+    assert model.structured_invoke_count == 6
 
 
 def test_run_evidence_verification_returns_error_result_on_provider_failure() -> None:
