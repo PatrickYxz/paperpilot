@@ -277,10 +277,12 @@ def test_index_and_static_assets_are_served(tmp_path):
     client = _client(tmp_path)
 
     html = client.get("/")
-    css = client.get("/static/conversations.css")
-    javascript = client.get("/static/conversations.js")
+    css = client.get("/static/styles.css")
+    javascript = client.get("/static/app.js")
 
     assert html.status_code == 200
     assert "PaperPilot" in html.text
+    assert 'href="/static/styles.css"' in html.text
+    assert 'src="/static/app.js" defer' in html.text
     assert css.status_code == 200
     assert javascript.status_code == 200

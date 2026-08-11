@@ -1,4 +1,3 @@
-const taskForm = document.querySelector("#taskForm");
 const authForm = document.querySelector("#authForm");
 const usernameInput = document.querySelector("#username");
 const passwordInput = document.querySelector("#password");
@@ -8,54 +7,44 @@ const currentUser = document.querySelector("#currentUser");
 const currentUsername = document.querySelector("#currentUsername");
 const authMessage = document.querySelector("#authMessage");
 const workspace = document.querySelector("#workspace");
-const conversationView = document.querySelector("#conversationView");
-const conversationsTab = document.querySelector("#conversationsTab");
-const legacyTab = document.querySelector("#legacyTab");
-const workbench = document.querySelector("#workbench");
-const questionInput = document.querySelector("#question");
-const depthInput = document.querySelector("#depth");
-const executionModeInput = document.querySelector("#executionMode");
-const formMessage = document.querySelector("#formMessage");
-const refreshButton = document.querySelector("#refreshTasks");
-const refreshEvalButton = document.querySelector("#refreshEval");
-const statusFilter = document.querySelector("#statusFilter");
-const taskList = document.querySelector("#taskList");
-const taskDetail = document.querySelector("#taskDetail");
-const taskArtifacts = document.querySelector("#taskArtifacts");
-const taskEvents = document.querySelector("#taskEvents");
-const evalSnapshot = document.querySelector("#evalSnapshot");
-const candidateCategory = document.querySelector("#candidateCategory");
-const candidateDecision = document.querySelector("#candidateDecision");
-const candidateCount = document.querySelector("#candidateCount");
-const candidateList = document.querySelector("#candidateList");
+const conversationList = document.querySelector("#conversationList");
+const paperSearch = document.querySelector("#paperSearch");
+const paperQuery = document.querySelector("#paperQuery");
+const paperSearchMessage = document.querySelector("#paperSearchMessage");
+const paperCandidates = document.querySelector("#paperCandidates");
+const conversationTitle = document.querySelector("#conversationTitle");
+const conversationPaper = document.querySelector("#conversationPaper");
+const conversationMessage = document.querySelector("#conversationMessage");
+const messageList = document.querySelector("#messageList");
+const messageComposer = document.querySelector("#messageComposer");
+const conversationQuestion = document.querySelector("#conversationQuestion");
+const conversationDepth = document.querySelector("#conversationDepth");
+const sendConversationMessage = document.querySelector("#sendConversationMessage");
+const refreshConversations = document.querySelector("#refreshConversations");
+const conversationEvents = document.querySelector("#conversationEvents");
+const branchSelector = document.querySelector("#branchSelector");
+const branchOptions = document.querySelector("#branchOptions");
+const closeBranchSelector = document.querySelector("#closeBranchSelector");
 
-let selectedTaskId = null;
-let selectedTask = null;
-let selectedEvents = [];
-let selectedArtifacts = [];
-let eventAfterId = 0;
-let artifactAfterId = 0;
-let selectionVersion = 0;
-let taskListVersion = 0;
-let pollTimer = null;
+const state = {
+  currentUser: null,
+  conversations: [],
+  selectedConversationId: null,
+  selectedConversation: null,
+  activeTaskPoll: null,
+};
 
-function invalidateTaskListRequests() {
-  taskListVersion += 1;
-}
+let authenticationVersion = 0;
+let conversationListVersion = 0;
+let requestVersion = 0;
 
-function resetSelectedTask(taskId) {
-  selectionVersion += 1;
-  selectedTaskId = taskId;
-  selectedTask = null;
-  selectedEvents = [];
-  selectedArtifacts = [];
-  eventAfterId = 0;
-  artifactAfterId = 0;
-  if (pollTimer) {
-    clearTimeout(pollTimer);
-    pollTimer = null;
+function makeElement(tagName, className = "", text = "") {
+  const element = document.createElement(tagName);
+  if (className) {
+    element.className = className;
   }
-  return selectionVersion;
+  element.textContent = text;
+  return element;
 }
 
 function setAuthMessage(text, kind = "") {
@@ -63,9 +52,14 @@ function setAuthMessage(text, kind = "") {
   authMessage.className = kind ? `message ${kind}` : "message";
 }
 
-function setMessage(text, kind = "") {
-  formMessage.textContent = text;
-  formMessage.className = kind ? `message ${kind}` : "message";
+function setConversationMessage(text, kind = "") {
+  conversationMessage.textContent = text;
+  conversationMessage.className = kind ? `message ${kind}` : "message";
+}
+
+function setPaperMessage(text, kind = "") {
+  paperSearchMessage.textContent = text;
+  paperSearchMessage.className = kind ? `message ${kind}` : "message";
 }
 
 async function requestJson(url, options = {}) {
@@ -85,52 +79,6 @@ async function requestJson(url, options = {}) {
   return payload;
 }
 
-function selectWorkspaceTab(tabName) {
-  const showConversations = tabName === "conversations";
-  conversationView.hidden = !showConversations;
-  workbench.hidden = showConversations;
-  conversationsTab.classList.toggle("active", showConversations);
-  conversationsTab.setAttribute("aria-selected", String(showConversations));
-  legacyTab.classList.toggle("active", !showConversations);
-  legacyTab.setAttribute("aria-selected", String(!showConversations));
-  if (!showConversations) {
-    loadTasks().catch((error) => setMessage(error.message, "error"));
-  }
-}
-
-function dispatchAuthLifecycle(name, detail = null) {
-  document.dispatchEvent(new CustomEvent(name, { detail }));
-}
-
-function showAuthenticated(user) {
-  invalidateTaskListRequests();
-  authForm.hidden = true;
-  currentUser.hidden = false;
-  workspace.hidden = false;
-  selectWorkspaceTab("conversations");
-  currentUsername.textContent = user.username;
-  setAuthMessage("");
-  dispatchAuthLifecycle("paperpilot:authenticated", user);
-}
-
-function showUnauthenticated(message = "") {
-  invalidateTaskListRequests();
-  authForm.hidden = false;
-  currentUser.hidden = true;
-  workspace.hidden = true;
-  conversationView.hidden = false;
-  workbench.hidden = true;
-  currentUsername.textContent = "";
-  resetSelectedTask(null);
-  taskList.innerHTML = "";
-  taskDetail.className = "task-detail empty";
-  taskDetail.textContent = "Select a task.";
-  taskArtifacts.innerHTML = "";
-  taskEvents.innerHTML = "";
-  setAuthMessage(message);
-  dispatchAuthLifecycle("paperpilot:unauthenticated");
-}
-
 function formatDate(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -139,380 +87,57 @@ function formatDate(value) {
   return date.toLocaleString();
 }
 
-function formatPercent(value) {
-  const number = Number(value);
-  if (Number.isNaN(number)) {
-    return "0.0%";
-  }
-  return `${(number * 100).toFixed(1)}%`;
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-function renderTasks(tasks) {
-  taskList.innerHTML = "";
-  if (!tasks.length) {
-    taskList.innerHTML = '<p class="task-detail empty">No tasks yet.</p>';
-    return;
-  }
-
-  for (const task of tasks) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = task.id === selectedTaskId ? "task-row active" : "task-row";
-    button.innerHTML = `
-      <span class="task-question">${escapeHtml(task.question)}</span>
-      <span class="status">${escapeHtml(task.status)}</span>
-      <span class="task-meta">${escapeHtml(task.depth)} - ${escapeHtml(formatDate(task.created_at))}</span>
-    `;
-    button.addEventListener("click", () => loadTask(task.id));
-    taskList.appendChild(button);
-  }
+function isCurrentAuthentication(version) {
+  return state.currentUser !== null && authenticationVersion === version;
 }
 
-function renderEvalSnapshot(snapshot) {
-  if (!snapshot.available) {
-    evalSnapshot.className = "eval-snapshot empty";
-    evalSnapshot.textContent = snapshot.message || "Evaluation snapshot is not available.";
-    return;
-  }
-
-  evalSnapshot.className = "eval-snapshot";
-  evalSnapshot.innerHTML = `
-    <div class="metric-grid">
-      ${renderMetricCard("Strict pass", snapshot.strict.pass_count, snapshot.total_cases, snapshot.strict.rate)}
-      ${renderMetricCard("Semantic correct", snapshot.semantic.correct_count, snapshot.total_cases, snapshot.semantic.correct_rate)}
-      ${renderMetricCard("Semantic weighted", snapshot.semantic.weighted_count, snapshot.total_cases, snapshot.semantic.weighted_rate)}
-      ${renderMetricCard("Calibrated correct", snapshot.calibrated.correct_count, snapshot.total_cases, snapshot.calibrated.correct_rate)}
-      ${renderMetricCard("Calibrated weighted", snapshot.calibrated.weighted_count, snapshot.total_cases, snapshot.calibrated.weighted_rate)}
-      ${renderMetricCard("Review candidates", snapshot.calibrated.candidate_count, snapshot.total_cases, null)}
-    </div>
-    <div class="eval-tables">
-      ${renderCountTable("Semantic labels", snapshot.semantic.label_counts)}
-      ${renderCountTable("Review decisions", snapshot.calibrated.decision_counts)}
-    </div>
-    <p class="eval-source">Source: ${escapeHtml(snapshot.audit_path)} · ${escapeHtml(snapshot.calibration_path)}</p>
-  `;
-}
-
-function renderCalibrationCandidates(payload) {
-  if (!payload.available) {
-    candidateCount.textContent = "Unavailable";
-    candidateList.className = "candidate-list empty";
-    candidateList.textContent = payload.message || "Calibration candidates are not available.";
-    return;
-  }
-
-  const candidates = payload.candidates || [];
-  candidateCount.textContent = `${candidates.length} of ${payload.total_candidates}`;
-  candidateList.className = candidates.length ? "candidate-list" : "candidate-list empty";
-  if (!candidates.length) {
-    candidateList.textContent = "No candidates match the current filters.";
-    return;
-  }
-
-  candidateList.innerHTML = candidates.map(renderCandidate).join("");
-}
-
-function renderCandidate(candidate) {
-  const strictText = candidate.strict_pass ? "strict pass" : "strict fail";
-  return `
-    <details class="candidate-card">
-      <summary>
-        <span class="candidate-main">
-          <span class="candidate-id">${escapeHtml(candidate.case_id)}</span>
-          <span class="candidate-question">${escapeHtml(candidate.question)}</span>
-        </span>
-        <span class="candidate-tags">
-          <span class="status">${escapeHtml(candidate.review_decision)}</span>
-          <span class="mini-tag">${escapeHtml(candidate.category)}</span>
-          <span class="mini-tag">${escapeHtml(strictText)}</span>
-          <span class="mini-tag">${escapeHtml(candidate.semantic_label)} / ${escapeHtml(candidate.confidence)}</span>
-        </span>
-      </summary>
-      <div class="candidate-body">
-        <h4>Oracle spans</h4>
-        ${renderInlineList(candidate.oracle_spans || [])}
-        <h4>PaperPilot predicted excerpt</h4>
-        <pre>${escapeHtml(candidate.predicted_excerpt || "(empty prediction)")}</pre>
-        <h4>Judge reason</h4>
-        <p>${escapeHtml(candidate.judge_reason || "")}</p>
-        <h4>Manual notes</h4>
-        <p>${escapeHtml(candidate.review_notes || "")}</p>
-        ${candidate.trace_path ? `<p class="eval-source">Trace: ${escapeHtml(candidate.trace_path)}</p>` : ""}
-      </div>
-    </details>
-  `;
-}
-
-function renderInlineList(items) {
-  if (!items.length) {
-    return '<p class="task-detail empty">No oracle spans.</p>';
-  }
-  return `
-    <ul class="oracle-list">
-      ${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-    </ul>
-  `;
-}
-
-function renderMetricCard(label, count, total, rate) {
-  const rateText = rate === null ? `${escapeHtml(total)} total` : formatPercent(rate);
-  return `
-    <div class="metric-card">
-      <span class="metric-label">${escapeHtml(label)}</span>
-      <strong>${escapeHtml(count)}</strong>
-      <span class="metric-rate">${escapeHtml(rateText)}</span>
-    </div>
-  `;
-}
-
-function renderCountTable(title, counts) {
-  const rows = Object.entries(counts || {});
-  if (!rows.length) {
-    return `
-      <div class="count-table">
-        <h3>${escapeHtml(title)}</h3>
-        <p class="task-detail empty">No data.</p>
-      </div>
-    `;
-  }
-  return `
-    <div class="count-table">
-      <h3>${escapeHtml(title)}</h3>
-      <table>
-        <tbody>
-          ${rows
-            .map(([name, count]) => `
-              <tr>
-                <th>${escapeHtml(name)}</th>
-                <td>${escapeHtml(count)}</td>
-              </tr>
-            `)
-            .join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
-}
-
-function renderTaskDetail(task, events, artifacts) {
-  taskDetail.className = "task-detail";
-  taskDetail.innerHTML = `
-    <p class="task-question">${escapeHtml(task.question)}</p>
-    <span class="status">${escapeHtml(task.status)}</span>
-    <dl>
-      <dt>ID</dt><dd>${escapeHtml(task.id)}</dd>
-      <dt>Depth</dt><dd>${escapeHtml(task.depth)}</dd>
-      <dt>Created</dt><dd>${escapeHtml(formatDate(task.created_at))}</dd>
-      <dt>Updated</dt><dd>${escapeHtml(formatDate(task.updated_at))}</dd>
-    </dl>
-  `;
-  renderTaskArtifacts(artifacts);
-  renderTaskEvents(events);
-}
-
-function renderTaskArtifacts(artifacts) {
-  taskArtifacts.innerHTML = "";
-  if (!artifacts.length) {
-    taskArtifacts.innerHTML = '<p class="task-detail empty">No artifacts yet.</p>';
-    return;
-  }
-  for (const artifact of artifacts) {
-    const card = document.createElement("div");
-    card.className = "artifact-card";
-    card.innerHTML = `
-      <div class="artifact-title">
-        <span>${escapeHtml(artifact.title)}</span>
-        <span class="artifact-kind">${escapeHtml(artifact.kind)}</span>
-      </div>
-      <div class="artifact-content">${escapeHtml(artifact.content)}</div>
-      <span class="event-time">${escapeHtml(formatDate(artifact.created_at))}</span>
-    `;
-    taskArtifacts.appendChild(card);
-  }
-}
-
-function renderTaskEvents(events) {
-  taskEvents.innerHTML = "";
-  if (!events.length) {
-    taskEvents.innerHTML = '<p class="task-detail empty">No events yet.</p>';
-    return;
-  }
-  for (const event of events) {
-    const row = document.createElement("div");
-    const category = eventCategory(event);
-    row.className = `event-row event-${category}`;
-    row.innerHTML = renderEventRow(event, category);
-    taskEvents.appendChild(row);
-  }
-}
-
-function renderEventRow(event, category) {
-  const payload = event.payload && Object.keys(event.payload).length
-    ? JSON.stringify(event.payload, null, 2)
-    : "";
-  const details = payload
-    ? `
-      <details class="event-payload">
-        <summary>Details</summary>
-        <pre>${escapeHtml(payload)}</pre>
-      </details>
-    `
-    : "";
-  return `
-    <div class="event-header">
-      <span class="event-category">${escapeHtml(category)}</span>
-      <span class="event-stage">${escapeHtml(event.stage || event.type)}</span>
-    </div>
-    <div class="event-message">${escapeHtml(event.message)}</div>
-    <span class="event-time">${escapeHtml(formatDate(event.created_at))}</span>
-    ${details}
-  `;
-}
-
-function eventCategory(event) {
-  const stage = event.stage || "";
-  if (stage === "agent_turn") {
-    return "agent";
-  }
-  if (stage === "tool_call" || stage === "tool_result") {
-    return "tool";
-  }
-  if (stage === "context_preflight" || stage === "auto_compact") {
-    return "context";
-  }
-  if (stage === "failure" || stage === "guardrail" || event.type === "failed") {
-    return "failure";
-  }
-  if (
-    [
-      "queue",
-      "start",
-      "prepare",
-      "deep_read_placeholder",
-      "complete",
-      "real_start",
-      "real_complete",
-    ].includes(stage)
-  ) {
-    return "workflow";
-  }
-  return "other";
-}
-
-async function loadTasks() {
-  if (workbench.hidden) {
-    return;
-  }
-  const requestVersion = ++taskListVersion;
-  const requestedStatus = statusFilter.value;
-  const params = new URLSearchParams({ limit: "50" });
-  if (requestedStatus) {
-    params.set("status", requestedStatus);
-  }
-  const payload = await requestJson("/api/tasks?" + params.toString());
-  if (
-    requestVersion !== taskListVersion
-    || workbench.hidden
-    || requestedStatus !== statusFilter.value
-  ) {
-    return;
-  }
-  renderTasks(payload.items);
-}
-
-async function loadEvalSnapshot() {
-  const snapshot = await requestJson("/api/eval/summary");
-  renderEvalSnapshot(snapshot);
-}
-
-async function loadCalibrationCandidates() {
-  const params = new URLSearchParams();
-  if (candidateCategory.value) {
-    params.set("category", candidateCategory.value);
-  }
-  if (candidateDecision.value) {
-    params.set("review_decision", candidateDecision.value);
-  }
-  const suffix = params.toString() ? `?${params.toString()}` : "";
-  const payload = await requestJson(`/api/eval/calibration-candidates${suffix}`);
-  renderCalibrationCandidates(payload);
-}
-
-async function loadTask(taskId) {
-  if (workbench.hidden) {
-    return;
-  }
-  const version = resetSelectedTask(taskId);
-  await drainTaskUpdates(taskId, version);
-  if (version === selectionVersion) {
-    await loadTasks();
-  }
-}
-
-function mergeById(existing, incoming) {
-  const byId = new Map(existing.map((item) => [item.id, item]));
-  for (const item of incoming) {
-    byId.set(item.id, item);
-  }
-  return [...byId.values()].sort((left, right) => left.id - right.id);
-}
-
-async function requestTaskUpdates(taskId, version) {
-  const encodedTaskId = encodeURIComponent(taskId);
-  const params = new URLSearchParams({
-    after_event_id: String(eventAfterId),
-    after_artifact_id: String(artifactAfterId),
-    limit: "100",
+function setAuthenticatedUser(user) {
+  authenticationVersion += 1;
+  state.currentUser = user;
+  authForm.hidden = true;
+  currentUser.hidden = false;
+  workspace.hidden = false;
+  currentUsername.textContent = user.username;
+  setAuthMessage("");
+  resetConversationWorkspace();
+  loadConversations().catch((error) => {
+    setConversationMessage(error.message, "error");
   });
-  const payload = await requestJson(
-    "/api/tasks/" + encodedTaskId + "/updates?" + params.toString(),
-  );
-  if (version !== selectionVersion || taskId !== selectedTaskId) {
-    return null;
-  }
-  selectedTask = payload.task;
-  selectedEvents = mergeById(selectedEvents, payload.events.items);
-  selectedArtifacts = mergeById(selectedArtifacts, payload.artifacts.items);
-  eventAfterId = payload.events.next_after_id;
-  artifactAfterId = payload.artifacts.next_after_id;
-  renderTaskDetail(selectedTask, selectedEvents, selectedArtifacts);
-  return payload;
 }
 
-async function drainTaskUpdates(taskId, version) {
-  const previousStatus = selectedTask ? selectedTask.status : null;
-  let payload = await requestTaskUpdates(taskId, version);
-  if (!payload) {
-    return;
-  }
-  while (payload.events.has_more || payload.artifacts.has_more) {
-    payload = await requestTaskUpdates(taskId, version);
-    if (!payload) {
-      return;
-    }
-  }
-  const currentStatus = payload.task.status;
-  if (
-    previousStatus
-    && previousStatus !== currentStatus
-    && currentStatus !== "pending"
-    && currentStatus !== "running"
-  ) {
-    await loadTasks();
-  }
-  if (version !== selectionVersion || taskId !== selectedTaskId) {
-    return;
-  }
-  schedulePolling(taskId, version, currentStatus);
+function clearAuthenticatedUser(message = "") {
+  authenticationVersion += 1;
+  state.currentUser = null;
+  authForm.hidden = false;
+  currentUser.hidden = true;
+  workspace.hidden = true;
+  currentUsername.textContent = "";
+  resetConversationWorkspace();
+  setAuthMessage(message);
 }
 
 async function loadCurrentUser() {
+  const authRequestVersion = authenticationVersion;
   try {
     const user = await requestJson("/api/auth/me");
-    showAuthenticated(user);
-    await loadTasks();
-  } catch (error) {
-    showUnauthenticated("Log in or register to use the workbench.");
+    if (authRequestVersion !== authenticationVersion) {
+      return;
+    }
+    setAuthenticatedUser(user);
+  } catch (_error) {
+    if (authRequestVersion !== authenticationVersion) {
+      return;
+    }
+    clearAuthenticatedUser("Log in or register to use the workbench.");
   }
 }
 
@@ -524,17 +149,628 @@ async function submitAuth(mode) {
     setAuthMessage("Username and password are required.", "error");
     return;
   }
+  authenticationVersion += 1;
+  const authRequestVersion = authenticationVersion;
   try {
     const user = await requestJson(`/api/auth/${mode}`, {
       method: "POST",
       body: JSON.stringify({ username, password }),
     });
+    if (authRequestVersion !== authenticationVersion) {
+      return;
+    }
     passwordInput.value = "";
-    showAuthenticated(user);
-    await loadTasks();
+    setAuthenticatedUser(user);
   } catch (error) {
-    setAuthMessage(error.message, "error");
+    if (authRequestVersion === authenticationVersion) {
+      setAuthMessage(error.message, "error");
+    }
   }
+}
+
+function clearPollTimer() {
+  if (state.activeTaskPoll && state.activeTaskPoll.timer !== null) {
+    clearTimeout(state.activeTaskPoll.timer);
+    state.activeTaskPoll.timer = null;
+  }
+}
+
+function resetConversationSelection(conversationId) {
+  clearPollTimer();
+  requestVersion += 1;
+  state.selectedConversationId = conversationId;
+  state.selectedConversation = null;
+  state.activeTaskPoll = null;
+  conversationEvents.replaceChildren();
+  branchOptions.replaceChildren();
+  branchSelector.hidden = true;
+  return requestVersion;
+}
+
+function isCurrentConversation(conversationId, version) {
+  return (
+    state.currentUser !== null
+    && state.selectedConversationId === conversationId
+    && requestVersion === version
+  );
+}
+
+function hasActiveTask() {
+  return state.activeTaskPoll !== null;
+}
+
+function setMutationControlsDisabled() {
+  const disabled = hasActiveTask();
+  conversationQuestion.disabled = !state.selectedConversation || disabled;
+  conversationDepth.disabled = !state.selectedConversation || disabled;
+  sendConversationMessage.disabled = !state.selectedConversation || disabled;
+  for (const button of document.querySelectorAll(".conversation-mutation")) {
+    button.disabled = disabled;
+  }
+}
+
+function renderPaperCandidates(items) {
+  paperCandidates.replaceChildren();
+  if (!items.length) {
+    paperCandidates.appendChild(
+      makeElement("p", "conversation-empty", "No matching papers found."),
+    );
+    return;
+  }
+  for (const paper of items) {
+    const card = makeElement("article", "paper-candidate");
+    card.appendChild(makeElement("h3", "paper-candidate-title", paper.title));
+    card.appendChild(
+      makeElement(
+        "p",
+        "paper-candidate-meta",
+        `${paper.authors.join(", ")} · arXiv ${paper.external_id}`,
+      ),
+    );
+    if (paper.abstract) {
+      card.appendChild(makeElement("p", "paper-candidate-abstract", paper.abstract));
+    }
+    const button = makeElement("button", "secondary-button", "Start conversation");
+    button.type = "button";
+    button.addEventListener("click", () => {
+      createConversation(paper);
+    });
+    card.appendChild(button);
+    paperCandidates.appendChild(card);
+  }
+}
+
+async function searchPapers() {
+  const query = paperQuery.value.trim();
+  if (!query) {
+    setPaperMessage("Enter a paper title, topic, arXiv ID, or URL.", "error");
+    return;
+  }
+  const authRequestVersion = authenticationVersion;
+  setPaperMessage("Searching…");
+  paperCandidates.replaceChildren();
+  try {
+    const params = new URLSearchParams({ q: query, limit: "10" });
+    const payload = await requestJson(`/api/papers/search?${params.toString()}`);
+    if (
+      !isCurrentAuthentication(authRequestVersion)
+      || paperQuery.value.trim() !== query
+    ) {
+      return;
+    }
+    renderPaperCandidates(payload.items);
+    setPaperMessage(payload.items.length ? "Select a paper to begin." : "");
+  } catch (error) {
+    if (
+      isCurrentAuthentication(authRequestVersion)
+      && paperQuery.value.trim() === query
+    ) {
+      setPaperMessage(error.message, "error");
+    }
+  }
+}
+
+async function createConversation(paper) {
+  const authRequestVersion = authenticationVersion;
+  setPaperMessage("Creating conversation…");
+  try {
+    const created = await requestJson("/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({
+        paper: {
+          source: paper.source,
+          external_id: paper.external_id,
+        },
+      }),
+    });
+    if (!isCurrentAuthentication(authRequestVersion)) {
+      return;
+    }
+    setPaperMessage("Conversation created.", "success");
+    await loadConversation(created.id);
+    await loadConversations(false);
+  } catch (error) {
+    if (isCurrentAuthentication(authRequestVersion)) {
+      setPaperMessage(error.message, "error");
+    }
+  }
+}
+
+function renderConversationList(items) {
+  conversationList.replaceChildren();
+  if (!items.length) {
+    conversationList.appendChild(
+      makeElement("p", "conversation-empty", "Search for a paper to start a conversation."),
+    );
+    return;
+  }
+  for (const conversation of items) {
+    const button = makeElement("button", "conversation-row");
+    button.type = "button";
+    button.dataset.conversationId = conversation.id;
+    if (conversation.id === state.selectedConversationId) {
+      button.classList.add("active");
+    }
+    button.appendChild(makeElement("span", "conversation-row-title", conversation.title));
+    button.appendChild(
+      makeElement(
+        "span",
+        "conversation-row-meta",
+        conversation.head_message_id ? "Reading in progress" : "New conversation",
+      ),
+    );
+    button.addEventListener("click", () => {
+      loadConversation(conversation.id);
+    });
+    conversationList.appendChild(button);
+  }
+}
+
+async function loadConversations(selectFirst = true) {
+  if (state.currentUser === null) {
+    return;
+  }
+  const authRequestVersion = authenticationVersion;
+  const listVersion = ++conversationListVersion;
+  try {
+    const payload = await requestJson("/api/conversations?limit=100");
+    if (
+      !isCurrentAuthentication(authRequestVersion)
+      || listVersion !== conversationListVersion
+    ) {
+      return;
+    }
+    state.conversations = payload.items;
+    renderConversationList(state.conversations);
+    if (
+      selectFirst
+      && state.selectedConversationId === null
+      && state.conversations.length
+    ) {
+      await loadConversation(state.conversations[0].id);
+    }
+  } catch (error) {
+    if (
+      isCurrentAuthentication(authRequestVersion)
+      && listVersion === conversationListVersion
+    ) {
+      setConversationMessage(error.message, "error");
+    }
+  }
+}
+
+function renderConversationHeader(detail) {
+  conversationTitle.textContent = detail.conversation.title;
+  const activePaperTitles = detail.active_papers.map((paper) => paper.title);
+  conversationPaper.textContent = activePaperTitles.join(" · ");
+}
+
+function addMessageControls(card, message) {
+  if (message.role !== "assistant" || message.status !== "complete") {
+    return;
+  }
+  const controls = makeElement("div", "message-controls");
+  const rollbackButton = makeElement(
+    "button",
+    "secondary-button conversation-mutation",
+    "Rollback here",
+  );
+  rollbackButton.type = "button";
+  rollbackButton.addEventListener("click", () => {
+    rollbackToMessage(message.id);
+  });
+  const alternativesButton = makeElement(
+    "button",
+    "secondary-button conversation-mutation",
+    "其他版本",
+  );
+  alternativesButton.type = "button";
+  alternativesButton.addEventListener("click", () => {
+    loadAlternatives(message.id);
+  });
+  controls.append(rollbackButton, alternativesButton);
+  card.appendChild(controls);
+}
+
+function renderMessage(message, extraClass = "") {
+  const className = ["conversation-message", `message-${message.role}`, extraClass]
+    .filter(Boolean)
+    .join(" ");
+  const card = makeElement("article", className);
+  const role = message.role === "assistant" ? "PaperPilot" : "You";
+  card.appendChild(makeElement("span", "message-role", role));
+  card.appendChild(makeElement("div", "message-body", message.content));
+  addMessageControls(card, message);
+  return card;
+}
+
+function renderMessages() {
+  messageList.replaceChildren();
+  const messages = state.selectedConversation ? state.selectedConversation.messages : [];
+  const unstableTurn = state.selectedConversation
+    ? state.selectedConversation.unstableTurn
+    : null;
+  if (!messages.length && unstableTurn === null) {
+    messageList.appendChild(
+      makeElement("p", "conversation-empty", "Ask your first question about this paper."),
+    );
+  }
+  for (const message of messages) {
+    messageList.appendChild(renderMessage(message));
+  }
+  if (unstableTurn !== null) {
+    messageList.appendChild(renderMessage(unstableTurn.user_message, "message-unstable"));
+    const taskStatus = makeElement(
+      "p",
+      `unstable-status status-${unstableTurn.task.status}`,
+      unstableTurn.task.status === "failed"
+        ? "This question failed. You can ask a new question."
+        : `Question ${unstableTurn.task.status}.`,
+    );
+    messageList.appendChild(taskStatus);
+  }
+  setMutationControlsDisabled();
+}
+
+async function refreshSelectedConversation(conversationId, version) {
+  const encodedConversationId = encodeURIComponent(conversationId);
+  const [detail, messagesPayload] = await Promise.all([
+    requestJson(`/api/conversations/${encodedConversationId}`),
+    requestJson(`/api/conversations/${encodedConversationId}/messages`),
+  ]);
+  if (!isCurrentConversation(conversationId, version)) {
+    return false;
+  }
+  state.selectedConversation = {
+    detail,
+    messages: messagesPayload.items,
+    unstableTurn: messagesPayload.unstable_turn,
+  };
+  const task = detail.active_task
+    || (state.selectedConversation.unstableTurn && state.selectedConversation.unstableTurn.task);
+  const activeTaskId = (
+    task && (task.status === "pending" || task.status === "running")
+      ? task.id
+      : null
+  );
+  if (activeTaskId === null) {
+    clearPollTimer();
+    state.activeTaskPoll = null;
+  } else if (!state.activeTaskPoll || state.activeTaskPoll.taskId !== activeTaskId) {
+    clearPollTimer();
+    state.activeTaskPoll = {
+      taskId: activeTaskId,
+      eventAfterId: 0,
+      artifactAfterId: 0,
+      timer: null,
+    };
+  }
+  renderConversationHeader(detail);
+  renderMessages();
+  return true;
+}
+
+async function loadConversation(conversationId) {
+  const version = resetConversationSelection(conversationId);
+  conversationTitle.textContent = "Loading conversation…";
+  conversationPaper.textContent = "";
+  messageList.replaceChildren();
+  setConversationMessage("");
+  setMutationControlsDisabled();
+  try {
+    const loaded = await refreshSelectedConversation(conversationId, version);
+    if (!loaded) {
+      return;
+    }
+    renderConversationListSelection();
+    if (state.activeTaskPoll !== null) {
+      setConversationMessage("PaperPilot is working. Progress appears below.");
+      pollConversationTask(state.activeTaskPoll.taskId, version);
+    }
+  } catch (error) {
+    if (isCurrentConversation(conversationId, version)) {
+      setConversationMessage(error.message, "error");
+    }
+  }
+}
+
+function renderConversationListSelection() {
+  for (const row of conversationList.querySelectorAll(".conversation-row")) {
+    row.classList.toggle(
+      "active",
+      row.dataset.conversationId === state.selectedConversationId,
+    );
+  }
+}
+
+function appendProgressEvents(events) {
+  for (const event of events) {
+    const row = makeElement("div", "conversation-event");
+    row.appendChild(makeElement("span", "conversation-event-stage", event.stage || event.type));
+    row.appendChild(makeElement("span", "conversation-event-message", event.message));
+    conversationEvents.appendChild(row);
+  }
+}
+
+function scheduleConversationPoll(taskId, version) {
+  clearPollTimer();
+  const poll = state.activeTaskPoll;
+  if (
+    !poll
+    || poll.taskId !== taskId
+    || !isCurrentConversation(state.selectedConversationId, version)
+  ) {
+    return;
+  }
+  poll.timer = setTimeout(() => {
+    if (state.activeTaskPoll === poll) {
+      poll.timer = null;
+      pollConversationTask(taskId, version);
+    }
+  }, 1000);
+}
+
+async function pollConversationTask(taskId, version) {
+  const conversationId = state.selectedConversationId;
+  if (!conversationId || !isCurrentConversation(conversationId, version)) {
+    return;
+  }
+  try {
+    let payload;
+    do {
+      const poll = state.activeTaskPoll;
+      if (!poll || poll.taskId !== taskId) {
+        return;
+      }
+      const params = new URLSearchParams({
+        after_event_id: String(poll.eventAfterId),
+        after_artifact_id: String(poll.artifactAfterId),
+        limit: "100",
+      });
+      payload = await requestJson(
+        `/api/conversations/${encodeURIComponent(conversationId)}`
+          + `/tasks/${encodeURIComponent(taskId)}/updates?${params.toString()}`,
+      );
+      if (
+        !isCurrentConversation(conversationId, version)
+        || !state.activeTaskPoll
+        || taskId !== state.activeTaskPoll.taskId
+      ) {
+        return;
+      }
+      appendProgressEvents(payload.events.items);
+      state.activeTaskPoll.eventAfterId = payload.events.next_after_id;
+      state.activeTaskPoll.artifactAfterId = payload.artifacts.next_after_id;
+    } while (payload.events.has_more || payload.artifacts.has_more);
+
+    if (payload.task.status === "completed" || payload.task.status === "failed") {
+      state.activeTaskPoll = null;
+      const refreshed = await refreshSelectedConversation(conversationId, version);
+      if (!refreshed) {
+        return;
+      }
+      setConversationMessage(
+        payload.task.status === "completed"
+          ? "Answer complete."
+          : "The question failed. You can ask a new question.",
+        payload.task.status === "completed" ? "success" : "error",
+      );
+      loadConversations(false);
+      return;
+    }
+    scheduleConversationPoll(taskId, version);
+  } catch (error) {
+    if (!isCurrentConversation(conversationId, version)) {
+      return;
+    }
+    setConversationMessage(`Progress update failed: ${error.message}`, "error");
+    scheduleConversationPoll(taskId, version);
+  }
+}
+
+async function reloadAfterConflict(conversationId, version) {
+  if (!isCurrentConversation(conversationId, version)) {
+    return;
+  }
+  try {
+    await refreshSelectedConversation(conversationId, version);
+    if (state.activeTaskPoll !== null) {
+      pollConversationTask(state.activeTaskPoll.taskId, version);
+    }
+  } catch (_refreshError) {
+    // The conflict notice remains actionable even if the refresh also fails.
+  } finally {
+    if (isCurrentConversation(conversationId, version)) {
+      setConversationMessage("会话已更新，请重试", "error");
+    }
+  }
+}
+
+async function submitMessage() {
+  if (!state.selectedConversation || hasActiveTask()) {
+    return;
+  }
+  const content = conversationQuestion.value.trim();
+  if (!content) {
+    setConversationMessage("Enter a question.", "error");
+    return;
+  }
+  const conversationId = state.selectedConversationId;
+  const version = requestVersion;
+  const expectedHead = state.selectedConversation.detail.conversation.head_message_id;
+  try {
+    const payload = await requestJson(
+      `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          content,
+          depth: conversationDepth.value,
+          expected_head_message_id: expectedHead,
+        }),
+      },
+    );
+    if (!isCurrentConversation(conversationId, version)) {
+      return;
+    }
+    conversationQuestion.value = "";
+    state.selectedConversation.unstableTurn = {
+      user_message: payload.user_message,
+      task: payload.task,
+    };
+    state.activeTaskPoll = {
+      taskId: payload.task.id,
+      eventAfterId: 0,
+      artifactAfterId: 0,
+      timer: null,
+    };
+    conversationEvents.replaceChildren();
+    branchOptions.replaceChildren();
+    branchSelector.hidden = true;
+    renderMessages();
+    setConversationMessage("Question queued. Progress appears below.");
+    pollConversationTask(payload.task.id, version);
+  } catch (error) {
+    if (!isCurrentConversation(conversationId, version)) {
+      return;
+    }
+    if (error.status === 409) {
+      await reloadAfterConflict(conversationId, version);
+      return;
+    }
+    try {
+      await refreshSelectedConversation(conversationId, version);
+    } catch (_refreshError) {
+      // The original request failure remains the useful user-facing error.
+    }
+    if (isCurrentConversation(conversationId, version)) {
+      setConversationMessage(error.message, "error");
+    }
+  }
+}
+
+async function loadAlternatives(messageId) {
+  if (hasActiveTask() || !state.selectedConversation) {
+    return;
+  }
+  const conversationId = state.selectedConversationId;
+  const version = requestVersion;
+  try {
+    const payload = await requestJson(
+      `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/alternatives`,
+    );
+    if (!isCurrentConversation(conversationId, version)) {
+      return;
+    }
+    branchOptions.replaceChildren();
+    branchSelector.hidden = false;
+    if (!payload.items.length) {
+      branchOptions.appendChild(
+        makeElement("p", "conversation-empty", "No other versions are available here."),
+      );
+      return;
+    }
+    for (const alternative of payload.items) {
+      const card = makeElement("article", "branch-option");
+      card.appendChild(
+        makeElement("p", "branch-user", `You: ${alternative.user_message.content}`),
+      );
+      card.appendChild(
+        makeElement("p", "branch-assistant", alternative.assistant_message.content),
+      );
+      const chooseButton = makeElement(
+        "button",
+        "secondary-button conversation-mutation",
+        "Use this version",
+      );
+      chooseButton.type = "button";
+      chooseButton.addEventListener("click", () => {
+        rollbackToMessage(alternative.assistant_message.id);
+      });
+      card.appendChild(chooseButton);
+      branchOptions.appendChild(card);
+    }
+    setMutationControlsDisabled();
+  } catch (error) {
+    if (!isCurrentConversation(conversationId, version)) {
+      return;
+    }
+    setConversationMessage(error.message, "error");
+  }
+}
+
+async function rollbackToMessage(messageId) {
+  if (hasActiveTask() || !state.selectedConversation) {
+    return;
+  }
+  const conversationId = state.selectedConversationId;
+  const version = requestVersion;
+  const expectedHead = state.selectedConversation.detail.conversation.head_message_id;
+  try {
+    await requestJson(`/api/conversations/${encodeURIComponent(conversationId)}/rollback`, {
+      method: "POST",
+      body: JSON.stringify({
+        message_id: messageId,
+        expected_head_message_id: expectedHead,
+      }),
+    });
+    if (!isCurrentConversation(conversationId, version)) {
+      return;
+    }
+    await loadConversation(conversationId);
+    const reloadVersion = requestVersion;
+    await loadConversations(false);
+    if (
+      !isCurrentConversation(conversationId, reloadVersion)
+      || !state.selectedConversation
+    ) {
+      return;
+    }
+    setConversationMessage("Conversation rolled back.", "success");
+  } catch (error) {
+    if (!isCurrentConversation(conversationId, version)) {
+      return;
+    }
+    if (error.status === 409) {
+      await reloadAfterConflict(conversationId, version);
+      return;
+    }
+    setConversationMessage(error.message, "error");
+  }
+}
+
+function resetConversationWorkspace() {
+  conversationListVersion += 1;
+  resetConversationSelection(null);
+  state.conversations = [];
+  conversationList.replaceChildren();
+  paperCandidates.replaceChildren();
+  messageList.replaceChildren();
+  conversationTitle.textContent = "Select a conversation";
+  conversationPaper.textContent = "";
+  setConversationMessage("");
+  setPaperMessage("");
+  setMutationControlsDisabled();
 }
 
 authForm.addEventListener("submit", async (event) => {
@@ -547,109 +783,35 @@ registerButton.addEventListener("click", () => {
 });
 
 logoutButton.addEventListener("click", async () => {
+  authenticationVersion += 1;
+  const authRequestVersion = authenticationVersion;
   try {
     await requestJson("/api/auth/logout", { method: "POST" });
   } finally {
-    showUnauthenticated("Logged out.");
+    if (authRequestVersion === authenticationVersion) {
+      clearAuthenticatedUser("Logged out.");
+    }
   }
 });
 
-conversationsTab.addEventListener("click", () => {
-  selectWorkspaceTab("conversations");
-});
-
-legacyTab.addEventListener("click", () => {
-  selectWorkspaceTab("legacy");
-});
-
-taskForm.addEventListener("submit", async (event) => {
+paperSearch.addEventListener("submit", (event) => {
   event.preventDefault();
-  setMessage("");
-  const question = questionInput.value.trim();
-  if (!question) {
-    setMessage("Question is required.", "error");
-    return;
-  }
-
-  try {
-    const task = await requestJson("/api/tasks", {
-      method: "POST",
-      body: JSON.stringify({
-        question,
-        depth: depthInput.value,
-        execution_mode: executionModeInput.value,
-      }),
-    });
-    questionInput.value = "";
-    setMessage("Task created.", "success");
-    await loadTask(task.id);
-  } catch (error) {
-    setMessage(error.message, "error");
-  }
+  searchPapers();
 });
 
-refreshButton.addEventListener("click", () => {
-  loadTasks().catch((error) => setMessage(error.message, "error"));
+messageComposer.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitMessage();
 });
 
-refreshEvalButton.addEventListener("click", () => {
-  Promise.all([loadEvalSnapshot(), loadCalibrationCandidates()]).catch((error) => {
-    evalSnapshot.className = "eval-snapshot empty";
-    evalSnapshot.textContent = error.message;
-  });
+refreshConversations.addEventListener("click", () => {
+  loadConversations(false);
 });
 
-candidateCategory.addEventListener("change", () => {
-  loadCalibrationCandidates().catch((error) => {
-    candidateList.className = "candidate-list empty";
-    candidateList.textContent = error.message;
-  });
+closeBranchSelector.addEventListener("click", () => {
+  branchSelector.hidden = true;
+  branchOptions.replaceChildren();
 });
 
-candidateDecision.addEventListener("change", () => {
-  loadCalibrationCandidates().catch((error) => {
-    candidateList.className = "candidate-list empty";
-    candidateList.textContent = error.message;
-  });
-});
-
-statusFilter.addEventListener("change", () => {
-  loadTasks().catch((error) => setMessage(error.message, "error"));
-});
-
-function schedulePolling(taskId, version, status) {
-  if (version !== selectionVersion || taskId !== selectedTaskId) {
-    return;
-  }
-  if (pollTimer) {
-    clearTimeout(pollTimer);
-    pollTimer = null;
-  }
-  if (status !== "pending" && status !== "running") {
-    return;
-  }
-  pollTimer = setTimeout(() => {
-    drainTaskUpdates(taskId, version).catch((error) => {
-      setMessage(error.message, "error");
-    });
-  }, 1000);
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
+setMutationControlsDisabled();
 loadCurrentUser();
-loadEvalSnapshot().catch((error) => {
-  evalSnapshot.className = "eval-snapshot empty";
-  evalSnapshot.textContent = error.message;
-});
-loadCalibrationCandidates().catch((error) => {
-  candidateList.className = "candidate-list empty";
-  candidateList.textContent = error.message;
-});

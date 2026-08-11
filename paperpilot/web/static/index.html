@@ -3,19 +3,25 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PaperPilot Workbench</title>
-    <link rel="stylesheet" href="/static/styles.css" />
-    <link rel="stylesheet" href="/static/conversations.css" />
+    <title>PaperPilot Conversations</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/app.js" defer></script>
   </head>
   <body>
     <header class="topbar">
       <div>
         <h1>PaperPilot</h1>
-        <p>Local research task workbench</p>
+        <p>Paper conversation workspace</p>
       </div>
       <div class="auth-panel" aria-label="Authentication">
         <form id="authForm" class="auth-form">
-          <input id="username" name="username" autocomplete="username" placeholder="Username" required />
+          <input
+            id="username"
+            name="username"
+            autocomplete="username"
+            placeholder="Username"
+            required
+          />
           <input
             id="password"
             name="password"
@@ -31,34 +37,12 @@
         <div id="currentUser" class="current-user" hidden>
           <span id="currentUsername"></span>
           <button id="logoutButton" type="button" class="secondary-button">Log Out</button>
-          <button id="refreshTasks" type="button">Refresh</button>
         </div>
         <p id="authMessage" class="message" role="status"></p>
       </div>
     </header>
 
     <div id="workspace" hidden>
-      <nav class="workspace-tabs" aria-label="Workspace">
-        <button
-          id="conversationsTab"
-          type="button"
-          class="workspace-tab active"
-          aria-controls="conversationView"
-          aria-selected="true"
-        >
-          Conversations
-        </button>
-        <button
-          id="legacyTab"
-          type="button"
-          class="workspace-tab"
-          aria-controls="workbench"
-          aria-selected="false"
-        >
-          Legacy Workbench
-        </button>
-      </nav>
-
       <main id="conversationView" class="conversation-layout">
         <aside class="conversation-sidebar" aria-label="Paper and conversation navigation">
           <section class="panel conversation-paper-panel" aria-labelledby="paperSearchTitle">
@@ -133,95 +117,6 @@
           </form>
         </section>
       </main>
-
-      <main id="workbench" class="layout" hidden>
-      <section class="panel create-panel" aria-labelledby="createTitle">
-        <h2 id="createTitle">New Research Task</h2>
-        <form id="taskForm">
-          <label for="question">Question</label>
-          <textarea
-            id="question"
-            name="question"
-            rows="7"
-            required
-            placeholder="What are the main retrieval strategies for long-context RAG?"
-          ></textarea>
-
-          <label for="depth">Depth</label>
-          <select id="depth" name="depth">
-            <option value="quick">Quick</option>
-            <option value="standard" selected>Standard</option>
-            <option value="deep">Deep</option>
-          </select>
-
-          <label for="executionMode">Execution</label>
-          <select id="executionMode" name="executionMode">
-            <option value="simulated" selected>Simulated</option>
-            <option value="real">Real PaperPilot</option>
-          </select>
-
-          <button type="submit">Create Task</button>
-        </form>
-        <p id="formMessage" class="message" role="status"></p>
-      </section>
-
-      <section class="panel history-panel" aria-labelledby="historyTitle">
-        <div class="section-heading">
-          <h2 id="historyTitle">Tasks</h2>
-          <select id="statusFilter" aria-label="Filter tasks by status">
-            <option value="">All</option>
-            <option value="pending">Pending</option>
-            <option value="running">Running</option>
-            <option value="completed">Completed</option>
-            <option value="failed">Failed</option>
-          </select>
-        </div>
-        <div id="taskList" class="task-list"></div>
-      </section>
-
-      <section class="panel eval-panel" aria-labelledby="evalTitle">
-        <div class="section-heading">
-          <h2 id="evalTitle">Evaluation Snapshot</h2>
-          <button id="refreshEval" type="button" class="secondary-button">Refresh</button>
-        </div>
-        <div id="evalSnapshot" class="eval-snapshot empty">Loading evaluation snapshot.</div>
-        <div class="candidate-browser" aria-labelledby="candidateTitle">
-          <div class="section-heading candidate-heading">
-            <h3 id="candidateTitle">Calibration Candidates</h3>
-            <span id="candidateCount" class="candidate-count">Loading.</span>
-          </div>
-          <div class="candidate-filters">
-            <label for="candidateCategory">Category</label>
-            <select id="candidateCategory">
-              <option value="">All</option>
-              <option value="partial_high">Partial High</option>
-              <option value="partial_medium">Partial Medium</option>
-              <option value="strict_pass_semantic_bad">Strict Pass Bad</option>
-            </select>
-            <label for="candidateDecision">Decision</label>
-            <select id="candidateDecision">
-              <option value="">All</option>
-              <option value="accept_as_correct">Accept Correct</option>
-              <option value="keep_partial">Keep Partial</option>
-              <option value="downgrade_to_incorrect">Downgrade Incorrect</option>
-              <option value="judge_error">Judge Error</option>
-              <option value="TODO">TODO</option>
-            </select>
-          </div>
-          <div id="candidateList" class="candidate-list empty">Loading candidates.</div>
-        </div>
-      </section>
-
-      <section class="panel detail-panel" aria-labelledby="detailTitle">
-        <h2 id="detailTitle">Task Detail</h2>
-        <div id="taskDetail" class="task-detail empty">Select a task.</div>
-        <div id="taskArtifacts" class="artifact-list"></div>
-        <div id="taskEvents" class="event-list"></div>
-      </section>
-      </main>
     </div>
-
-    <script src="/static/conversations.js"></script>
-    <script src="/static/app.js"></script>
   </body>
 </html>
