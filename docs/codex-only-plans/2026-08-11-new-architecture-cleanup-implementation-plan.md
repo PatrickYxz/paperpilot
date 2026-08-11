@@ -1249,7 +1249,7 @@ git commit -m "chore(repo): remove historical eval and legacy assets"
 - Consumes: final retained imports and APIs from Tasks 1–8.
 - Produces: a lock file with no legacy-only dependency, a new-architecture-only README/env example, and only runnable new-stack operational scripts.
 
-- [ ] **Step 1: Write RED dependency/documentation tests**
+- [ ] **Step 1: Write RED dependency/configuration tests**
 
 Extend dependency tests:
 
@@ -1262,7 +1262,7 @@ def test_legacy_anthropic_sdk_is_not_a_direct_requirement() -> None:
     )
 ```
 
-Extend architecture tests to assert README and `.env.example` do not mention legacy Agent Loop, `/api/tasks`, `/api/eval`, simulation mode, `DEFAULT_MODEL` for the removed old client, or Day numbering.
+Extend architecture tests to parse the variable names from `.env.example`. Assert the active runtime keys listed in Step 5 are present and the removed keys `DEFAULT_MODEL`, `MAX_ITERATIONS`, and `BUDGET_TOKENS` are absent. Do not add pytest assertions over README prose; verify human-facing documentation with the explicit one-time checks in Steps 6–7 and Task 10 instead.
 
 - [ ] **Step 2: Verify RED**
 
