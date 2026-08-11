@@ -1253,6 +1253,9 @@ git commit -m "chore(repo): remove historical eval and legacy assets"
 - Modify: `.env.example`
 - Modify: `README.md`
 - Modify or Delete: `scripts/benchmark_web_task_store.py`
+- Modify: `paperpilot/tools/mcp_client.py`
+- Modify: `tests/test_mcp_client.py`
+- Modify: `tests/web/test_runtime_config.py`
 - Modify: `tests/deep_reading/test_dependency_contract.py`
 - Modify: `tests/architecture/test_repository_allowlist.py`
 
@@ -1285,6 +1288,8 @@ Extend architecture tests to parse the variable names from `.env.example`. Asser
 
 Remove `anthropic>=0.40.0`. Keep `python-dotenv`, MCP/arXiv, LangGraph/LangChain/DeepSeek, FastAPI/Uvicorn, Celery/Redis, SQLAlchemy/Alembic, PyMuPDF/PyLate, NetworkX/httpx, and DashScope because retained modules import them.
 
+Rewrite the `requirements.txt` section headings around retained runtime concerns (configuration, service/orchestration, document retrieval, citation graph, VLM, and tests); remove Day/Week migration-history labels and the empty evaluation heading.
+
 Regenerate with the project’s uv environment:
 
 ```bash
@@ -1298,6 +1303,8 @@ Expected: compatible environment; `anthropic` absent from direct and resolved re
 - [ ] **Step 4: Validate or remove the retained TaskStore benchmark**
 
 Run `scripts/benchmark_web_task_store.py --help` against current imports. If it imports deleted generic TaskStore methods, delete it; if it benchmarks retained Conversation/TaskStore paths, update names and fixtures to create Conversation-bound tasks. Do not keep the script merely because it predates cleanup.
+
+If the benchmark is deleted, remove every README command that names it. Also remove the pre-existing pytest functions in `tests/web/test_runtime_config.py` that assert README prose; this enforces the user's preflight ruling that Task 9 and Task 10 one-time checks, not permanent prose tests, govern README content. Keep the compose and `.env.example` artifact tests.
 
 - [ ] **Step 5: Rewrite `.env.example`**
 
@@ -1353,13 +1360,16 @@ README must include:
 8. Migration, backup, health, retry, and restore operations.
 9. Automated fake-model scope and the separate approval requirement for real-model smoke.
 
+README may name only operational scripts that still exist after cleanup. Rewrite the retained MCP client/test comments so they describe the current synchronous tool-handler boundary and typed deterministic failure classification; remove references to the deleted `docs/superpowers` design file and old Agent Loop.
+
 - [ ] **Step 7: Run dependency/docs/full GREEN gates**
 
 ```bash
 ./.venv/bin/python -m pytest tests/deep_reading/test_dependency_contract.py tests/architecture -q
 ./.venv/bin/python -m pytest tests -q
 uv pip check --python .venv/bin/python
-rg -n "Legacy Workbench|/api/tasks|/api/eval|agent_loop|ConversationSession|execution_mode|DEFAULT_MODEL|MAX_ITERATIONS|BUDGET_TOKENS|S2_API_KEY" README.md .env.example paperpilot tests scripts
+rg -n "Legacy Workbench|/api/tasks|/api/eval|agent_loop|ConversationSession|execution_mode|DEFAULT_MODEL|MAX_ITERATIONS|BUDGET_TOKENS|S2_API_KEY" README.md .env.example paperpilot tests scripts --glob '!tests/architecture/test_repository_allowlist.py'
+rg -o 'scripts/[A-Za-z0-9_./-]+\.py' README.md | sort -u | while read -r path; do test -f "$path" || { echo "missing README script: $path"; exit 1; }; done
 git diff --check
 ```
 
@@ -1368,7 +1378,7 @@ Expected: zero test failures, compatible dependencies, and no forbidden matches.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add requirements.txt requirements-lock.txt .env.example README.md scripts tests/deep_reading/test_dependency_contract.py tests/architecture
+git add requirements.txt requirements-lock.txt .env.example README.md paperpilot/tools/mcp_client.py scripts tests/test_mcp_client.py tests/web/test_runtime_config.py tests/deep_reading/test_dependency_contract.py tests/architecture
 git commit -m "docs(runtime): describe only the LangGraph service"
 ```
 
