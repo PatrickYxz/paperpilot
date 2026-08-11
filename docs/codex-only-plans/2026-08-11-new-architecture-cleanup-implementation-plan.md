@@ -958,6 +958,7 @@ git commit -m "refactor(runtime): execute Conversation tasks directly"
 - Delete: `paperpilot/web/static/conversations.js`
 - Delete: `paperpilot/web/static/conversations.css`
 - Modify: `tests/web/test_conversation_ui.py`
+- Modify: `tests/web/test_web_app.py`
 
 **Interfaces:**
 - Consumes: auth, paper search, Conversation CRUD/messages/alternatives/rollback, and conversation-scoped task updates APIs.
@@ -1028,6 +1029,8 @@ Merge auth/global and Conversation styles; delete every legacy tab/task/eval sel
 
 - [ ] **Step 6: Delete split Conversation assets and run GREEN tests**
 
+Update the existing static-serving assertion in `tests/web/test_web_app.py` so it requests only `app.js` and `styles.css`; the deleted split assets must not remain as expected-200 resources.
+
 ```bash
 ./.venv/bin/python -m pytest tests/web/test_conversation_ui.py tests/web/test_auth.py tests/web/test_web_app.py -q
 rg -n "Legacy Workbench|legacyTab|/api/tasks|/api/eval|conversations\.(js|css)" paperpilot/web/static tests/web/test_conversation_ui.py
@@ -1043,7 +1046,7 @@ Run the Web app with temporary business/checkpoint SQLite paths and a fake paper
 - [ ] **Step 8: Commit**
 
 ```bash
-git add paperpilot/web/static tests/web/test_conversation_ui.py
+git add paperpilot/web/static tests/web/test_conversation_ui.py tests/web/test_web_app.py
 git commit -m "refactor(ui): keep only the Conversation workspace"
 ```
 
