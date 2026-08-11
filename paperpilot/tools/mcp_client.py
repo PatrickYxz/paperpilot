@@ -1,9 +1,10 @@
-"""MCPClient: 同步 facing 的 MCP 客户端,封装后台 asyncio 线程 + N 个 session。
+"""Synchronous MCP tool-handler facade over async stdio sessions.
 
-设计依据:docs/superpowers/specs/2026-04-25-mcp-layer-architecture-design.md (§4)
-- agent_loop 保持同步;async 复杂度关在本文件
-- 每个 MCP tool 包成 paperpilot.tools.types.Tool,handler 是 sync 闭包
-- 错误:启动 hard-fail / 运行 soft-fail / 180s 超时为边界
+``MCPClient`` owns a background asyncio loop and one session per server. Each
+MCP tool is exposed as :class:`paperpilot.tools.types.Tool` with a synchronous
+handler that schedules the async call and blocks at the configured timeout.
+Startup, deterministic server-reported failures, timeouts, and broken
+transports retain distinct exception types for downstream classification.
 """
 from __future__ import annotations
 

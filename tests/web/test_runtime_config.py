@@ -19,35 +19,6 @@ def test_compose_enables_persistent_redis_queue():
     assert '"127.0.0.1:6379:6379"' in text
 
 
-def test_readme_documents_celery_runtime_commands():
-    text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-
-    assert "PAPERPILOT_TASK_EXECUTOR=celery" in text
-    assert "PAPERPILOT_TASK_DB_PATH" in text
-    assert "PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH" in text
-    assert "PAPERPILOT_REDIS_VISIBILITY_TIMEOUT_SECONDS" in text
-    assert "at-least-once" in text
-    assert "transactional outbox" in text
-    assert "docker compose up -d redis" in text
-    assert "paperpilot.web.celery_app:celery_app worker" in text
-    assert "20260807_0002" in text
-    assert "database`, `checkpoint`, and `executor" in text
-    assert "`running`, `completed`, or `failed`" in text
-
-    startup_commands = (
-        "uv pip sync requirements-lock.txt --python .venv/bin/python",
-        "./.venv/bin/python -m alembic -c alembic.ini upgrade head",
-        "LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python "
-        "-m paperpilot.web.checkpoint --setup",
-        "./.venv/bin/celery -A paperpilot.web.celery_app:celery_app "
-        "worker --loglevel=INFO",
-        "./.venv/bin/uvicorn paperpilot.web.app:app "
-        "--host 127.0.0.1 --port 8000",
-    )
-    positions = [text.index(command) for command in startup_commands]
-    assert positions == sorted(positions)
-
-
 def test_env_example_declares_both_sqlite_paths_and_executor_examples():
     text = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
 
@@ -66,92 +37,5 @@ def test_env_example_declares_both_sqlite_paths_and_executor_examples():
         "PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT=12",
         "PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS=4096",
         "PAPERPILOT_RESEARCH_MODEL_RETRIES=1",
-    ):
-        assert value in text
-
-
-def test_readme_exports_dotenv_before_starting_celery_runtime():
-    text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-    normalized = " ".join(text.split())
-
-    assert "does not load `.env` automatically" in text
-    dotenv_commands = (
-        "cp .env.example .env",
-        "set -a",
-        "source .env",
-        "set +a",
-        "uv pip sync requirements-lock.txt --python .venv/bin/python",
-    )
-    positions = [text.index(command) for command in dotenv_commands]
-    assert positions == sorted(positions)
-    assert "set `PAPERPILOT_TASK_EXECUTOR=celery` in `.env`" in normalized
-    assert text.index("docker compose up -d redis") < text.index(
-        "./.venv/bin/celery -A paperpilot.web.celery_app:celery_app "
-        "worker --loglevel=INFO"
-    )
-
-
-def test_readme_starts_worker_and_api_in_separate_loaded_shells():
-    text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-    normalized = " ".join(text.split())
-
-    assert "two bash/zsh terminals" in normalized
-    assert "load the same `.env` in each" in normalized
-    assert "Start the Worker in terminal 1" in normalized
-    assert "start the API in terminal 2" in normalized
-    assert "POSIX shell" not in text
-
-
-def test_readme_backs_up_and_restores_sqlite_files_as_timestamped_pair():
-    text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-
-    assert 'BACKUP_DIR="data/backups/$(date +%Y%m%d-%H%M%S)"' in text
-    assert 'mkdir -p "$BACKUP_DIR"' in text
-    assert '"$BACKUP_DIR/business.sqlite3"' in text
-    assert '"$BACKUP_DIR/checkpoints.sqlite3"' in text
-    assert 'RESTORE_DIR="data/backups/<selected-timestamp>"' in text
-    assert '"$RESTORE_DIR/business.sqlite3"' in text
-    assert '"$RESTORE_DIR/checkpoints.sqlite3"' in text
-    assert "data/backups/business.sqlite3" not in text
-    assert "data/backups/checkpoints.sqlite3" not in text
-
-
-def test_readme_documents_runtime_protection_contract():
-    text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-    normalized = " ".join(text.split())
-
-    assert "6 unfinished tasks per Uvicorn process" in normalized
-    assert "theoretical aggregate capacity across both processes is 12" in normalized
-    assert "process-local total is 12" not in normalized
-
-    for value in (
-        "PAPERPILOT_THREAD_WORKERS",
-        "PAPERPILOT_THREAD_QUEUE_CAPACITY",
-        "PAPERPILOT_OVERLOAD_RETRY_AFTER_SECONDS",
-        "PAPERPILOT_LOG_FORMAT",
-        "/health/live",
-        "/health/ready",
-        "Retry-After",
-        "X-Request-ID",
-        "--no-access-log",
-        "benchmark_web_admission.py",
-    ):
-        assert value in text
-
-
-def test_readme_documents_research_budget_and_failure_taxonomy() -> None:
-    text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-
-    for value in (
-        "PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT",
-        "PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT",
-        "PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS",
-        "PAPERPILOT_RESEARCH_MODEL_RETRIES",
-        "32,768",
-        "131,072",
-        "generated tokens",
-        "usage metadata",
-        "terminal",
-        "transient",
     ):
         assert value in text

@@ -1,12 +1,8 @@
-# ===== Day 4: Agent Loop + LLM Client =====
-anthropic>=0.40.0
+# ===== Runtime configuration =====
 python-dotenv>=1.0.0
 
-# ===== Day 5: MCP server + 第一个 server (arxiv) =====
+# ===== Service and orchestration =====
 mcp>=1.0.0,<2
-arxiv>=2.1.0
-requests>=2.32.0
-pytest>=8.0.0
 langgraph>=1.2.9,<1.3
 langchain>=1.3.14,<1.4
 langgraph-checkpoint-sqlite>=3.1,<3.2
@@ -18,20 +14,18 @@ celery[redis]>=5.5,<6
 SQLAlchemy>=2.0.51,<2.1
 alembic>=1.18.5,<2
 
-# ===== Day 6: PDF 解析 + ColBERT 检索 =====
-# PyLate (Stanford ColBERT v2 现代 Python 重写) 取代 ragatouille:
-# ragatouille 0.0.9 在 Windows + Py3.12 上 dep hell (pyarrow init segfault /
-# langchain 1.x 重构 / transformers 5.x 不兼容 / llama_index 必需);
-# 0.0.10 自身也将切到 PyLate 后端,直接用源头干净
+# ===== Document acquisition and retrieval =====
+arxiv>=2.1.0
+requests>=2.32.0
 PyMuPDF>=1.24.0
 pylate>=1.1.0
 
-# ===== Day 8: 引用关系图 =====
-# graph-mcp 用 NetworkX 存图 + httpx 调 Semantic Scholar Graph API
+# ===== Citation graph =====
 networkx>=3.2
 httpx>=0.27
 
-# ===== Week 4: 评估 / 测试扩展 =====
-
-# ===== Day 14: VLM (Qwen-VL-Max via DashScope) =====
+# ===== Visual language model =====
 dashscope>=1.24.6
+
+# ===== Tests =====
+pytest>=8.0.0

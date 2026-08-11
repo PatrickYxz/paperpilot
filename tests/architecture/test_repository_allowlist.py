@@ -11,6 +11,61 @@ DOCS_KEEP_ALLOWLIST = {
     "docs/codex-only-plans/2026-08-11-new-architecture-cleanup-implementation-plan.md",
 }
 
+ACTIVE_ENV_VARIABLES = {
+    "DEEPSEEK_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "SEMANTIC_SCHOLAR_API_KEY",
+    "MCP_TOOL_TIMEOUT",
+    "MCP_INITIALIZE_TIMEOUT",
+    "PAPERPILOT_GRAPH_PATH",
+    "PAPERPILOT_TASK_DB_PATH",
+    "PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH",
+    "LANGGRAPH_STRICT_MSGPACK",
+    "PAPERPILOT_TASK_EXECUTOR",
+    "PAPERPILOT_THREAD_WORKERS",
+    "PAPERPILOT_THREAD_QUEUE_CAPACITY",
+    "PAPERPILOT_OVERLOAD_RETRY_AFTER_SECONDS",
+    "PAPERPILOT_TASK_MAX_RETRIES",
+    "PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS",
+    "PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS",
+    "PAPERPILOT_LOG_LEVEL",
+    "PAPERPILOT_LOG_FORMAT",
+    "PAPERPILOT_SLOW_REQUEST_MS",
+    "PAPERPILOT_ENV",
+    "PAPERPILOT_CELERY_BROKER_URL",
+    "PAPERPILOT_TASK_SOFT_TIME_LIMIT_SECONDS",
+    "PAPERPILOT_TASK_TIME_LIMIT_SECONDS",
+    "PAPERPILOT_REDIS_VISIBILITY_TIMEOUT_SECONDS",
+    "PAPERPILOT_SUMMARY_TOKEN_THRESHOLD",
+    "PAPERPILOT_SUMMARY_RECENT_TURNS",
+    "PAPERPILOT_RESEARCH_RECURSION_LIMIT",
+    "PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT",
+    "PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT",
+    "PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS",
+    "PAPERPILOT_RESEARCH_MODEL_RETRIES",
+}
+
+REMOVED_ENV_VARIABLES = {
+    "DEFAULT_MODEL",
+    "MAX_ITERATIONS",
+    "BUDGET_TOKENS",
+    "S2_API_KEY",
+}
+
+
+def _env_variable_names(path: Path) -> set[str]:
+    names: set[str] = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("#"):
+            line = line.removeprefix("#").strip()
+        if not line or "=" not in line:
+            continue
+        name = line.split("=", 1)[0].strip()
+        if name:
+            names.add(name)
+    return names
+
 
 def _assert_no_historical_day_scripts(scripts_root: Path) -> None:
     historical_scripts = [
@@ -74,3 +129,11 @@ def test_repository_docs_match_keep_allowlist() -> None:
     }
 
     assert actual_docs == DOCS_KEEP_ALLOWLIST
+
+
+def test_env_example_declares_active_variables_and_omits_removed_aliases() -> None:
+    root = Path(__file__).parents[2]
+    names = _env_variable_names(root / ".env.example")
+
+    assert ACTIVE_ENV_VARIABLES <= names
+    assert names.isdisjoint(REMOVED_ENV_VARIABLES)

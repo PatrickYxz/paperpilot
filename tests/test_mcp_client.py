@@ -51,8 +51,7 @@ def test_tool_call_roundtrip(tmp_path):
 
 
 def test_server_error_raises_MCPToolError(tmp_path):
-    """server 端 raise → CallToolResult.isError=True → handler 抛 MCPToolError。
-       agent_loop 现有 except Exception 会接走,转成 is_error tool_result。"""
+    """Server ``isError`` becomes typed ``MCPToolError`` for deterministic classification."""
     from paperpilot.tools.mcp_client import MCPToolError
     c = MCPClient(_make_manifest(tmp_path))
     c.start()
