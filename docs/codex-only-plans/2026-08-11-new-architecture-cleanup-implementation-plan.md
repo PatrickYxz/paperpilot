@@ -734,7 +734,7 @@ Each router file exposes one builder with explicit dependencies:
 
 - `build_auth_router(*, auth: AuthService, require_user: RequireUser) -> APIRouter`, prefix `/api/auth`, containing the existing register, login, logout, and me handlers.
 - `build_paper_router(*, require_user: RequireUser, paper_search: PaperSearch) -> APIRouter`, containing only `GET /api/papers/search`.
-- `build_conversation_router(*, store: TaskStore, executor: TaskExecutorLike, require_user: RequireUser, deep_reading_runner: DeepReadingRunner) -> APIRouter`, containing create/list/detail/update, message creation/listing, alternatives, and rollback.
+- `build_conversation_router(*, store: TaskStore, executor: TaskExecutorLike, require_user: RequireUser, deep_reading_runner: DeepReadingRunner, paper_search: PaperSearch) -> APIRouter`, containing create/list/detail/update, message creation/listing, alternatives, and rollback. The Conversation and paper routers receive the same injected `paper_search` callable so Conversation creation can resolve its paper reference without a hidden/default network dependency.
 - `build_task_updates_router(*, store: TaskStore, require_user: RequireUser) -> APIRouter`, containing only the scoped task-updates endpoint.
 
 Move the current handler bodies without changing validation or response fields. Builders close over only their explicit arguments and do not read module-global app state.
