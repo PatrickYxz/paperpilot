@@ -24,7 +24,6 @@ from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
 from pydantic import PrivateAttr
 
-from paperpilot.core.adapter import Tool
 from paperpilot.deep_reading.nodes import DeepReadingContext
 from paperpilot.deep_reading.research_agent import (
     AgentResearchDecision,
@@ -38,6 +37,7 @@ from paperpilot.tools.mcp_client import (
     MCPToolTimeout,
     MCPTransportError,
 )
+from paperpilot.tools.types import Tool
 
 
 PRIMARY = PaperCandidate(

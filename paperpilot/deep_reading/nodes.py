@@ -11,9 +11,9 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 from pydantic import ValidationError
 
-from paperpilot.core.adapter import Tool
 from paperpilot.papers import PaperCandidate, normalize_arxiv_id
 from paperpilot.tools.mcp_client import MCPToolError
+from paperpilot.tools.types import Tool
 from paperpilot.web.task_store import (
     ConversationDetail,
     MessageRecord,

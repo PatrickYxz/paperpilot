@@ -21,9 +21,9 @@ from langchain_core.tools import BaseTool, tool
 from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from paperpilot.core.adapter import Tool
 from paperpilot.papers import PaperCandidate, normalize_arxiv_id
 from paperpilot.tools.mcp_client import MCPToolError
+from paperpilot.tools.types import Tool
 
 from .schemas import EvidenceItem, PaperUse, ResearchResult
 from .state import DeepReadingState

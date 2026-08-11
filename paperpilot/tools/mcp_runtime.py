@@ -7,12 +7,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
 
-from paperpilot.core.adapter import Tool
 from paperpilot.tools.mcp_client import (
     MCPClient,
     MCPToolTimeout,
     MCPTransportError,
 )
+from paperpilot.tools.types import Tool
 
 DEFAULT_MANIFEST_PATH = Path(__file__).parents[1] / "mcp_servers.json"
 

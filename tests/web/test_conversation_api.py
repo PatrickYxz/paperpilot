@@ -11,10 +11,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 import paperpilot.deep_reading.graph as graph_module
-from paperpilot.core.adapter import Tool
 from paperpilot.deep_reading.runner import DeepReadingRunner
 from paperpilot.deep_reading.runner import DeepReadingCheckpoint
 from paperpilot.papers import PaperCandidate
+from paperpilot.tools.types import Tool
 from paperpilot.tools.mcp_runtime import MCPRuntime
 from paperpilot.web.app import create_app
 from paperpilot.web.auth import SESSION_COOKIE_NAME

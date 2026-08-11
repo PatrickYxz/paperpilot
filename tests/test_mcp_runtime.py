@@ -2,21 +2,22 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from paperpilot.core.adapter import Tool
 from paperpilot.tools.mcp_client import MCPToolTimeout, MCPTransportError
 from paperpilot.tools.mcp_runtime import MCPRuntime
+from paperpilot.tools.types import Tool
 
 
-def _fake_tool() -> Tool:
+def _fake_tool(handler: Callable[[dict], object] | None = None) -> Tool:
     return Tool(
         name="mcp__fake__search",
         description="fake search",
         input_schema={"type": "object", "properties": {}},
-        handler=lambda args: "result",
+        handler=handler or (lambda args: "result"),
     )
 
 
@@ -38,15 +39,14 @@ class FakeClient:
             raise RuntimeError("startup failed")
 
     def list_tools(self) -> list[Tool]:
-        tool = _fake_tool()
         if self.tool_error is not None:
             error = self.tool_error
 
             def fail(args):
                 raise error
 
-            tool.handler = fail
-        return [tool]
+            return [_fake_tool(fail)]
+        return [_fake_tool()]
 
     def close(self) -> None:
         self.close_count += 1

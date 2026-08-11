@@ -19,7 +19,6 @@ from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
 import paperpilot.deep_reading.graph as graph_module
 import paperpilot.deep_reading.runner as runner_module
-from paperpilot.core.adapter import Tool
 from paperpilot.deep_reading.graph import build_deep_reading_graph
 from paperpilot.deep_reading.research_agent import (
     DeepReadingTaskError,
@@ -32,6 +31,7 @@ from paperpilot.deep_reading.runner import (
 )
 from paperpilot.deep_reading.schemas import ConversationSummary
 from paperpilot.papers import PaperCandidate
+from paperpilot.tools.types import Tool
 from paperpilot.tools.mcp_client import (
     MCPToolError,
     MCPToolTimeout,

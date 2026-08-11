@@ -39,13 +39,13 @@ from paperpilot.deep_reading.schemas import (
     PaperUse,
     ResearchResult,
 )
-from paperpilot.core.adapter import Tool
 from paperpilot.papers import PaperCandidate
 from paperpilot.tools.mcp_client import (
     MCPToolError,
     MCPToolTimeout,
     MCPTransportError,
 )
+from paperpilot.tools.types import Tool
 from paperpilot.web.task_store import TaskStore, UsedPaperInput
 from paperpilot.deep_reading.state import (
     GRAPH_VERSION,
