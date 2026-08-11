@@ -1273,7 +1273,7 @@ def test_legacy_anthropic_sdk_is_not_a_direct_requirement() -> None:
     )
 ```
 
-Extend architecture tests to parse the variable names from `.env.example`. Assert the active runtime keys listed in Step 5 are present and the removed keys `DEFAULT_MODEL`, `MAX_ITERATIONS`, and `BUDGET_TOKENS` are absent. Do not add pytest assertions over README prose; verify human-facing documentation with the explicit one-time checks in Steps 6–7 and Task 10 instead.
+Extend architecture tests to parse the variable names from `.env.example`. Assert the active runtime keys listed in Step 5 are present and the removed keys `DEFAULT_MODEL`, `MAX_ITERATIONS`, `BUDGET_TOKENS`, and the stale alias `S2_API_KEY` are absent. Do not add pytest assertions over README prose; verify human-facing documentation with the explicit one-time checks in Steps 6–7 and Task 10 instead.
 
 - [ ] **Step 2: Verify RED**
 
@@ -1306,8 +1306,10 @@ Keep only active variables:
 ```text
 DEEPSEEK_API_KEY
 DASHSCOPE_API_KEY
-S2_API_KEY
+SEMANTIC_SCHOLAR_API_KEY
 MCP_TOOL_TIMEOUT
+MCP_INITIALIZE_TIMEOUT
+PAPERPILOT_GRAPH_PATH
 PAPERPILOT_TASK_DB_PATH
 PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH
 LANGGRAPH_STRICT_MSGPACK
@@ -1318,6 +1320,10 @@ PAPERPILOT_OVERLOAD_RETRY_AFTER_SECONDS
 PAPERPILOT_TASK_MAX_RETRIES
 PAPERPILOT_TASK_RETRY_BACKOFF_SECONDS
 PAPERPILOT_TASK_RETRY_BACKOFF_MAX_SECONDS
+PAPERPILOT_LOG_LEVEL
+PAPERPILOT_LOG_FORMAT
+PAPERPILOT_SLOW_REQUEST_MS
+PAPERPILOT_ENV
 PAPERPILOT_CELERY_BROKER_URL
 PAPERPILOT_TASK_SOFT_TIME_LIMIT_SECONDS
 PAPERPILOT_TASK_TIME_LIMIT_SECONDS
@@ -1331,7 +1337,7 @@ PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS
 PAPERPILOT_RESEARCH_MODEL_RETRIES
 ```
 
-Remove `DEFAULT_MODEL`, `MAX_ITERATIONS`, and `BUDGET_TOKENS` because they belonged to the old Agent Loop.
+`PAPERPILOT_SS_FIXTURE_DIR` is a test/offline-fixture override and stays out of the operator-facing example. Remove `DEFAULT_MODEL`, `MAX_ITERATIONS`, and `BUDGET_TOKENS` because they belonged to the old Agent Loop. Remove the stale `S2_API_KEY` alias because the retained graph client reads `SEMANTIC_SCHOLAR_API_KEY`.
 
 - [ ] **Step 6: Rewrite README around the single architecture**
 
@@ -1353,7 +1359,7 @@ README must include:
 ./.venv/bin/python -m pytest tests/deep_reading/test_dependency_contract.py tests/architecture -q
 ./.venv/bin/python -m pytest tests -q
 uv pip check --python .venv/bin/python
-rg -n "Legacy Workbench|/api/tasks|/api/eval|agent_loop|ConversationSession|execution_mode|DEFAULT_MODEL|MAX_ITERATIONS|BUDGET_TOKENS" README.md .env.example paperpilot tests scripts
+rg -n "Legacy Workbench|/api/tasks|/api/eval|agent_loop|ConversationSession|execution_mode|DEFAULT_MODEL|MAX_ITERATIONS|BUDGET_TOKENS|S2_API_KEY" README.md .env.example paperpilot tests scripts
 git diff --check
 ```
 
