@@ -40,6 +40,17 @@ from paperpilot.web.pagination import (
     decode_task_cursor,
     encode_task_cursor,
 )
+from paperpilot.web.routes.task_updates import (
+    create_task_updates_router,
+    task_updates_dict,
+)
+from paperpilot.web.schemas import (
+    TaskArtifactPageResponse,
+    TaskEventPageResponse,
+    TaskPageResponse,
+    TaskResponse,
+    TaskUpdatesResponse,
+)
 from paperpilot.web.task_executor import (
     TaskExecutorAtCapacityError,
     TaskExecutorLike,
@@ -72,59 +83,6 @@ class UserResponse(BaseModel):
     id: str
     username: str
     created_at: str
-
-
-class TaskResponse(BaseModel):
-    id: str
-    question: str
-    depth: str
-    status: str
-    created_at: str
-    updated_at: str
-
-
-class TaskEventResponse(BaseModel):
-    id: int
-    task_id: str
-    type: str
-    stage: str | None
-    message: str
-    payload: dict
-    created_at: str
-
-
-class TaskArtifactResponse(BaseModel):
-    id: int
-    task_id: str
-    kind: str
-    title: str
-    content: str
-    payload: dict
-    created_at: str
-
-
-class TaskPageResponse(BaseModel):
-    items: list[TaskResponse]
-    next_cursor: str | None
-    has_more: bool
-
-
-class TaskEventPageResponse(BaseModel):
-    items: list[TaskEventResponse]
-    next_after_id: int
-    has_more: bool
-
-
-class TaskArtifactPageResponse(BaseModel):
-    items: list[TaskArtifactResponse]
-    next_after_id: int
-    has_more: bool
-
-
-class TaskUpdatesResponse(BaseModel):
-    task: TaskResponse
-    events: TaskEventPageResponse
-    artifacts: TaskArtifactPageResponse
 
 
 def _event_page_dict(batch: TaskEventBatch) -> dict:
@@ -314,6 +272,12 @@ def _create_app(
             deep_reading_runner=deep_runner,
             require_user=require_user,
             paper_search=paper_search or default_web_paper_search,
+        )
+    )
+    app.include_router(
+        create_task_updates_router(
+            store=store,
+            require_user=require_user,
         )
     )
 
@@ -618,11 +582,7 @@ def _create_app(
         )
         if updates is None:
             raise HTTPException(status_code=404, detail="task not found")
-        return {
-            "task": updates.task.to_dict(),
-            "events": _event_page_dict(updates.events),
-            "artifacts": _artifact_page_dict(updates.artifacts),
-        }
+        return task_updates_dict(updates)
 
     @app.get("/api/eval/summary")
     def get_eval_summary() -> dict:

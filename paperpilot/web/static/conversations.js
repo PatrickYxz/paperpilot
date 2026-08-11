@@ -411,7 +411,8 @@
           limit: "100",
         });
         payload = await requestJson(
-          `/api/tasks/${encodeURIComponent(taskId)}/updates?${params.toString()}`,
+          `/api/conversations/${encodeURIComponent(conversationId)}` +
+            `/tasks/${encodeURIComponent(taskId)}/updates?${params.toString()}`,
         );
         if (!isCurrentConversation(conversationId, version) || taskId !== conversationState.activeTaskId) {
           return;

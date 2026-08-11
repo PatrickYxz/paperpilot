@@ -1635,6 +1635,38 @@ class TaskStore:
                 ),
             )
 
+    def get_conversation_task_updates(
+        self,
+        conversation_id: str,
+        task_id: str,
+        *,
+        user_id: str,
+        after_event_id: int = 0,
+        after_artifact_id: int = 0,
+        limit: int = 50,
+    ) -> TaskUpdates | None:
+        _validate_incremental_page(after_event_id, limit)
+        _validate_incremental_page(after_artifact_id, limit)
+        with self._session_factory.begin() as session:
+            row = _select_owned_task_model(session, task_id, user_id)
+            if row is None or row.conversation_id != conversation_id:
+                return None
+            return TaskUpdates(
+                task=_task_from_model(row),
+                events=_read_event_batch(
+                    session,
+                    task_id,
+                    after_id=after_event_id,
+                    limit=limit,
+                ),
+                artifacts=_read_artifact_batch(
+                    session,
+                    task_id,
+                    after_id=after_artifact_id,
+                    limit=limit,
+                ),
+            )
+
 
 def _new_task(
     *,

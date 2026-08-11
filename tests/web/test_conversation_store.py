@@ -499,6 +499,48 @@ def test_create_conversation_turn_writes_user_task_and_queued_event_atomically(
     assert _table_count(db_path, "task_events") == 1
 
 
+def test_conversation_task_updates_require_matching_owner_conversation_and_task(
+    tmp_path,
+):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    alice = _create_test_user(store, "alice-task-updates")
+    bob = _create_test_user(store, "bob-task-updates")
+    conversation = store.create_conversation(
+        user_id=alice.id,
+        paper=_paper(external_id="2401.20029v1"),
+    )
+    other_conversation = store.create_conversation(
+        user_id=alice.id,
+        paper=_paper(external_id="2401.20030v1"),
+    )
+    task = store.create_conversation_turn(
+        user_id=alice.id,
+        conversation_id=conversation.id,
+        content="Scope this task update.",
+        depth="standard",
+        expected_head_message_id=None,
+    ).task
+
+    updates = store.get_conversation_task_updates(
+        conversation.id,
+        task.id,
+        user_id=alice.id,
+    )
+
+    assert updates is not None
+    assert updates.task.id == task.id
+    assert store.get_conversation_task_updates(
+        other_conversation.id,
+        task.id,
+        user_id=alice.id,
+    ) is None
+    assert store.get_conversation_task_updates(
+        conversation.id,
+        task.id,
+        user_id=bob.id,
+    ) is None
+
+
 def test_create_conversation_turn_rolls_back_message_and_task_when_event_fails(
     tmp_path,
 ):

@@ -165,37 +165,12 @@ def test_rollback_success_notice_is_guarded_after_conversation_reload(tmp_path):
     assert "isCurrentConversation(conversationId, reloadVersion)" in guard_body
 
 
-def test_existing_task_updates_route_is_the_conversation_polling_boundary(tmp_path):
-    client = _client(tmp_path)
-    _register(client)
-    created = client.post(
-        "/api/tasks",
-        json={
-            "question": "Exercise the polling boundary",
-            "depth": "quick",
-            "execution_mode": "simulated",
-        },
-    )
-    assert created.status_code == 201
+def test_conversation_task_updates_route_is_the_conversation_polling_boundary(tmp_path):
+    script = _client(tmp_path).get("/static/conversations.js").text
+    polling_body = script.split("async function pollConversationTask", 1)[1].split(
+        "async function reloadAfterConflict", 1
+    )[0]
 
-    response = client.get(
-        f"/api/tasks/{created.json()['id']}/updates",
-        params={
-            "after_event_id": 0,
-            "after_artifact_id": 0,
-            "limit": 100,
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["task"]["status"] == "completed"
-    assert [event["stage"] for event in payload["events"]["items"]] == [
-        "queue",
-        "start",
-        "prepare",
-        "deep_read_placeholder",
-        "complete",
-    ]
-    assert payload["events"]["has_more"] is False
-    assert payload["artifacts"]["has_more"] is False
+    assert "`/api/conversations/${encodeURIComponent(conversationId)}`" in polling_body
+    assert "`/tasks/${encodeURIComponent(taskId)}/updates?${params.toString()}`" in polling_body
+    assert "`/api/tasks/${encodeURIComponent(taskId)}/updates?${params.toString()}`" not in polling_body
