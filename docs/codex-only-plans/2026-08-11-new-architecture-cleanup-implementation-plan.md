@@ -687,8 +687,11 @@ git commit -m "feat(api): scope task updates to conversations"
 - Delete: `paperpilot/web/conversation_routes.py`
 - Delete: `paperpilot/web/eval_summary.py`
 - Delete: `paperpilot/web/pagination.py`
+- Delete: `scripts/benchmark_web_admission.py`
 - Modify: `tests/web/test_auth.py`
 - Modify: `tests/web/test_conversation_api.py`
+- Modify: `tests/web/test_conversation_ui.py`
+- Modify: `tests/web/test_runtime_config.py`
 - Modify: `tests/web/test_web_app.py`
 - Delete: `tests/web/test_eval_summary.py`
 - Delete: `tests/web/test_pagination.py`
@@ -777,14 +780,14 @@ The private `_create_app` creates concrete defaults, the four routers, lifespan,
 
 Remove `simulation_delay_seconds`, `workflow_runner`, legacy task/eval response helpers, cursor imports, and all `/api/tasks`/`/api/eval` decorators.
 
-- [ ] **Step 6: Delete superseded route/eval/pagination modules and tests**
+- [ ] **Step 6: Delete superseded route/eval/pagination modules, legacy admission benchmark, and tests**
 
-Delete only the listed exact files after imports have moved. Rewrite `test_web_app.py` to cover app lifecycle, static root, health, middleware, and OpenAPI; legacy endpoint assertions are removed rather than inverted into compatibility tests.
+Delete only the listed exact files after imports have moved. Delete `scripts/benchmark_web_admission.py` because it posts exclusively to the removed `/api/tasks` product path; remove its two legacy benchmark tests from `tests/web/test_runtime_config.py`. Rewrite `test_web_app.py` to cover app lifecycle, static root, health, middleware, and OpenAPI; legacy endpoint assertions are removed rather than inverted into compatibility tests. In `tests/web/test_conversation_ui.py`, remove only the deleted `workflow_runner` keyword from `create_app`; Task 6 owns the UI rewrite.
 
 - [ ] **Step 7: Run Web GREEN gates**
 
 ```bash
-./.venv/bin/python -m pytest tests/web/test_auth.py tests/web/test_conversation_api.py tests/web/test_web_app.py tests/web/test_observability.py -q
+./.venv/bin/python -m pytest tests/web/test_auth.py tests/web/test_conversation_api.py tests/web/test_conversation_ui.py tests/web/test_runtime_config.py tests/web/test_web_app.py tests/web/test_observability.py -q
 ./.venv/bin/python -c 'from paperpilot.web.app import app; paths=set(app.openapi()["paths"]); assert not any(p.startswith("/api/tasks") or p.startswith("/api/eval") for p in paths)'
 git diff --check
 ```
@@ -792,7 +795,7 @@ git diff --check
 - [ ] **Step 8: Commit**
 
 ```bash
-git add paperpilot/web tests/web
+git add paperpilot/web scripts/benchmark_web_admission.py tests/web
 git commit -m "refactor(web): expose only Conversation APIs"
 ```
 
@@ -1212,7 +1215,7 @@ Add a docs assertion comparing tracked/current doc files to the five-entry keep 
 
 - [ ] **Step 4: Delete the exact tracked historical groups**
 
-Remove the listed package/test/script/data/doc targets. Keep `scripts/benchmark_web_admission.py` and `scripts/benchmark_web_task_store.py` until Task 9 decides their new-stack value by import/run validation. Do not remove migration history, fixtures, compose file, requirements, README, or protected runtime data.
+Remove the listed package/test/script/data/doc targets. Keep `scripts/benchmark_web_task_store.py` until Task 9 decides its new-stack value by import/run validation; the legacy admission benchmark was already removed with its `/api/tasks` dependency in Task 4. Do not remove migration history, fixtures, compose file, requirements, README, or protected runtime data.
 
 - [ ] **Step 5: Run retained suite and allowlist GREEN gate**
 
@@ -1240,7 +1243,6 @@ git commit -m "chore(repo): remove historical eval and legacy assets"
 - Modify: `requirements-lock.txt`
 - Modify: `.env.example`
 - Modify: `README.md`
-- Modify or Delete: `scripts/benchmark_web_admission.py`
 - Modify or Delete: `scripts/benchmark_web_task_store.py`
 - Modify: `tests/deep_reading/test_dependency_contract.py`
 - Modify: `tests/architecture/test_repository_allowlist.py`
@@ -1284,9 +1286,9 @@ uv pip check --python .venv/bin/python
 
 Expected: compatible environment; `anthropic` absent from direct and resolved requirements unless a retained transitive dependency demonstrably requires it.
 
-- [ ] **Step 4: Validate or remove the two retained benchmarks**
+- [ ] **Step 4: Validate or remove the retained TaskStore benchmark**
 
-Run each against current imports with `--help`. If it imports deleted generic task APIs/Store methods, delete it; if it benchmarks Conversation admission/TaskStore paths, update names and fixtures to create Conversation-bound tasks. Do not keep a script merely because it predates cleanup.
+Run `scripts/benchmark_web_task_store.py --help` against current imports. If it imports deleted generic TaskStore methods, delete it; if it benchmarks retained Conversation/TaskStore paths, update names and fixtures to create Conversation-bound tasks. Do not keep the script merely because it predates cleanup.
 
 - [ ] **Step 5: Rewrite `.env.example`**
 
