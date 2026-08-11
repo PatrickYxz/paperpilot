@@ -89,7 +89,11 @@ def _execute_research_task(
     store = _store_factory()
     retryable_error: _RetryableConversationExecution | None = None
     try:
-        if store.get_task(task_id) is None:
+        try:
+            task = store.get_task(task_id)
+        except Exception as exc:
+            raise _RetryableConversationExecution(exc) from exc
+        if task is None:
             raise ValueError(f"task not found: {task_id}")
         try:
             runtime = _get_runtime()

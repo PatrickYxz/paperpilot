@@ -492,6 +492,8 @@ def test_create_conversation_turn_writes_user_task_and_queued_event_atomically(
     assert turn.task.result_quality is None
     assert events is not None
     assert [item.type for item in events.items] == ["queued"]
+    assert events.items[0].message == "Task queued for deep reading."
+    assert events.items[0].payload == {"depth": "standard"}
     assert detail is not None
     assert detail.conversation.head_message_id is None
     assert _table_count(db_path, "messages") == 1

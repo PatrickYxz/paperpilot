@@ -651,13 +651,9 @@ class TaskStore:
                         task_id=task.id,
                         type="queued",
                         stage="queue",
-                        message="Task queued for real workflow.",
+                        message="Task queued for deep reading.",
                         payload_json=json.dumps(
-                            {
-                                "depth": task.depth,
-                                "execution_mode": "real",
-                                "simulated": False,
-                            },
+                            {"depth": task.depth},
                             ensure_ascii=False,
                         ),
                         created_at=_utc_now(),

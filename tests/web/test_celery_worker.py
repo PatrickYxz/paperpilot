@@ -305,6 +305,44 @@ def test_celery_task_does_not_retry_store_construction_failure(monkeypatch):
     assert retry_calls == []
 
 
+def test_celery_task_retries_preclaim_read_infrastructure_failure(monkeypatch):
+    read_error = OSError("preclaim read unavailable")
+    retry_calls = _capture_retry(monkeypatch)
+
+    class ReadFailingStore:
+        close_calls = 0
+
+        def get_task(self, task_id):
+            del task_id
+            raise read_error
+
+        def close(self):
+            self.close_calls += 1
+
+    store = ReadFailingStore()
+    monkeypatch.setattr(worker_tasks, "_store_factory", lambda: store)
+    monkeypatch.setattr(
+        worker_tasks.WebRuntimeConfig,
+        "from_env",
+        lambda: WebRuntimeConfig(),
+    )
+
+    result = worker_tasks.execute_research_task.apply(
+        args=["task_preclaim_read"],
+        throw=False,
+    )
+
+    assert isinstance(result.result, RetryScheduled)
+    assert retry_calls == [
+        {
+            "exc": read_error,
+            "countdown": 1,
+            "max_retries": 3,
+        }
+    ]
+    assert store.close_calls == 1
+
+
 def test_celery_task_retries_claim_infrastructure_failure(monkeypatch):
     claim_error = OSError("claim unavailable")
     retry_calls = _capture_retry(monkeypatch)
