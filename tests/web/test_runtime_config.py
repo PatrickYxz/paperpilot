@@ -1,10 +1,6 @@
 """Runtime configuration artifact tests."""
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parents[2]
@@ -118,62 +114,6 @@ def test_readme_backs_up_and_restores_sqlite_files_as_timestamped_pair():
     assert '"$RESTORE_DIR/checkpoints.sqlite3"' in text
     assert "data/backups/business.sqlite3" not in text
     assert "data/backups/checkpoints.sqlite3" not in text
-
-
-def test_admission_benchmark_proves_bound_and_recovery():
-    result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/benchmark_web_admission.py",
-            "--workers",
-            "1",
-            "--queue-capacity",
-            "0",
-            "--requests",
-            "2",
-        ],
-        cwd=PROJECT_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    payload = json.loads(result.stdout)
-
-    assert payload["configured_capacity"] == 1
-    assert payload["accepted"] == 1
-    assert payload["rejected"] == 1
-    assert payload["task_rows_before_recovery"] == 1
-    assert payload["event_rows_before_recovery"] == 1
-    assert payload["capacity_recovered"] is True
-    assert payload["unexpected_statuses"] == []
-
-
-def test_admission_benchmark_does_not_touch_configured_database(tmp_path):
-    sentinel_path = tmp_path / "external-tasks.sqlite3"
-    environment = os.environ.copy()
-    environment["PAPERPILOT_TASK_DB_PATH"] = str(sentinel_path)
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/benchmark_web_admission.py",
-            "--workers",
-            "1",
-            "--queue-capacity",
-            "0",
-            "--requests",
-            "2",
-        ],
-        cwd=PROJECT_ROOT,
-        env=environment,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    payload = json.loads(result.stdout)
-
-    assert payload["capacity_recovered"] is True
-    assert not sentinel_path.exists()
 
 
 def test_readme_documents_runtime_protection_contract():

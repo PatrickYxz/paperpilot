@@ -17,9 +17,7 @@ def _client(tmp_path) -> TestClient:
     store = TaskStore(tmp_path / "tasks.sqlite3")
     runner = WorkflowRunner(store, delay_seconds=0)
     executor = SynchronousTaskExecutor(runner)
-    return TestClient(
-        create_app(store, workflow_runner=runner, task_executor=executor)
-    )
+    return TestClient(create_app(store, task_executor=executor))
 
 
 def test_register_sets_session_and_me_returns_user(tmp_path):

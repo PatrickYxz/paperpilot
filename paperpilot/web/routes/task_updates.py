@@ -1,18 +1,14 @@
 """Conversation-scoped task progress updates."""
 from __future__ import annotations
 
-from collections.abc import Callable
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from paperpilot.web.routes.auth import RequireUser
 from paperpilot.web.schemas import TaskUpdatesResponse
 from paperpilot.web.task_store import TaskStore, TaskUpdates, WebUser
 
 
-RequireUser = Callable[..., WebUser]
-
-
-def create_task_updates_router(
+def build_task_updates_router(
     *,
     store: TaskStore,
     require_user: RequireUser,

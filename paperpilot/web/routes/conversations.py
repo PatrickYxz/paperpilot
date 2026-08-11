@@ -1,22 +1,29 @@
-"""Authenticated Paper and Conversation HTTP routes."""
+"""Authenticated Conversation HTTP routes."""
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from paperpilot.deep_reading.runner import DeepReadingRunner
 from paperpilot.deep_reading.state import GRAPH_VERSION, SCHEMA_VERSION
-from paperpilot.papers import (
-    PaperCandidate,
-    normalize_arxiv_id,
-    resolve_arxiv_candidate,
-    search_arxiv_candidates,
-)
+from paperpilot.papers import PaperCandidate, normalize_arxiv_id
 from paperpilot.web.observability import RUNTIME_LOGGER_NAME
+from paperpilot.web.routes.auth import RequireUser
+from paperpilot.web.routes.papers import PaperSearch
+from paperpilot.web.schemas import (
+    ConversationAlternativesResponse,
+    ConversationDetailResponse,
+    ConversationListResponse,
+    ConversationMessagesResponse,
+    ConversationResponse,
+    CreateConversationRequest,
+    CreateMessageRequest,
+    CreateMessageResponse,
+    PaperReference,
+    RollbackRequest,
+    UpdateConversationRequest,
+)
 from paperpilot.web.task_executor import (
     TaskExecutorAtCapacityError,
     TaskExecutorLike,
@@ -35,166 +42,20 @@ from paperpilot.web.task_store import (
 )
 
 
-PaperSearch = Callable[[str, int], list[PaperCandidate]]
-RequireUser = Callable[..., WebUser]
 _LOGGER = logging.getLogger(RUNTIME_LOGGER_NAME)
 
 
-class _StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class PaperReference(_StrictModel):
-    source: Literal["arxiv"]
-    external_id: str = Field(..., min_length=1)
-
-
-class CreateConversationRequest(_StrictModel):
-    paper: PaperReference
-    title: str | None = None
-
-
-class UpdateConversationRequest(_StrictModel):
-    title: str | None = None
-    archived: bool | None = None
-
-    @model_validator(mode="after")
-    def require_change(self) -> "UpdateConversationRequest":
-        if self.title is None and self.archived is None:
-            raise ValueError("title or archived is required")
-        return self
-
-
-class CreateMessageRequest(_StrictModel):
-    content: str = Field(..., min_length=1)
-    depth: Literal["quick", "standard", "deep"] = "standard"
-    expected_head_message_id: str | None
-
-
-class RollbackRequest(_StrictModel):
-    message_id: str = Field(..., min_length=1)
-    expected_head_message_id: str | None
-
-
-class PaperResponse(_StrictModel):
-    source: str
-    external_id: str
-    title: str
-    authors: list[str]
-    abstract: str | None
-    source_url: str
-
-
-class PaperSearchResponse(_StrictModel):
-    items: list[PaperResponse]
-
-
-class ConversationResponse(_StrictModel):
-    id: str
-    primary_paper_id: str
-    title: str
-    head_message_id: str | None
-    head_checkpoint_id: str | None
-    created_at: str
-    updated_at: str
-    archived_at: str | None
-
-
-class ConversationListResponse(_StrictModel):
-    items: list[ConversationResponse]
-
-
-class TaskResponse(_StrictModel):
-    id: str
-    question: str
-    depth: str
-    status: str
-    created_at: str
-    updated_at: str
-
-
-class ConversationDetailResponse(_StrictModel):
-    conversation: ConversationResponse
-    primary_paper: PaperResponse
-    active_papers: list[PaperResponse]
-    active_task: TaskResponse | None
-
-
-class MessageResponse(_StrictModel):
-    id: str
-    conversation_id: str
-    task_id: str | None
-    parent_message_id: str | None
-    role: str
-    content: str
-    status: str
-    metadata: dict
-    created_at: str
-
-
-class UnstableTurnResponse(_StrictModel):
-    user_message: MessageResponse
-    task: TaskResponse
-
-
-class ConversationMessagesResponse(_StrictModel):
-    items: list[MessageResponse]
-    unstable_turn: UnstableTurnResponse | None
-
-
-class ConversationAlternativeResponse(_StrictModel):
-    user_message: MessageResponse
-    assistant_message: MessageResponse
-
-
-class ConversationAlternativesResponse(_StrictModel):
-    items: list[ConversationAlternativeResponse]
-
-
-class CreateMessageResponse(_StrictModel):
-    user_message: MessageResponse
-    task: TaskResponse
-    stable_head_message_id: str | None
-
-
-def default_web_paper_search(query: str, limit: int) -> list[PaperCandidate]:
-    """Use exact arXiv resolution for IDs/URLs and catalog search otherwise."""
-    normalized = normalize_arxiv_id(query)
-    if normalized is not None:
-        try:
-            return [resolve_arxiv_candidate(normalized)]
-        except LookupError:
-            return []
-    return search_arxiv_candidates(query, limit)
-
-
-def create_conversation_router(
+def build_conversation_router(
     *,
     store: TaskStore,
     executor: TaskExecutorLike,
-    deep_reading_runner: DeepReadingRunner,
     require_user: RequireUser,
+    deep_reading_runner: DeepReadingRunner,
     paper_search: PaperSearch,
 ) -> APIRouter:
-    router = APIRouter()
+    router = APIRouter(prefix="/api/conversations")
 
-    @router.get("/api/papers/search", response_model=PaperSearchResponse)
-    def search_papers(
-        q: str = Query(..., min_length=1),
-        limit: int = Query(default=10, ge=1, le=20),
-        user: WebUser = Depends(require_user),
-    ) -> dict:
-        del user
-        if not q.strip():
-            raise HTTPException(status_code=422, detail="query must not be empty")
-        candidates = paper_search(q, limit)
-        return {"items": [_candidate_dict(candidate) for candidate in candidates]}
-
-    @router.post(
-        "/api/conversations",
-        response_model=ConversationResponse,
-        status_code=201,
-    )
+    @router.post("", response_model=ConversationResponse, status_code=201)
     def create_conversation(
         payload: CreateConversationRequest,
         user: WebUser = Depends(require_user),
@@ -210,7 +71,7 @@ def create_conversation_router(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return _conversation_dict(conversation)
 
-    @router.get("/api/conversations", response_model=ConversationListResponse)
+    @router.get("", response_model=ConversationListResponse)
     def list_conversations(
         include_archived: bool = Query(default=False),
         limit: int = Query(default=100, ge=1, le=100),
@@ -223,10 +84,7 @@ def create_conversation_router(
         )
         return {"items": [_conversation_dict(record) for record in records]}
 
-    @router.get(
-        "/api/conversations/{conversation_id}",
-        response_model=ConversationDetailResponse,
-    )
+    @router.get("/{conversation_id}", response_model=ConversationDetailResponse)
     def get_conversation(
         conversation_id: str,
         user: WebUser = Depends(require_user),
@@ -234,10 +92,7 @@ def create_conversation_router(
         detail = _owned_detail(store, conversation_id, user.id)
         return _detail_dict(detail)
 
-    @router.patch(
-        "/api/conversations/{conversation_id}",
-        response_model=ConversationResponse,
-    )
+    @router.patch("/{conversation_id}", response_model=ConversationResponse)
     def update_conversation(
         conversation_id: str,
         payload: UpdateConversationRequest,
@@ -259,7 +114,7 @@ def create_conversation_router(
         return _conversation_dict(record)
 
     @router.get(
-        "/api/conversations/{conversation_id}/messages",
+        "/{conversation_id}/messages",
         response_model=ConversationMessagesResponse,
     )
     def list_messages(
@@ -284,7 +139,7 @@ def create_conversation_router(
         }
 
     @router.get(
-        "/api/conversations/{conversation_id}/messages/{message_id}/alternatives",
+        "/{conversation_id}/messages/{message_id}/alternatives",
         response_model=ConversationAlternativesResponse,
     )
     def list_alternatives(
@@ -314,7 +169,7 @@ def create_conversation_router(
         }
 
     @router.post(
-        "/api/conversations/{conversation_id}/messages",
+        "/{conversation_id}/messages",
         response_model=CreateMessageResponse,
         status_code=202,
     )
@@ -355,7 +210,10 @@ def create_conversation_router(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             reservation.release()
-            if store.get_conversation_detail(conversation_id, user_id=user.id) is None:
+            if store.get_conversation_detail(
+                conversation_id,
+                user_id=user.id,
+            ) is None:
                 raise HTTPException(
                     status_code=404,
                     detail="conversation not found",
@@ -395,9 +253,6 @@ def create_conversation_router(
                         },
                     )
             except Exception:
-                # Preserve the queue-unavailable response even when compensation
-                # encounters a second storage failure. The pending/running state
-                # remains recoverable through the unstable-turn projection.
                 _LOGGER.exception(
                     "Conversation task submission cleanup failed",
                     extra={
@@ -406,13 +261,13 @@ def create_conversation_router(
                         "task_id": turn.task.id,
                     },
                 )
-            raise HTTPException(status_code=503, detail="task queue unavailable") from exc
+            raise HTTPException(
+                status_code=503,
+                detail="task queue unavailable",
+            ) from exc
         return response
 
-    @router.post(
-        "/api/conversations/{conversation_id}/rollback",
-        response_model=ConversationResponse,
-    )
+    @router.post("/{conversation_id}/rollback", response_model=ConversationResponse)
     def rollback_conversation(
         conversation_id: str,
         payload: RollbackRequest,
@@ -568,17 +423,6 @@ def _validate_rollback_checkpoint(
             detail="checkpoint active paper ids are invalid",
         )
     return list(active_paper_ids)
-
-
-def _candidate_dict(candidate: PaperCandidate) -> dict:
-    return {
-        "source": candidate.source,
-        "external_id": candidate.external_id,
-        "title": candidate.title,
-        "authors": list(candidate.authors),
-        "abstract": candidate.abstract,
-        "source_url": candidate.source_url,
-    }
 
 
 def _paper_dict(record: PaperRecord) -> dict:

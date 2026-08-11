@@ -17,7 +17,6 @@ def _client(tmp_path) -> TestClient:
     return TestClient(
         create_app(
             store,
-            workflow_runner=runner,
             task_executor=SynchronousTaskExecutor(runner),
         )
     )
