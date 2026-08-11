@@ -85,7 +85,6 @@ paperpilot/
 │   ├── db_migrations.py
 │   ├── db_models.py
 │   ├── observability.py
-│   ├── pagination.py
 │   ├── schemas.py
 │   ├── task_executor.py
 │   ├── task_store.py
@@ -256,6 +255,7 @@ paperpilot/session_store.py
 paperpilot/web/workflow.py
 paperpilot/web/eval_summary.py
 paperpilot/web/event_mapper.py
+paperpilot/web/pagination.py
 ```
 
 计划删除的研发资产：
