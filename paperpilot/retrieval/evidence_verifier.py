@@ -4,10 +4,14 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
 
-from paperpilot.core import LLMClient
+from langchain.messages import HumanMessage
+from langchain_core.language_models.chat_models import BaseChatModel
+from pydantic import BaseModel, ConfigDict, Field
+
 from paperpilot.retrieval.evidence_pool import EvidenceItem, EvidencePool
+from paperpilot.retrieval.llm_query_planner import build_retrieval_model
 from paperpilot.retrieval.query_plan import EvidenceRequirement, QueryPlan
 
 SUPPORT_VALUES = {"direct", "partial", "no"}
@@ -25,6 +29,24 @@ SUPPORT_CONFIDENCE_SCORE = {
     ("no", "medium"): 0.0,
     ("no", "low"): 0.0,
 }
+
+
+class EvidenceVerificationDecisionOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    requirement_id: str
+    evidence_id: str
+    support: Literal["direct", "partial", "no"]
+    confidence: Literal["high", "medium", "low"]
+    answer_atoms: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class EvidenceVerificationOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decisions: list[EvidenceVerificationDecisionOutput]
 
 
 @dataclass(frozen=True)
@@ -260,11 +282,15 @@ def run_evidence_verification(
     *,
     plan: QueryPlan,
     pool: EvidencePool,
-    client: Any | None = None,
+    model: BaseChatModel | None,
     summary_k: int,
     verifier_candidate_k: int = 6,
 ) -> EvidenceVerificationResult:
-    verifier_client = client or LLMClient()
+    verifier_model = model or build_retrieval_model()
+    runnable = verifier_model.with_structured_output(
+        EvidenceVerificationOutput,
+        include_raw=True,
+    )
     decisions: list[EvidenceVerificationDecision] = []
     parse_errors: list[str] = []
 
@@ -284,16 +310,15 @@ def run_evidence_verification(
                 requirement=requirement,
                 candidates=candidates,
             )
-            response = verifier_client.call(
-                messages=[{"role": "user", "content": prompt}],
-                tools=[],
-                system="",
-            )
-            parsed, error = parse_verifier_output(response.text or "")
-            if error is not None:
-                parse_errors.append(f"{requirement.id}: {error}")
+            result = runnable.invoke([HumanMessage(content=prompt)])
+            parsing_error = result.get("parsing_error")
+            parsed = result.get("parsed")
+            if parsing_error is not None or not isinstance(
+                parsed, EvidenceVerificationOutput
+            ):
+                parse_errors.append(f"{requirement.id}: structured output invalid")
                 continue
-            decisions.extend(parsed)
+            decisions.extend(_materialize_decisions(parsed.decisions))
     except Exception as exc:  # noqa: BLE001
         return EvidenceVerificationResult(
             enabled=True,
@@ -325,6 +350,17 @@ def run_evidence_verification(
             verification_error="; ".join(parse_errors),
         )
     return result
+
+
+def _materialize_decisions(
+    outputs: list[EvidenceVerificationDecisionOutput],
+) -> list[EvidenceVerificationDecision]:
+    decisions: list[EvidenceVerificationDecision] = []
+    for output in outputs:
+        decision = _normalize_decision(output.model_dump(mode="json"))
+        if decision is not None:
+            decisions.append(decision)
+    return decisions
 
 
 def _normalize_decision(raw: Any) -> EvidenceVerificationDecision | None:

@@ -1,5 +1,7 @@
-from types import SimpleNamespace
-
+from paperpilot.retrieval.evidence_verifier import (
+    EvidenceVerificationDecisionOutput,
+    EvidenceVerificationOutput,
+)
 from paperpilot.retrieval.planned_retrieval import run_planned_retrieval
 from paperpilot.retrieval.query_plan import (
     EvidenceRequirement,
@@ -104,27 +106,46 @@ def test_run_planned_retrieval_records_query_errors_and_continues() -> None:
     )
 
 
-class FakeVerifierClient:
+class FakeStructuredVerifierRunnable:
     def __init__(self) -> None:
-        self.calls: list[dict] = []
+        self.calls: list[list] = []
 
-    def call(self, messages: list[dict], tools: list, *, system: str):
-        self.calls.append({"messages": messages, "tools": tools, "system": system})
-        return SimpleNamespace(text="""
-        {"decisions": [{
-          "requirement_id": "req_dataset",
-          "evidence_id": "ev_1",
-          "support": "direct",
-          "confidence": "high",
-          "answer_atoms": ["dataset"],
-          "risks": [],
-          "reason": "Direct evidence."
-        }]}
-        """)
+    def invoke(self, messages: list) -> dict:
+        self.calls.append(messages)
+        return {
+            "raw": object(),
+            "parsed": EvidenceVerificationOutput(decisions=[
+                EvidenceVerificationDecisionOutput(
+                    requirement_id="req_dataset",
+                    evidence_id="ev_1",
+                    support="direct",
+                    confidence="high",
+                    answer_atoms=["dataset"],
+                    risks=[],
+                    reason="Direct evidence.",
+                )
+            ]),
+            "parsing_error": None,
+        }
+
+
+class FakeVerifierModel:
+    def __init__(self) -> None:
+        self.runnable = FakeStructuredVerifierRunnable()
+
+    def with_structured_output(self, schema: type, *, include_raw: bool):
+        assert schema is EvidenceVerificationOutput
+        assert include_raw is True
+        return self.runnable
+
+
+class UnexpectedVerifierModel:
+    def with_structured_output(self, schema: type, *, include_raw: bool):
+        raise AssertionError("verifier model must not be used when verification is disabled")
 
 
 def test_run_planned_retrieval_does_not_verify_by_default() -> None:
-    verifier = FakeVerifierClient()
+    verifier = UnexpectedVerifierModel()
 
     def search(query: str, paper_id: str, top_k: int) -> list[dict]:
         return [
@@ -141,17 +162,16 @@ def test_run_planned_retrieval_does_not_verify_by_default() -> None:
         plan=_plan(),
         paper_id="paper-1",
         search=search,
-        verifier_client=verifier,
+        verifier_model=verifier,
     )
 
-    assert verifier.calls == []
     payload = result.to_dict()
     assert "verification" not in payload["evidence_pool"]
     assert "verified_summary_items" not in payload["evidence_pool"]
 
 
 def test_run_planned_retrieval_can_verify_evidence() -> None:
-    verifier = FakeVerifierClient()
+    verifier = FakeVerifierModel()
 
     def search(query: str, paper_id: str, top_k: int) -> list[dict]:
         return [
@@ -169,11 +189,11 @@ def test_run_planned_retrieval_can_verify_evidence() -> None:
         paper_id="paper-1",
         search=search,
         verify_evidence=True,
-        verifier_client=verifier,
+        verifier_model=verifier,
         verifier_candidate_k=3,
     )
 
-    assert verifier.calls
+    assert verifier.runnable.calls
     payload = result.to_dict()
     assert payload["evidence_pool"]["verification"]["enabled"] is True
     assert payload["evidence_pool"]["verified_summary_items"]

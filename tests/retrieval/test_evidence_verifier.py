@@ -1,8 +1,8 @@
-from types import SimpleNamespace
-
 from paperpilot.retrieval.evidence_pool import EvidenceItem, EvidencePool, MatchedQuery
 from paperpilot.retrieval.evidence_verifier import (
     EvidenceVerificationDecision,
+    EvidenceVerificationDecisionOutput,
+    EvidenceVerificationOutput,
     build_verifier_prompt,
     candidate_items_for_requirement,
     parse_verifier_output,
@@ -501,21 +501,43 @@ def test_select_verified_summary_treats_multiple_list_directs_as_coverage() -> N
     assert result.conflicts == []
 
 
-class FakeVerifierClient:
+class FakeStructuredRunnable:
     def __init__(
         self,
-        responses: list[str] | None = None,
+        responses: list[EvidenceVerificationOutput] | None = None,
         error: Exception | None = None,
     ) -> None:
         self.responses = responses or []
         self.error = error
-        self.calls: list[dict] = []
+        self.calls: list[list] = []
 
-    def call(self, messages: list[dict], tools: list, *, system: str):
-        self.calls.append({"messages": messages, "tools": tools, "system": system})
+    def invoke(self, messages: list) -> dict:
+        self.calls.append(messages)
         if self.error is not None:
             raise self.error
-        return SimpleNamespace(text=self.responses.pop(0))
+        return {
+            "raw": object(),
+            "parsed": self.responses.pop(0),
+            "parsing_error": None,
+        }
+
+
+class FakeVerifierModel:
+    def __init__(
+        self,
+        responses: list[EvidenceVerificationOutput] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.runnable = FakeStructuredRunnable(responses, error)
+        self.schemas: list[tuple[type, bool]] = []
+
+    @property
+    def structured_invoke_count(self) -> int:
+        return len(self.runnable.calls)
+
+    def with_structured_output(self, schema: type, *, include_raw: bool):
+        self.schemas.append((schema, include_raw))
+        return self.runnable
 
 
 def test_run_evidence_verification_calls_once_per_required_requirement() -> None:
@@ -524,56 +546,61 @@ def test_run_evidence_verification_calls_once_per_required_requirement() -> None
         _item("ev_1", "The experiments use WikiHop.", 0.9, ["req_dataset"]),
         _item("ev_2", "The reported accuracy is 58%.", 0.8, ["req_metric"]),
     ])
-    client = FakeVerifierClient([
-        """
-        {"decisions": [{
-          "requirement_id": "req_dataset",
-          "evidence_id": "ev_1",
-          "support": "direct",
-          "confidence": "high",
-          "answer_atoms": ["WikiHop"],
-          "risks": [],
-          "reason": "Direct."
-        }]}
-        """,
-        """
-        {"decisions": [{
-          "requirement_id": "req_metric",
-          "evidence_id": "ev_2",
-          "support": "partial",
-          "confidence": "medium",
-          "answer_atoms": ["58%"],
-          "risks": ["metric_unclear"],
-          "reason": "Metric unclear."
-        }]}
-        """,
+    model = FakeVerifierModel([
+        EvidenceVerificationOutput(decisions=[
+            EvidenceVerificationDecisionOutput(
+                requirement_id="req_dataset",
+                evidence_id="ev_1",
+                support="direct",
+                confidence="high",
+                answer_atoms=["WikiHop"],
+                risks=[],
+                reason="Direct.",
+            )
+        ]),
+        EvidenceVerificationOutput(decisions=[
+            EvidenceVerificationDecisionOutput(
+                requirement_id="req_metric",
+                evidence_id="ev_2",
+                support="partial",
+                confidence="medium",
+                answer_atoms=["58%"],
+                risks=["metric_unclear"],
+                reason="Metric unclear.",
+            )
+        ]),
     ])
 
     result = run_evidence_verification(
         plan=plan,
         pool=pool,
-        client=client,
+        model=model,
         summary_k=4,
         verifier_candidate_k=6,
     )
 
-    assert len(client.calls) == 2
-    assert all(call["tools"] == [] for call in client.calls)
+    required_requirements = [
+        requirement for requirement in plan.evidence_requirements
+        if requirement.required
+    ]
+    assert model.schemas == [(EvidenceVerificationOutput, True)]
+    assert model.structured_invoke_count == len(required_requirements)
+    assert model.structured_invoke_count <= 6
     assert result.verified_summary_items == ["ev_1", "ev_2"]
     assert result.verification_error is None
 
 
-def test_run_evidence_verification_returns_error_result_on_client_failure() -> None:
+def test_run_evidence_verification_returns_error_result_on_provider_failure() -> None:
     plan = _plan()
     pool = _pool([
         _item("ev_1", "The experiments use WikiHop.", 0.9, ["req_dataset"])
     ])
-    client = FakeVerifierClient(error=RuntimeError("verifier unavailable"))
+    model = FakeVerifierModel(error=RuntimeError("verifier unavailable"))
 
     result = run_evidence_verification(
         plan=plan,
         pool=pool,
-        client=client,
+        model=model,
         summary_k=4,
         verifier_candidate_k=6,
     )

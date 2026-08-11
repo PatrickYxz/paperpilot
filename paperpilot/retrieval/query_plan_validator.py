@@ -15,6 +15,7 @@ from paperpilot.retrieval.query_plan import (
 )
 
 MAX_QUERIES = 6
+MAX_EVIDENCE_REQUIREMENTS = 6
 MAX_QUERY_CHARS = 240
 
 
@@ -46,12 +47,18 @@ def validate_query_plan(data: dict[str, Any], *, question: str) -> QueryPlan:
     if data.get("version") != PLAN_VERSION:
         raise ValueError(f"query plan version must be {PLAN_VERSION}")
 
-    requirements = _requirements(data.get("evidence_requirements"))
+    requirements = _requirements(data.get("evidence_requirements"))[
+        :MAX_EVIDENCE_REQUIREMENTS
+    ]
     if not requirements:
         raise ValueError("query plan must include at least one evidence requirement")
     requirement_ids = {req.id for req in requirements}
 
-    queries = _queries(data.get("queries"), requirement_ids=requirement_ids)
+    queries = _queries(
+        data.get("queries"),
+        requirement_ids=requirement_ids,
+        fallback_target=requirements[0].id,
+    )
     literal = PlannedQuery(
         id="q_lit",
         role="literal",
@@ -130,12 +137,16 @@ def _requirements(value: Any) -> list[EvidenceRequirement]:
     return out
 
 
-def _queries(value: Any, *, requirement_ids: set[str]) -> list[PlannedQuery]:
+def _queries(
+    value: Any,
+    *,
+    requirement_ids: set[str],
+    fallback_target: str,
+) -> list[PlannedQuery]:
     out: list[PlannedQuery] = []
     seen: set[str] = set()
     if not isinstance(value, list):
         return out
-    fallback_target = next(iter(requirement_ids))
     for index, item in enumerate(value, start=1):
         if not isinstance(item, dict):
             continue

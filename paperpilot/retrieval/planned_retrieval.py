@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from langchain_core.language_models.chat_models import BaseChatModel
+
 from paperpilot.retrieval.evidence_pool import (
     EvidencePool,
     RawSearchHit,
@@ -40,7 +42,7 @@ def run_planned_retrieval(
     summary_k: int = 8,
     verify_evidence: bool = False,
     verifier_candidate_k: int = 6,
-    verifier_client: Any | None = None,
+    verifier_model: BaseChatModel | None = None,
 ) -> PlannedRetrievalResult:
     hits: list[RawSearchHit] = []
     query_errors: list[dict[str, str]] = []
@@ -77,7 +79,7 @@ def run_planned_retrieval(
         pool.verification = run_evidence_verification(
             plan=plan,
             pool=pool,
-            client=verifier_client,
+            model=verifier_model,
             summary_k=summary_k,
             verifier_candidate_k=verifier_candidate_k,
         )
