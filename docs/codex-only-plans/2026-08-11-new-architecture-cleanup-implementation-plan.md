@@ -1064,11 +1064,13 @@ git commit -m "refactor(ui): keep only the Conversation workspace"
 - Delete: `paperpilot/document_store.py`
 - Delete: `paperpilot/message_codec.py`
 - Delete: `paperpilot/session_store.py`
+- Delete: `paperpilot/eval/`
 - Delete: `paperpilot/web/event_mapper.py`
 - Modify: `paperpilot/web/task_store.py`
 - Modify: retained tests importing `paperpilot.tools.types.Tool`
 - Delete: `tests/agent/`
 - Delete: `tests/builtin_tools/`
+- Delete: `tests/eval/`
 - Delete: `tests/test_agent_loop.py`
 - Delete: `tests/test_bulk_input.py`
 - Delete: `tests/test_context_manager.py`
@@ -1133,7 +1135,7 @@ The retained public Store methods must cover auth/session; Conversation/Paper/Me
 
 - [ ] **Step 4: Delete exact legacy runtime and test targets**
 
-Use `apply_patch`/explicit tracked targets. Do not target `paperpilot/tools`, `mcp_servers`, `retrieval`, `deep_reading`, `web` data/config/migrations, or any `data/` path in this Task.
+Use `apply_patch`/explicit tracked targets. Delete `paperpilot/eval/` and `tests/eval/` here instead of adapting their imports away from the removed runtime only to delete them in Task 8. Do not target `paperpilot/tools`, `mcp_servers`, `retrieval`, `deep_reading`, `web` data/config/migrations, or any `data/` path in this Task.
 
 - [ ] **Step 5: Trim TaskStore and preserve database rows/schema**
 
@@ -1161,9 +1163,7 @@ git commit -m "refactor(core): remove legacy PaperPilot runtime"
 ### Task 8: Remove historical eval/research assets and enforce repository allowlists
 
 **Files:**
-- Delete: `paperpilot/eval/`
 - Delete: `paperpilot/skills/`
-- Delete: `tests/eval/`
 - Delete: all tracked `scripts/day*.py`
 - Delete: `data/eval/.gitkeep`
 - Delete: `data/eval/summary.md`
