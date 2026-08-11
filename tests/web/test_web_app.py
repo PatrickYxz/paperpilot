@@ -91,12 +91,10 @@ def client(tmp_path) -> TestClient:
 def test_openapi_exposes_only_new_product_routes(client) -> None:
     paths = set(client.get("/openapi.json").json()["paths"])
     assert not any(
-        path == "/api/tasks" or path.startswith("/api/tasks/")
+        path == f"/api/{legacy_area}"
+        or path.startswith(f"/api/{legacy_area}/")
         for path in paths
-    )
-    assert not any(
-        path == "/api/eval" or path.startswith("/api/eval/")
-        for path in paths
+        for legacy_area in ("tasks", "eval")
     )
     assert (
         "/api/conversations/{conversation_id}/tasks/{task_id}/updates"

@@ -996,7 +996,7 @@ def test_message_submission_maps_busy_and_stale_head_to_409(tmp_path):
         f"/api/conversations/{conversation['id']}/messages", json=body
     )
     task_id = first.json()["task"]["id"]
-    harness.store.update_status(task_id, "failed")
+    assert harness.store.fail_pending_task(task_id) is not None
     stale = harness.client.post(
         f"/api/conversations/{conversation['id']}/messages",
         json={**body, "content": "Stale", "expected_head_message_id": "msg_old"},
@@ -1038,7 +1038,9 @@ def test_message_capacity_rejection_writes_nothing(tmp_path):
 
     assert response.status_code == 503
     assert response.headers["retry-after"] == "1"
-    assert store.list_tasks_page(user_id=user["id"], limit=100).items == []
+    detail = store.get_conversation_detail(conversation["id"], user_id=user["id"])
+    assert detail is not None
+    assert detail.active_task is None
     assert store.list_active_messages(conversation["id"], user_id=user["id"]) == []
     assert store.get_unstable_turn(conversation["id"], user_id=user["id"]) is None
 
@@ -1114,7 +1116,9 @@ def test_ambiguous_submit_failure_does_not_fail_worker_claimed_task(tmp_path):
     )
 
     assert response.status_code == 202
-    task = store.list_tasks_page(user_id=user["id"], limit=100).items[0]
+    unstable = store.get_unstable_turn(conversation["id"], user_id=user["id"])
+    assert unstable is not None
+    task = unstable.task
     assert task.status == "running"
     events = store.list_events_page(task.id, user_id=user["id"], after_id=0, limit=100)
     assert events is not None
@@ -1402,7 +1406,7 @@ def test_rollback_rejects_active_task_and_stale_head_before_checkpoint_read(tmp_
             "expected_head_message_id": target.message.id,
         },
     )
-    harness.store.update_status(active.task.id, "failed")
+    assert harness.store.fail_pending_task(active.task.id) is not None
     stale = harness.client.post(
         f"/api/conversations/{conversation['id']}/rollback",
         json={

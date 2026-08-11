@@ -369,12 +369,13 @@ def test_update_conversation_allows_title_but_rejects_archive_with_active_task(
         paper=_paper(),
         title=None,
     )
-    task = store.create_task(question="active research", user_id=alice.id)
-    with store.engine.begin() as connection:
-        connection.exec_driver_sql(
-            "UPDATE research_tasks SET conversation_id = ? WHERE id = ?",
-            (conversation.id, task.id),
-        )
+    task = store.create_conversation_turn(
+        user_id=alice.id,
+        conversation_id=conversation.id,
+        content="active research",
+        depth="standard",
+        expected_head_message_id=None,
+    ).task
 
     renamed = store.update_conversation(
         conversation.id,
@@ -868,7 +869,7 @@ def test_task_message_and_unstable_turn_keep_stable_head_unchanged(tmp_path):
         user_id=alice.id,
     ).conversation.head_message_id == stable_head
 
-    store.update_status(turn.task.id, "failed")
+    assert store.fail_pending_task(turn.task.id) is not None
     failed = store.get_unstable_turn(conversation.id, user_id=alice.id)
     assert failed is not None
     assert failed.task.status == "failed"
@@ -899,7 +900,7 @@ def test_unstable_turn_prefers_active_retry_over_larger_same_second_failed_id(
         depth="standard",
         expected_head_message_id=None,
     )
-    store.update_status(older_failed.task.id, "failed")
+    assert store.fail_pending_task(older_failed.task.id) is not None
     newer_active = store.create_conversation_turn(
         user_id=alice.id,
         conversation_id=conversation.id,
@@ -907,7 +908,7 @@ def test_unstable_turn_prefers_active_retry_over_larger_same_second_failed_id(
         depth="standard",
         expected_head_message_id=None,
     )
-    store.update_status(newer_active.task.id, "running")
+    assert store.claim_task(newer_active.task.id) is not None
 
     assert older_failed.task.id > newer_active.task.id
     assert older_failed.task.created_at == newer_active.task.created_at
@@ -945,7 +946,7 @@ def test_unstable_turn_uses_queued_event_order_for_same_second_failed_tasks(
         depth="quick",
         expected_head_message_id=None,
     )
-    store.update_status(older_failed.task.id, "failed")
+    assert store.fail_pending_task(older_failed.task.id) is not None
     newer_failed = store.create_conversation_turn(
         user_id=alice.id,
         conversation_id=conversation.id,
@@ -953,7 +954,7 @@ def test_unstable_turn_uses_queued_event_order_for_same_second_failed_tasks(
         depth="quick",
         expected_head_message_id=None,
     )
-    store.update_status(newer_failed.task.id, "failed")
+    assert store.fail_pending_task(newer_failed.task.id) is not None
     later_old_diagnostic = store.add_event(
         task_id=older_failed.task.id,
         type="diagnostic",

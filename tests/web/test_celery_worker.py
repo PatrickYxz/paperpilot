@@ -474,7 +474,7 @@ def test_celery_retry_exhaustion_fails_real_sqlite_conversation(monkeypatch, tmp
     db_path = tmp_path / "celery-retry.sqlite3"
     seed = TaskStore(db_path)
     task = _new_conversation_task(seed)
-    seed.update_status(task.id, "running")
+    assert seed.claim_task(task.id) is not None
     seed.close()
     execution_error = OSError("database locked secret-paper-text")
     _configure_failing_conversation(

@@ -54,7 +54,7 @@ def _observed_app():
         logger=logger,
     )
 
-    @app.get("/api/tasks/{task_id}")
+    @app.get("/api/jobs/{task_id}")
     def get_task(task_id: str, request: Request):
         request.state.user_id = "user_1"
         return {"id": task_id}
@@ -73,14 +73,14 @@ def _observed_app():
 def test_request_id_is_generated_and_dynamic_route_is_not_logged():
     app, handler = _observed_app()
     response = TestClient(app).get(
-        "/api/tasks/task_secret?question=private",
+        "/api/jobs/task_secret?question=private",
         headers={"cookie": "paperpilot_session=secret"},
     )
 
     assert response.status_code == 200
     assert response.headers["x-request-id"]
     record = handler.records[-1]
-    assert record.route == "/api/tasks/{task_id}"
+    assert record.route == "/api/jobs/{task_id}"
     assert record.user_id == "user_1"
     assert record.status_code == 200
     serialized = repr(record.__dict__)
@@ -92,7 +92,7 @@ def test_request_id_is_generated_and_dynamic_route_is_not_logged():
 def test_valid_request_id_is_preserved_once():
     app, _ = _observed_app()
     response = TestClient(app).get(
-        "/api/tasks/task_1",
+        "/api/jobs/task_1",
         headers={"X-Request-ID": "upstream.request-1:attempt_2"},
     )
 
@@ -289,7 +289,7 @@ def test_json_formatter_emits_machine_readable_structured_fields():
     )
     record.event = "http.request.completed"
     record.request_id = "request_1"
-    record.route = "/api/tasks/{task_id}"
+    record.route = "/api/jobs/{task_id}"
     record.status_code = 200
 
     payload = json.loads(JsonLogFormatter().format(record))
@@ -297,7 +297,7 @@ def test_json_formatter_emits_machine_readable_structured_fields():
     assert payload["message"] == "HTTP request"
     assert payload["event"] == "http.request.completed"
     assert payload["request_id"] == "request_1"
-    assert payload["route"] == "/api/tasks/{task_id}"
+    assert payload["route"] == "/api/jobs/{task_id}"
     assert payload["status_code"] == 200
 
     text_line = TextLogFormatter().format(record)

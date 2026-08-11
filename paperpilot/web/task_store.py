@@ -10,13 +10,11 @@ from pathlib import Path
 from typing import Literal
 
 from sqlalchemy import (
-    and_,
     delete,
     exists,
     func,
     insert,
     literal,
-    or_,
     select,
     text,
     update,
@@ -46,11 +44,7 @@ from paperpilot.web.db_models import (
 )
 
 
-TaskDepth = Literal["quick", "standard", "deep"]
-TaskStatus = Literal["pending", "running", "completed", "failed"]
-
 VALID_DEPTHS: set[str] = {"quick", "standard", "deep"}
-VALID_STATUSES: set[str] = {"pending", "running", "completed", "failed"}
 
 
 class DuplicateUsernameError(ValueError):
@@ -88,12 +82,6 @@ class ResearchTask:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
-
-
-@dataclass(frozen=True)
-class TaskPage:
-    items: list[ResearchTask]
-    has_more: bool
 
 
 @dataclass(frozen=True)
@@ -1334,107 +1322,11 @@ class TaskStore:
                 task=_task_from_model(task_row),
             )
 
-    def create_task(
-        self,
-        *,
-        question: str,
-        depth: str = "standard",
-        user_id: str | None = None,
-    ) -> ResearchTask:
-        task = _new_task(question=question, depth=depth, user_id=user_id)
-        with self._session_factory.begin() as session:
-            session.add(_task_to_model(task))
-        return task
-
-    def create_queued_task(
-        self,
-        *,
-        question: str,
-        depth: str,
-        user_id: str,
-        execution_mode: str,
-    ) -> ResearchTask:
-        if execution_mode not in {"simulated", "real"}:
-            raise ValueError(f"invalid execution mode: {execution_mode!r}")
-
-        task = _new_task(question=question, depth=depth, user_id=user_id)
-        payload = {
-            "depth": task.depth,
-            "execution_mode": execution_mode,
-            "simulated": execution_mode == "simulated",
-        }
-        task_row = _task_to_model(task)
-        with self._session_factory.begin() as session:
-            session.add(task_row)
-            session.flush()
-            session.add(
-                TaskEventRow(
-                    task_id=task.id,
-                    type="queued",
-                    stage="queue",
-                    message=f"Task queued for {execution_mode} workflow.",
-                    payload_json=json.dumps(payload, ensure_ascii=False),
-                    created_at=_utc_now(),
-                )
-            )
-        return task
-
     def check_health(self) -> None:
         with self.engine.connect() as connection:
             row = connection.execute(text("SELECT 1")).one_or_none()
         if row is None or int(row[0]) != 1:
             raise RuntimeError("SQLite health probe returned an invalid result")
-
-    def list_tasks_page(
-        self,
-        *,
-        user_id: str | None,
-        limit: int,
-        status: str | None = None,
-        before_created_at: str | None = None,
-        before_id: str | None = None,
-    ) -> TaskPage:
-        if status is not None and status not in VALID_STATUSES:
-            raise ValueError(f"invalid status: {status!r}")
-        if limit < 1 or limit > 100:
-            raise ValueError("limit must be between 1 and 100")
-        if (before_created_at is None) != (before_id is None):
-            raise ValueError("task page position requires created_at and id")
-
-        filters = [
-            ResearchTaskRow.user_id.is_(None)
-            if user_id is None
-            else ResearchTaskRow.user_id == user_id
-        ]
-        if status is not None:
-            filters.append(ResearchTaskRow.status == status)
-        if before_created_at is not None:
-            assert before_id is not None
-            filters.append(
-                or_(
-                    ResearchTaskRow.created_at < before_created_at,
-                    and_(
-                        ResearchTaskRow.created_at == before_created_at,
-                        ResearchTaskRow.id < before_id,
-                    ),
-                )
-            )
-        statement = (
-            select(ResearchTaskRow)
-            .where(*filters)
-            .order_by(
-                ResearchTaskRow.created_at.desc(),
-                ResearchTaskRow.id.desc(),
-            )
-            .limit(limit + 1)
-        )
-        with self._session_factory() as session:
-            rows = list(session.scalars(statement))
-        tasks = [_task_from_model(row) for row in rows]
-        return TaskPage(
-            items=tasks[:limit],
-            has_more=len(tasks) > limit,
-        )
 
     def get_task(
         self,
@@ -1448,20 +1340,6 @@ class TaskStore:
         with self._session_factory() as session:
             row = session.scalar(select(ResearchTaskRow).where(*filters))
         return _task_from_model(row) if row is not None else None
-
-    def update_status(self, task_id: str, status: str) -> ResearchTask | None:
-        if status not in VALID_STATUSES:
-            raise ValueError(f"invalid status: {status!r}")
-
-        with self._session_factory.begin() as session:
-            result = session.execute(
-                update(ResearchTaskRow)
-                .where(ResearchTaskRow.id == task_id)
-                .values(status=status, updated_at=_utc_now())
-            )
-            if result.rowcount != 1:
-                return None
-        return self.get_task(task_id)
 
     def claim_task(
         self,
@@ -1600,37 +1478,6 @@ class TaskStore:
                 limit=limit,
             )
 
-    def get_task_updates(
-        self,
-        task_id: str,
-        *,
-        user_id: str | None,
-        after_event_id: int,
-        after_artifact_id: int,
-        limit: int,
-    ) -> TaskUpdates | None:
-        _validate_incremental_page(after_event_id, limit)
-        _validate_incremental_page(after_artifact_id, limit)
-        with self._session_factory.begin() as session:
-            row = _select_owned_task_model(session, task_id, user_id)
-            if row is None:
-                return None
-            return TaskUpdates(
-                task=_task_from_model(row),
-                events=_read_event_batch(
-                    session,
-                    task_id,
-                    after_id=after_event_id,
-                    limit=limit,
-                ),
-                artifacts=_read_artifact_batch(
-                    session,
-                    task_id,
-                    after_id=after_artifact_id,
-                    limit=limit,
-                ),
-            )
-
     def get_conversation_task_updates(
         self,
         conversation_id: str,
@@ -1688,22 +1535,6 @@ def _new_task(
         user_id=user_id,
         conversation_id=conversation_id,
         base_checkpoint_id=base_checkpoint_id,
-    )
-
-
-def _task_to_model(task: ResearchTask) -> ResearchTaskRow:
-    return ResearchTaskRow(
-        id=task.id,
-        question=task.question,
-        depth=task.depth,
-        status=task.status,
-        created_at=task.created_at,
-        updated_at=task.updated_at,
-        user_id=task.user_id,
-        conversation_id=task.conversation_id,
-        base_checkpoint_id=task.base_checkpoint_id,
-        final_checkpoint_id=task.final_checkpoint_id,
-        result_quality=task.result_quality,
     )
 
 

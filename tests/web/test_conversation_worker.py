@@ -214,8 +214,12 @@ def test_worker_recovers_redelivered_running_conversation_but_skips_completed(
     seed = TaskStore(db_path)
     running = _new_conversation_task(seed, suffix="3")
     completed = _new_conversation_task(seed, suffix="4")
-    seed.update_status(running.id, "running")
-    seed.update_status(completed.id, "completed")
+    assert seed.claim_task(running.id) is not None
+    with seed.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE research_tasks SET status = 'completed' WHERE id = ?",
+            (completed.id,),
+        )
     seed.close()
     builds: list[str] = []
     invocations: list[tuple[str, bool]] = []
@@ -275,7 +279,11 @@ def test_late_retry_exhaustion_preserves_completed_conversation_without_event(
 ):
     store = TaskStore(tmp_path / "completed-race.sqlite3")
     task = _new_conversation_task(store, suffix="9")
-    store.update_status(task.id, "completed")
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE research_tasks SET status = 'completed' WHERE id = ?",
+            (task.id,),
+        )
     runner = DeepReadingRunner(
         task_store=store,
         checkpointer=object(),

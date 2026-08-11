@@ -528,7 +528,11 @@ def test_retry_exhausted_failure_is_idempotent_and_preserves_completed_race(
             completed_conversation,
             "Already completed",
         )
-        store.update_status(completed_turn.task.id, "completed")
+        with store.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "UPDATE research_tasks SET status = 'completed' WHERE id = ?",
+                (completed_turn.task.id,),
+            )
         runner.fail_retry_exhausted(
             completed_turn.task.id,
             backend="celery",
