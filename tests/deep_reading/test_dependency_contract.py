@@ -14,8 +14,6 @@ def _major_minor(distribution: str) -> tuple[int, int]:
 def _top_level_requirements(path: Path) -> list[Requirement]:
     requirements: list[Requirement] = []
     for raw_line in path.read_text(encoding="utf-8").splitlines():
-        if raw_line[:1].isspace():
-            continue
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -85,6 +83,28 @@ def test_anthropic_gate_rejects_resolved_lock_mutation(tmp_path: Path) -> None:
     command = " ".join(mutated.read_text(encoding="utf-8").splitlines()[:3])
     assert "--universal" in command
     assert "--python-version 3.12" in command
+    with pytest.raises(AssertionError):
+        _assert_distribution_absent(mutated, "anthropic")
+
+
+@pytest.mark.parametrize(
+    "relative, prefix",
+    (
+        ("requirements.txt", ""),
+        ("requirements-lock.txt", "pydantic==2.13.4\n    # via something\n"),
+    ),
+)
+def test_anthropic_gate_rejects_indented_requirement_mutation(
+    tmp_path: Path,
+    relative: str,
+    prefix: str,
+) -> None:
+    mutated = tmp_path / relative
+    mutated.write_text(
+        prefix + "    Anthropic[bedrock]==999.0.0\n",
+        encoding="utf-8",
+    )
+
     with pytest.raises(AssertionError):
         _assert_distribution_absent(mutated, "anthropic")
 
