@@ -1389,6 +1389,34 @@ git add requirements.txt requirements-lock.txt .env.example README.md paperpilot
 git commit -m "docs(runtime): describe only the LangGraph service"
 ```
 
+- [ ] **Step 9: Address Task 9 review findings**
+
+The user selected option 1 for the overload response: keep
+`PAPERPILOT_OVERLOAD_RETRY_AFTER_SECONDS` and make it effective. Pass the
+validated `WebRuntimeConfig.overload_retry_after_seconds` through app assembly
+to `build_conversation_router`, use it as the `Retry-After` value for capacity
+rejection, and add an API regression test with a non-default value. Preserve
+the existing default response of `1`.
+
+Strengthen the dependency contract so both `requirements.txt` and the resolved
+top-level entries in `requirements-lock.txt` reject the normalized
+distribution name `anthropic`; keep the Python 3.12 universal header assertions
+and also require representative Windows and Linux conditional entries. Tighten
+the `.env.example` contract from subset membership to exact equality with the
+31-key active set.
+
+Resolve the two documentation-only review findings without changing VLM or
+readiness behavior: state that Web API/Worker startup requires exported env
+values while `QwenClient` has a local dotenv fallback that operators should not
+rely on, describe readiness as evaluating three checks and returning their
+details only on failure, and call the two post-restore PRAGMAs SQLite integrity
+checks rather than health checks.
+
+Run RED/GREEN focused tests for each contract, then the Task 9 focused gates,
+full suite, `uv pip check`, forbidden-text scan, README script-existence scan,
+and `git diff --check`. Commit only the reviewed fix files and request a scoped
+re-review against the Task 9 implementation commit.
+
 ---
 
 ### Task 10: Final persistence, runtime, browser, and review gates
