@@ -67,6 +67,10 @@ def _env_variable_names(path: Path) -> set[str]:
     return names
 
 
+def _assert_exact_active_env_variables(path: Path) -> None:
+    assert _env_variable_names(path) == ACTIVE_ENV_VARIABLES
+
+
 def _assert_no_historical_day_scripts(scripts_root: Path) -> None:
     historical_scripts = [
         path
@@ -131,9 +135,22 @@ def test_repository_docs_match_keep_allowlist() -> None:
     assert actual_docs == DOCS_KEEP_ALLOWLIST
 
 
-def test_env_example_declares_active_variables_and_omits_removed_aliases() -> None:
+def test_env_example_declares_exactly_the_active_variables() -> None:
     root = Path(__file__).parents[2]
-    names = _env_variable_names(root / ".env.example")
+    _assert_exact_active_env_variables(root / ".env.example")
+
+
+def test_env_gate_rejects_unlisted_variable_mutation(tmp_path: Path) -> None:
+    root = Path(__file__).parents[2]
+    mutated = tmp_path / ".env.example"
+    mutated.write_text(
+        (root / ".env.example").read_text(encoding="utf-8")
+        + "\nPAPERPILOT_MISSPELLED_PRODUCTION_KEY=1\n",
+        encoding="utf-8",
+    )
+    names = _env_variable_names(mutated)
 
     assert ACTIVE_ENV_VARIABLES <= names
     assert names.isdisjoint(REMOVED_ENV_VARIABLES)
+    with pytest.raises(AssertionError):
+        _assert_exact_active_env_variables(mutated)

@@ -226,7 +226,12 @@ def _paper_search(calls: list[tuple[str, int]]):
     return search
 
 
-def _harness(tmp_path, *, executor: RecordingExecutor | None = None) -> AppHarness:
+def _harness(
+    tmp_path,
+    *,
+    executor: RecordingExecutor | None = None,
+    runtime_config: WebRuntimeConfig | None = None,
+) -> AppHarness:
     store = TaskStore(tmp_path / "tasks.sqlite3")
     runner = FakeDeepReadingRunner()
     checkpoint = FakeCheckpointRuntime()
@@ -235,7 +240,7 @@ def _harness(tmp_path, *, executor: RecordingExecutor | None = None) -> AppHarne
     app = create_app(
         store,
         task_executor=actual_executor,
-        runtime_config=WebRuntimeConfig(),
+        runtime_config=runtime_config or WebRuntimeConfig(),
         checkpoint_runtime=checkpoint,
         deep_reading_runner=runner,
         paper_search=_paper_search(calls),
@@ -1043,6 +1048,28 @@ def test_message_capacity_rejection_writes_nothing(tmp_path):
     assert detail.active_task is None
     assert store.list_active_messages(conversation["id"], user_id=user["id"]) == []
     assert store.get_unstable_turn(conversation["id"], user_id=user["id"]) is None
+
+
+def test_message_capacity_rejection_uses_configured_retry_after(tmp_path):
+    harness = _harness(
+        tmp_path,
+        executor=RejectingExecutor(),
+        runtime_config=WebRuntimeConfig(overload_retry_after_seconds=5),
+    )
+    _register(harness.client)
+    conversation = _create_conversation(harness.client)
+
+    response = harness.client.post(
+        f"/api/conversations/{conversation['id']}/messages",
+        json={
+            "content": "Retry after configured delay",
+            "depth": "quick",
+            "expected_head_message_id": None,
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "5"
 
 
 def test_submit_failure_marks_pending_task_failed_and_preserves_stable_head(tmp_path):

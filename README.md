@@ -120,10 +120,11 @@ set +a
 uv pip sync requirements-lock.txt --python .venv/bin/python
 ```
 
-PaperPilot does not load `.env` automatically. Every API and Worker shell must
-export the file before importing the application. For Celery, set
-`PAPERPILOT_TASK_EXECUTOR=celery` in `.env`; do not leave both executor choices
-active.
+The Web API and Celery Worker do not load `.env` before application import.
+Every API and Worker shell must export the file first. `QwenClient` has a local
+dotenv fallback, but operators should not rely on an MCP child process to load
+production configuration. For Celery, set `PAPERPILOT_TASK_EXECUTOR=celery` in
+`.env`; do not leave both executor choices active.
 
 ## Migration and startup order
 
@@ -183,10 +184,12 @@ distribution is not guaranteed to be even. Tune
 `PAPERPILOT_OVERLOAD_RETRY_AFTER_SECONDS` before startup. Saturated admission
 returns `503` with `Retry-After` and creates no Task or event rows.
 
-`/health/live` performs no dependency I/O. `/health/ready` reports exactly the
-`database`, `checkpoint`, and `executor` checks and returns `503` if any fails.
-Redis, MCP, model providers, and temporary capacity saturation are deliberately
-outside readiness. Request logs carry `X-Request-ID`; configure
+`/health/live` performs no dependency I/O. `/health/ready` evaluates exactly the
+`database`, `checkpoint`, and `executor` checks. A failed readiness response
+returns `503` and includes all three check details; a successful response is
+only `{"status":"ready"}`. Redis, MCP, model providers, and temporary capacity
+saturation are deliberately outside readiness. Request logs carry
+`X-Request-ID`; configure
 `PAPERPILOT_LOG_LEVEL`, `PAPERPILOT_LOG_FORMAT`,
 `PAPERPILOT_SLOW_REQUEST_MS`, and `PAPERPILOT_ENV` as needed. Disable duplicate
 Uvicorn access logs when PaperPilot logging is active:
@@ -273,7 +276,7 @@ sqlite3 "$PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH" "PRAGMA integrity_check;"
 ```
 
 Restart the Worker first and the API second only after migration, checkpoint
-setup, and both health checks succeed.
+setup, and both SQLite integrity checks succeed.
 
 ## Verification boundary
 

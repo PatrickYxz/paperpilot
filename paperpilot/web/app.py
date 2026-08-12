@@ -200,6 +200,7 @@ def _create_app(
             require_user=require_user,
             deep_reading_runner=deep_runner,
             paper_search=search,
+            overload_retry_after_seconds=config.overload_retry_after_seconds,
         )
     )
     app.include_router(

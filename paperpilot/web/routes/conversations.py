@@ -52,6 +52,7 @@ def build_conversation_router(
     require_user: RequireUser,
     deep_reading_runner: DeepReadingRunner,
     paper_search: PaperSearch,
+    overload_retry_after_seconds: int,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/conversations")
 
@@ -186,7 +187,7 @@ def build_conversation_router(
             raise HTTPException(
                 status_code=503,
                 detail="task executor is at capacity",
-                headers={"Retry-After": "1"},
+                headers={"Retry-After": str(overload_retry_after_seconds)},
             ) from exc
         except TaskExecutorShuttingDownError as exc:
             raise HTTPException(
