@@ -544,4 +544,3 @@ def _select_task_result_chain(
     if assistant_row.parent_message_id != user_message_row.id:
         raise ValueError("assistant message parent does not match task user message")
     return assistant_row, user_message_row
-
