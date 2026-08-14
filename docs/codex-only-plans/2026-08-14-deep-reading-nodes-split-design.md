@@ -82,7 +82,7 @@ paperpilot/deep_reading/nodes/
 ### 3.3 节点模块职责
 
 - `initialize_turn.py`：重置本轮字段，并通过现有 `Command` 选择是否进入摘要节点。
-- `summarize_history.py`：判断是否需要摘要、估算上下文、保留最近轮次并生成结构化摘要。
+- `summarize_history.py`：判断是否需要摘要、估算上下文、提供最近轮次选择并生成结构化摘要；`initialize_turn` 和 `write_answer` 复用其中对应的纯函数。
 - `prepare_primary_paper.py`：校验主论文身份，调用下载与索引 MCP 工具并更新活跃论文。
 - `research_evidence.py`：校验运行绑定、调用受限 Research Agent，并保存完整研究结果。
 - `write_answer.py`：从可信研究结果和论文元数据生成、校验结构化答案。
@@ -97,7 +97,7 @@ graph.py
       -> summarize_history.py -> context.py + binding.py
       -> prepare_primary_paper.py -> context.py + binding.py
       -> research_evidence.py -> context.py + binding.py + research_agent.py
-      -> write_answer.py -> context.py + binding.py + validation.py
+      -> write_answer.py -> context.py + binding.py + validation.py + summarize_history.py
       -> publish_result.py -> context.py + binding.py + validation.py
 ```
 
