@@ -223,6 +223,69 @@ def test_task_store_delegates_conversation_turn_to_message_store(
     }
 
 
+def test_task_store_delegates_publication_and_head_switch_operations(
+    monkeypatch,
+) -> None:
+    from paperpilot.web.store import publications
+
+    store = object.__new__(TaskStore)
+    session_factory = object()
+    store._session_factory = session_factory
+    published = object()
+    switched = object()
+    calls: list[tuple[str, object, dict[str, object]]] = []
+
+    def fake_publish(factory, **kwargs):
+        calls.append(("publish", factory, kwargs))
+        return published
+
+    def fake_switch(factory, conversation_id, **kwargs):
+        calls.append(("switch", factory, {"conversation_id": conversation_id, **kwargs}))
+        return switched
+
+    monkeypatch.setattr(publications, "publish_conversation_result", fake_publish)
+    monkeypatch.setattr(publications, "switch_conversation_head", fake_switch)
+
+    assert store.publish_conversation_result(
+        task_id="task_1",
+        content="answer",
+        metadata={"quality": "complete"},
+        used_papers=[],
+    ) is published
+    assert store.switch_conversation_head(
+        "conversation_1",
+        user_id="user_1",
+        expected_head_message_id="message_1",
+        target_message_id="message_2",
+        target_checkpoint_id="checkpoint_2",
+        active_paper_ids=["paper_1"],
+    ) is switched
+    assert calls == [
+        (
+            "publish",
+            session_factory,
+            {
+                "task_id": "task_1",
+                "content": "answer",
+                "metadata": {"quality": "complete"},
+                "used_papers": [],
+            },
+        ),
+        (
+            "switch",
+            session_factory,
+            {
+                "conversation_id": "conversation_1",
+                "user_id": "user_1",
+                "expected_head_message_id": "message_1",
+                "target_message_id": "message_2",
+                "target_checkpoint_id": "checkpoint_2",
+                "active_paper_ids": ["paper_1"],
+            },
+        ),
+    ]
+
+
 FORBIDDEN_STORE_IMPORT_PREFIXES = (
     "fastapi",
     "paperpilot.web.app",
