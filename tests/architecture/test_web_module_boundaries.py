@@ -187,6 +187,42 @@ def test_task_store_explicitly_delegates_user_and_conversation_operations(
     ]
 
 
+def test_task_store_delegates_conversation_turn_to_message_store(
+    monkeypatch,
+) -> None:
+    from paperpilot.web.store import messages
+
+    store = object.__new__(TaskStore)
+    session_factory = object()
+    store._session_factory = session_factory
+    sentinel = object()
+    captured: dict[str, object] = {}
+
+    def fake_create_turn(factory, **kwargs):
+        captured["factory"] = factory
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(messages, "create_conversation_turn", fake_create_turn)
+    result = store.create_conversation_turn(
+        user_id="user_1",
+        conversation_id="conversation_1",
+        content="follow up",
+        depth="standard",
+        expected_head_message_id="message_1",
+    )
+
+    assert result is sentinel
+    assert captured == {
+        "factory": session_factory,
+        "user_id": "user_1",
+        "conversation_id": "conversation_1",
+        "content": "follow up",
+        "depth": "standard",
+        "expected_head_message_id": "message_1",
+    }
+
+
 FORBIDDEN_STORE_IMPORT_PREFIXES = (
     "fastapi",
     "paperpilot.web.app",

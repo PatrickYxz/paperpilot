@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from paperpilot.papers import PaperCandidate
 from paperpilot.web import task_store as task_store_module
+from paperpilot.web.store import messages as messages_module
 from paperpilot.web.task_store import TaskStore
 
 
@@ -55,13 +56,13 @@ def _queued_event_id(store: TaskStore, task_id: str) -> int:
 def _fix_turn_ids_and_time(monkeypatch, *hex_values: str) -> None:
     values = iter(hex_values)
     monkeypatch.setattr(
-        task_store_module.uuid,
+        messages_module.uuid,
         "uuid4",
         lambda: SimpleNamespace(hex=next(values)),
     )
     monkeypatch.setattr(
-        task_store_module,
-        "_utc_now",
+        messages_module,
+        "utc_now",
         lambda: "2026-08-07T09:00:00+00:00",
     )
 
