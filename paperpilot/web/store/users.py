@@ -86,6 +86,7 @@ def create_user(session_factory: SessionFactory,
     password_hash: str,
     password_salt: str,
 ) -> WebUser:
+    """Create a user atomically and translate the unique-username race."""
     username = username.strip()
     if not username:
         raise ValueError("username is required")
@@ -104,6 +105,7 @@ def create_user(session_factory: SessionFactory,
     return user_from_row(row)
 
 def get_user_by_username(session_factory: SessionFactory, username: str) -> WebUser | None:
+    """Read a user by username without exposing SQLAlchemy rows."""
     with session_factory() as session:
         row = session.scalar(
             select(UserRow).where(UserRow.username == username)
@@ -111,11 +113,13 @@ def get_user_by_username(session_factory: SessionFactory, username: str) -> WebU
     return user_from_row(row) if row is not None else None
 
 def get_user_by_id(session_factory: SessionFactory, user_id: str) -> WebUser | None:
+    """Read a user by stable identifier."""
     with session_factory() as session:
         row = session.get(UserRow, user_id)
     return user_from_row(row) if row is not None else None
 
 def create_session(session_factory: SessionFactory, user_id: str) -> str:
+    """Create a seven-day session only for an existing user."""
     if get_user_by_id(session_factory, user_id) is None:
         raise ValueError(f"user not found: {user_id}")
     token = f"session_{secrets.token_urlsafe(32)}"
@@ -133,6 +137,7 @@ def create_session(session_factory: SessionFactory, user_id: str) -> str:
     return token
 
 def get_user_for_session(session_factory: SessionFactory, token: str) -> WebUser | None:
+    """Resolve a non-expired login token to its owner."""
     now = utc_now()
     statement = (
         select(UserRow)
@@ -147,8 +152,8 @@ def get_user_for_session(session_factory: SessionFactory, token: str) -> WebUser
     return user_from_row(row) if row is not None else None
 
 def delete_session(session_factory: SessionFactory, token: str) -> None:
+    """Delete a login session idempotently."""
     with session_factory.begin() as session:
         session.execute(
             delete(LoginSessionRow).where(LoginSessionRow.token == token)
         )
-

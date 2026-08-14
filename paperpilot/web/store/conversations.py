@@ -86,6 +86,7 @@ def create_conversation(session_factory: SessionFactory,
     paper: PaperCandidate,
     title: str | None = None,
 ) -> ConversationRecord:
+    """Atomically upsert the paper, create the Conversation, and link its primary paper."""
     paper_title = paper.title.strip()
     conversation_title = _validate_conversation_title(
         paper_title if title is None else title
@@ -159,6 +160,7 @@ def list_conversations(session_factory: SessionFactory,
     include_archived: bool = False,
     limit: int = 100,
 ) -> list[ConversationRecord]:
+    """List owner-scoped Conversations without changing their stable heads."""
     if limit < 1 or limit > 100:
         raise ValueError("limit must be between 1 and 100")
     filters = [ConversationRow.user_id == user_id]
@@ -182,6 +184,7 @@ def get_conversation_detail(session_factory: SessionFactory,
     *,
     user_id: str,
 ) -> ConversationDetail | None:
+    """Read one owner-scoped Conversation and its active papers/task snapshot."""
     with session_factory() as session:
         conversation_row = select_owned_conversation(
             session,
@@ -239,6 +242,7 @@ def update_conversation(session_factory: SessionFactory,
     title: str | None = None,
     archived: bool | None = None,
 ) -> ConversationRecord | None:
+    """Update title/archive state; archiving is rejected while work is active."""
     with session_factory.begin() as session:
         row = select_owned_conversation(
             session,
@@ -279,4 +283,3 @@ def _validate_conversation_title(title: str) -> str:
     if not 1 <= len(cleaned) <= 200:
         raise ValueError("conversation title must be between 1 and 200 characters")
     return cleaned
-

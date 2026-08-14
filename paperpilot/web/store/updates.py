@@ -88,6 +88,7 @@ def add_event(session_factory: SessionFactory,
     stage: str | None = None,
     payload: dict | None = None,
 ) -> TaskEvent:
+    """Append one Event after verifying its Task exists."""
     if not message.strip():
         raise ValueError("event message is required")
     row = TaskEventRow(
@@ -112,6 +113,7 @@ def list_events_page(session_factory: SessionFactory,
     after_id: int,
     limit: int,
 ) -> TaskEventBatch | None:
+    """Read an owner-scoped Event page using its monotonic id watermark."""
     _validate_incremental_page(after_id, limit)
     with session_factory() as session:
         if select_owned_task(session, task_id, user_id) is None:
@@ -131,6 +133,7 @@ def add_artifact(session_factory: SessionFactory,
     content: str,
     payload: dict | None = None,
 ) -> TaskArtifact:
+    """Append one Artifact after verifying its Task exists."""
     if not kind.strip():
         raise ValueError("artifact kind is required")
     if not title.strip():
@@ -159,6 +162,7 @@ def list_artifacts_page(session_factory: SessionFactory,
     after_id: int,
     limit: int,
 ) -> TaskArtifactBatch | None:
+    """Read an owner-scoped Artifact page using its monotonic id watermark."""
     _validate_incremental_page(after_id, limit)
     with session_factory() as session:
         if select_owned_task(session, task_id, user_id) is None:
@@ -179,6 +183,7 @@ def get_conversation_task_updates(session_factory: SessionFactory,
     after_artifact_id: int = 0,
     limit: int = 50,
 ) -> TaskUpdates | None:
+    """Read Task, Events, and Artifacts from one database snapshot."""
     _validate_incremental_page(after_event_id, limit)
     _validate_incremental_page(after_artifact_id, limit)
     with session_factory.begin() as session:
@@ -256,4 +261,3 @@ def _validate_incremental_page(after_id: int, limit: int) -> None:
         raise ValueError("after_id must be non-negative")
     if limit < 1 or limit > 100:
         raise ValueError("limit must be between 1 and 100")
-

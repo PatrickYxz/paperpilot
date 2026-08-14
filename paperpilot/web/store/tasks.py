@@ -81,6 +81,7 @@ from paperpilot.web.store.records import (
 from paperpilot.web.store.helpers import SessionFactory
 
 def check_health(engine: Engine) -> None:
+    """Run the lightweight database health probe on the owned Engine."""
     with engine.connect() as connection:
         row = connection.execute(text("SELECT 1")).one_or_none()
     if row is None or int(row[0]) != 1:
@@ -91,6 +92,7 @@ def get_task(session_factory: SessionFactory,
     *,
     user_id: str | None = None,
 ) -> ResearchTask | None:
+    """Read one Task, optionally constrained to its owner."""
     filters = [ResearchTaskRow.id == task_id]
     if user_id is not None:
         filters.append(ResearchTaskRow.user_id == user_id)
@@ -139,4 +141,3 @@ def fail_pending_task(session_factory: SessionFactory, task_id: str) -> Research
         if row is None:
             raise RuntimeError("failed task disappeared within transaction")
         return task_from_row(row)
-

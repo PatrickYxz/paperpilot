@@ -88,6 +88,7 @@ def create_conversation_turn(session_factory: SessionFactory,
     depth: str,
     expected_head_message_id: str | None,
 ) -> ConversationTurn:
+    """Atomically create the User Message, pending Task, and queued Event."""
     task = _new_task(
         question=content,
         depth=depth,
@@ -205,6 +206,7 @@ def get_message(session_factory: SessionFactory,
     *,
     user_id: str,
 ) -> MessageRecord | None:
+    """Read one owner-scoped message from a Conversation."""
     with session_factory() as session:
         row = session.scalar(
             select(MessageRow)
@@ -224,6 +226,7 @@ def get_task_message(session_factory: SessionFactory,
     task_id: str,
     role: str,
 ) -> MessageRecord | None:
+    """Read a Task message by its role."""
     if role not in {"user", "assistant", "system"}:
         raise ValueError(f"invalid message role: {role!r}")
     with session_factory() as session:
@@ -240,6 +243,7 @@ def list_active_messages(session_factory: SessionFactory,
     *,
     user_id: str,
 ) -> list[MessageRecord] | None:
+    """Traverse parents from the stable assistant head to build the active path."""
     with session_factory() as session:
         conversation_row = select_owned_conversation(
             session,
@@ -305,6 +309,7 @@ def list_message_alternatives(session_factory: SessionFactory,
     *,
     user_id: str,
 ) -> list[ConversationAlternative] | None:
+    """List complete direct user/assistant alternatives for one owner-scoped message."""
     with session_factory() as session:
         if (
             select_owned_conversation(
@@ -363,6 +368,7 @@ def get_unstable_turn(session_factory: SessionFactory,
     *,
     user_id: str,
 ) -> ConversationTurn | None:
+    """Read the newest queued/running/failed turn that has not become stable."""
     with session_factory() as session:
         conversation_row = select_owned_conversation(
             session,
@@ -499,4 +505,3 @@ def _raise_broken_message_reference(
             f"message tree {relation} belongs to another conversation: {message_id}"
         )
     raise RuntimeError(f"message tree could not resolve {relation}: {message_id}")
-
