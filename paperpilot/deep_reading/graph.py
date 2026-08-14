@@ -11,7 +11,6 @@ from .nodes import (
     prepare_primary_paper,
     publish_result,
     research_evidence,
-    route_after_initialize,
     summarize_history,
     write_answer,
 )
@@ -28,7 +27,6 @@ def build_deep_reading_graph(checkpointer: Any):
     builder.add_node("write_answer", write_answer)
     builder.add_node("publish_result", publish_result)
     builder.add_edge(START, "initialize_turn")
-    builder.add_conditional_edges("initialize_turn", route_after_initialize)
     builder.add_edge("summarize_history", "prepare_primary_paper")
     builder.add_edge("prepare_primary_paper", "research_evidence")
     builder.add_edge("research_evidence", "write_answer")

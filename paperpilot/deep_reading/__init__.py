@@ -8,7 +8,6 @@ from .nodes import (
     prepare_primary_paper,
     publish_result,
     research_evidence,
-    route_after_initialize,
     summarize_history,
     write_answer,
 )
@@ -49,7 +48,6 @@ __all__ = [
     "prepare_primary_paper",
     "publish_result",
     "research_evidence",
-    "route_after_initialize",
     "summarize_history",
     "write_answer",
 ]

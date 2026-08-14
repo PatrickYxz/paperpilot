@@ -5,6 +5,7 @@ import json
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
+from importlib import import_module
 from threading import Barrier
 from types import SimpleNamespace
 from typing import Any, Sequence, get_type_hints
@@ -17,9 +18,13 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import BaseTool
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from langgraph.runtime import Runtime
+from langgraph.types import Command
 from pydantic import PrivateAttr, ValidationError
 
 import paperpilot.deep_reading.nodes as nodes_module
+research_evidence_module = import_module(
+    "paperpilot.deep_reading.nodes.research_evidence"
+)
 from paperpilot.deep_reading.nodes import (
     DeepReadingContext,
     initialize_turn,
@@ -462,7 +467,42 @@ def test_state_has_one_complete_research_result_field() -> None:
     assert "evidence_items" not in annotations
 
 
-def test_initialize_turn_clears_only_per_turn_fields() -> None:
+@pytest.mark.parametrize(
+    ("node_name", "module_name"),
+    [
+        ("initialize_turn", "paperpilot.deep_reading.nodes.initialize_turn"),
+        ("summarize_history", "paperpilot.deep_reading.nodes.summarize_history"),
+        (
+            "prepare_primary_paper",
+            "paperpilot.deep_reading.nodes.prepare_primary_paper",
+        ),
+        ("research_evidence", "paperpilot.deep_reading.nodes.research_evidence"),
+        ("write_answer", "paperpilot.deep_reading.nodes.write_answer"),
+        ("publish_result", "paperpilot.deep_reading.nodes.publish_result"),
+    ],
+)
+def test_each_graph_node_lives_in_its_dedicated_module(
+    node_name: str,
+    module_name: str,
+) -> None:
+    module = import_module(module_name)
+    node = getattr(nodes_module, node_name)
+
+    assert getattr(module, node_name) is node
+    assert node.__module__ == module_name
+
+
+@pytest.mark.parametrize(
+    ("threshold", "expected_goto"),
+    [
+        (32_000, "prepare_primary_paper"),
+        (1, "summarize_history"),
+    ],
+)
+def test_initialize_turn_clears_per_turn_fields_and_routes_with_command(
+    threshold: int,
+    expected_goto: str,
+) -> None:
     messages = [HumanMessage(content="Earlier question", id="human-old")]
     old_summary = SUMMARY.model_dump(mode="json")
     state = {
@@ -484,9 +524,14 @@ def test_initialize_turn_clears_only_per_turn_fields() -> None:
         "error": {"message": "old error"},
     }
 
-    update = initialize_turn(state, Runtime(context=_context(_FakeModel())))
+    command = initialize_turn(
+        state,
+        Runtime(context=_context(_FakeModel(), threshold=threshold)),
+    )
 
-    assert update == {
+    assert isinstance(command, Command)
+    assert command.goto == expected_goto
+    assert command.update == {
         "schema_version": 1,
         "graph_version": "conversation-v1",
         "current_task_id": "task-current",
@@ -496,7 +541,7 @@ def test_initialize_turn_clears_only_per_turn_fields() -> None:
         "published_message_id": None,
         "error": None,
     }
-    merged = state | update
+    merged = state | command.update
     assert merged["messages"] is messages
     assert merged["conversation_summary"] == old_summary
     assert merged["primary_paper_id"] == "paper-primary"
@@ -765,7 +810,10 @@ def test_research_evidence_writes_complete_json_research_result(monkeypatch) -> 
         seen.append((state, context))
         return result
 
-    monkeypatch.setattr(nodes_module, "run_research_agent", fake_run)
+    research_evidence_module = import_module(
+        "paperpilot.deep_reading.nodes.research_evidence"
+    )
+    monkeypatch.setattr(research_evidence_module, "run_research_agent", fake_run)
     state = _bound_state()
     context = _context(_FakeModel())
 
@@ -1186,7 +1234,7 @@ def test_external_and_publish_nodes_validate_binding_before_side_effect(
         return "{}"
 
     monkeypatch.setattr(
-        nodes_module,
+        research_evidence_module,
         "run_research_agent",
         lambda _state, _context: agent_calls.append("called"),
     )
@@ -1268,7 +1316,7 @@ def test_runtime_binding_rejects_mismatched_trusted_entities(
         state["current_user_message_id"] = "message-other"
     agent_calls: list[str] = []
     monkeypatch.setattr(
-        nodes_module,
+        research_evidence_module,
         "run_research_agent",
         lambda _state, _context: agent_calls.append("called"),
     )
@@ -1343,7 +1391,7 @@ def test_runtime_binding_rejects_untrusted_current_human_before_agent(
     store = _NodeStore()
     calls: list[str] = []
     monkeypatch.setattr(
-        nodes_module,
+        research_evidence_module,
         "run_research_agent",
         lambda _state, _context: calls.append("agent"),
     )
@@ -1378,7 +1426,7 @@ def test_runtime_binding_rejects_invalid_conversation_or_task_question(
         store.task.question = "Another question"
     calls: list[str] = []
     monkeypatch.setattr(
-        nodes_module,
+        research_evidence_module,
         "run_research_agent",
         lambda _state, _context: calls.append("agent"),
     )
@@ -1506,7 +1554,7 @@ def test_real_sqlite_binding_fails_before_node_side_effect(
         return json.dumps({"cached_papers": ["2401.92000v1"]})
 
     monkeypatch.setattr(
-        nodes_module,
+        research_evidence_module,
         "run_research_agent",
         lambda _state, _context: side_effects.append("agent"),
     )

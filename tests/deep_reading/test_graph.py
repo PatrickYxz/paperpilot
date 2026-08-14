@@ -5,6 +5,7 @@ from typing import Any
 
 from langchain.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 import paperpilot.deep_reading.graph as graph_module
 from paperpilot.deep_reading.graph import build_deep_reading_graph
@@ -79,9 +80,17 @@ def test_graph_follows_fixed_path_with_only_optional_summary(monkeypatch) -> Non
 
             return run
 
-        monkeypatch.setattr(
-            graph_module, "initialize_turn", fake_node("initialize_turn")
-        )
+        def fake_initialize(state: object, runtime: Any) -> Command:
+            del state
+            seen.append("initialize_turn")
+            goto = (
+                "summarize_history"
+                if runtime.context.summary_token_threshold == 1
+                else "prepare_primary_paper"
+            )
+            return Command(update={}, goto=goto)
+
+        monkeypatch.setattr(graph_module, "initialize_turn", fake_initialize)
         monkeypatch.setattr(
             graph_module, "summarize_history", fake_node("summarize_history")
         )
