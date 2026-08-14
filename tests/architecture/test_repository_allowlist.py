@@ -9,6 +9,8 @@ DOCS_KEEP_ALLOWLIST = {
     "docs/codex-only-plans/2026-08-07-paperpilot-conversation-langgraph-vertical-slice-plan.md",
     "docs/codex-only-plans/2026-08-11-new-architecture-cleanup-design.md",
     "docs/codex-only-plans/2026-08-11-new-architecture-cleanup-implementation-plan.md",
+    "docs/codex-only-plans/2026-08-13-web-business-module-reorganization-design.md",
+    "docs/codex-only-plans/2026-08-13-web-business-module-reorganization-plan.md",
 }
 
 ACTIVE_ENV_VARIABLES = {
