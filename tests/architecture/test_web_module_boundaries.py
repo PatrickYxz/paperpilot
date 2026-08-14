@@ -286,6 +286,61 @@ def test_task_store_delegates_publication_and_head_switch_operations(
     ]
 
 
+def test_task_store_delegates_task_and_update_operations(
+    monkeypatch,
+) -> None:
+    from paperpilot.web.store import tasks, updates
+
+    store = object.__new__(TaskStore)
+    session_factory = object()
+    engine = object()
+    store._session_factory = session_factory
+    store.engine = engine
+    claimed = object()
+    update_snapshot = object()
+    calls: list[tuple[str, object, object]] = []
+
+    def fake_claim(factory, task_id, **kwargs):
+        calls.append(("claim", factory, {"task_id": task_id, **kwargs}))
+        return claimed
+
+    def fake_updates(factory, conversation_id, task_id, **kwargs):
+        calls.append(
+            (
+                "updates",
+                factory,
+                {"conversation_id": conversation_id, "task_id": task_id, **kwargs},
+            )
+        )
+        return update_snapshot
+
+    health_calls: list[object] = []
+    monkeypatch.setattr(tasks, "claim_task", fake_claim)
+    monkeypatch.setattr(updates, "get_conversation_task_updates", fake_updates)
+    monkeypatch.setattr(tasks, "check_health", health_calls.append)
+
+    assert store.claim_task("task_1", allow_running=True) is claimed
+    assert store.get_conversation_task_updates(
+        "conversation_1",
+        "task_1",
+        user_id="user_1",
+    ) is update_snapshot
+    assert store.check_health() is None
+    assert health_calls == [engine]
+    assert calls == [
+        ("claim", session_factory, {"task_id": "task_1", "allow_running": True}),
+        (
+            "updates",
+            session_factory,
+            {
+                "conversation_id": "conversation_1",
+                "task_id": "task_1",
+                "user_id": "user_1",
+            },
+        ),
+    ]
+
+
 FORBIDDEN_STORE_IMPORT_PREFIXES = (
     "fastapi",
     "paperpilot.web.app",

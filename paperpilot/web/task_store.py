@@ -404,12 +404,16 @@ class TaskStore:
         after_artifact_id: int = 0,
         limit: int = 50,
     ) -> TaskUpdates | None:
+        kwargs: dict[str, object] = {"user_id": user_id}
+        if after_event_id != 0:
+            kwargs["after_event_id"] = after_event_id
+        if after_artifact_id != 0:
+            kwargs["after_artifact_id"] = after_artifact_id
+        if limit != 50:
+            kwargs["limit"] = limit
         return updates.get_conversation_task_updates(
             self._session_factory,
             conversation_id,
             task_id,
-            user_id=user_id,
-            after_event_id=after_event_id,
-            after_artifact_id=after_artifact_id,
-            limit=limit,
+            **kwargs,
         )
