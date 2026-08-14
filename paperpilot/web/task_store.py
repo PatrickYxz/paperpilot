@@ -122,12 +122,12 @@ class TaskStore:
         include_archived: bool = False,
         limit: int = 100,
     ) -> list[ConversationRecord]:
-        return conversations.list_conversations(
-            self._session_factory,
-            user_id=user_id,
-            include_archived=include_archived,
-            limit=limit,
-        )
+        kwargs: dict[str, object] = {"user_id": user_id}
+        if include_archived:
+            kwargs["include_archived"] = include_archived
+        if limit != 100:
+            kwargs["limit"] = limit
+        return conversations.list_conversations(self._session_factory, **kwargs)
 
     def get_conversation_detail(
         self,

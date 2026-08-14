@@ -153,6 +153,40 @@ def test_conversation_router_keeps_compatibility_entrypoint() -> None:
     )
 
 
+def test_task_store_explicitly_delegates_user_and_conversation_operations(
+    monkeypatch,
+) -> None:
+    from paperpilot.web.store import conversations, users
+
+    store = object.__new__(TaskStore)
+    session_factory = object()
+    store._session_factory = session_factory
+    sentinel_user = object()
+    sentinel_conversation = object()
+    calls: list[tuple[str, object, object]] = []
+
+    def fake_get_user_by_id(factory, user_id):
+        calls.append(("get_user_by_id", factory, user_id))
+        return sentinel_user
+
+    def fake_list_conversations(factory, **kwargs):
+        calls.append(("list_conversations", factory, kwargs))
+        return [sentinel_conversation]
+
+    monkeypatch.setattr(users, "get_user_by_id", fake_get_user_by_id)
+    monkeypatch.setattr(
+        conversations,
+        "list_conversations",
+        fake_list_conversations,
+    )
+    assert store.get_user_by_id("user_1") is sentinel_user
+    assert store.list_conversations(user_id="user_1") == [sentinel_conversation]
+    assert calls == [
+        ("get_user_by_id", session_factory, "user_1"),
+        ("list_conversations", session_factory, {"user_id": "user_1"}),
+    ]
+
+
 FORBIDDEN_STORE_IMPORT_PREFIXES = (
     "fastapi",
     "paperpilot.web.app",
