@@ -353,6 +353,31 @@ def test_rollback_openapi_exposes_only_owned_message_contract(tmp_path):
     assert not any("checkpoint" in path for path in schema["paths"])
 
 
+def test_conversation_router_keeps_route_method_set(tmp_path) -> None:
+    harness = _harness(tmp_path)
+    schema = harness.client.get("/openapi.json").json()
+    actual = {
+        (path, method)
+        for path, operations in schema["paths"].items()
+        if path.startswith("/api/conversations") and "/tasks/" not in path
+        for method in operations
+    }
+    assert actual == {
+        ("/api/conversations", "get"),
+        ("/api/conversations", "post"),
+        ("/api/conversations/{conversation_id}", "get"),
+        ("/api/conversations/{conversation_id}", "patch"),
+        ("/api/conversations/{conversation_id}/messages", "get"),
+        ("/api/conversations/{conversation_id}/messages", "post"),
+        (
+            "/api/conversations/{conversation_id}/messages/"
+            "{message_id}/alternatives",
+            "get",
+        ),
+        ("/api/conversations/{conversation_id}/rollback", "post"),
+    }
+
+
 def test_rollback_cannot_reach_another_users_checkpoint_by_supplying_ids(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite3")
     runner = FakeDeepReadingRunner()
