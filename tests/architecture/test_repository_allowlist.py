@@ -14,6 +14,7 @@ DOCS_KEEP_ALLOWLIST = {
     "docs/codex-only-plans/2026-08-14-deep-reading-nodes-split-design.md",
     "docs/codex-only-plans/2026-08-14-deep-reading-nodes-split-plan.md",
     "docs/codex-only-plans/2026-08-17-context-engineering-design.md",
+    "docs/codex-only-plans/2026-08-17-context-engineering-implementation-plan.md",
 }
 
 ACTIVE_ENV_VARIABLES = {
