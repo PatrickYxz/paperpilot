@@ -8,7 +8,7 @@ rules around these values.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from paperpilot.papers import PaperCandidate
 
@@ -223,3 +223,79 @@ class PublishedConversationResult:
 class FinalizedConversationTask:
     task: ResearchTask
     conversation: ConversationRecord
+
+
+@dataclass(frozen=True)
+class NewContextArtifact:
+    artifact_id: str
+    conversation_id: str
+    task_id: str
+    tool_call_id: str
+    tool_name: str
+    kind: str
+    storage_key: str
+    sha256: str
+    byte_size: int
+    token_estimate: int
+    preview: str
+    initial_action: str
+    future_retention: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ContextArtifactRecord(NewContextArtifact):
+    pass
+
+
+@dataclass(frozen=True)
+class TurnArchiveSeedRecord:
+    archive_id: str
+    conversation_id: str
+    task_id: str
+    user_message_id: str
+    terminal_status: str
+    archive_version: str
+    seed_json: dict[str, Any]
+    supersedes_json: list[Any]
+    created_at: str
+
+
+@dataclass(frozen=True)
+class TurnArchiveRecord(TurnArchiveSeedRecord):
+    narrative_summary: str | None
+    narrative_status: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class CompressionStateRecord:
+    conversation_id: str
+    compressor_version: str
+    state: str
+    consecutive_failures: int
+    last_failure_type: str | None
+    last_input_digest: str | None
+    opened_at: str | None
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class CompressionOutcomeRecord:
+    conversation_id: str
+    compressor_version: str
+    success: bool
+    failure_type: str | None
+    input_digest: str | None
+    stage: str
+    reason: str
+    before_tokens: int
+    after_tokens: int
+    reclaimed_tokens: int
+    protected_item_count: int
+    archive_ref_count: int
+    artifact_ref_count: int
+    task_id: str | None = None
+    cache_hit_tokens: int | None = None
+    cache_miss_tokens: int | None = None
+    failure_threshold: int = 3

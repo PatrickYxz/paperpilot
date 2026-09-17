@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -16,11 +17,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from paperpilot.web.db_models import (
     ConversationPaperRow,
     ConversationRow,
+    CompressionStateRow,
+    ContextArtifactRow,
     MessageRow,
     PaperRow,
     ResearchTaskRow,
     TaskArtifactRow,
     TaskEventRow,
+    TurnArchiveRow,
     UserRow,
 )
 from paperpilot.web.store.records import (
@@ -34,10 +38,17 @@ from paperpilot.web.store.records import (
     TaskEvent,
     TaskEventBatch,
     WebUser,
+    CompressionStateRecord,
+    ContextArtifactRecord,
+    TurnArchiveRecord,
 )
 
 
 SessionFactory = sessionmaker[Session]
+
+
+class ContextDataCorruptionError(ValueError):
+    """Raised when an internal context JSON column is malformed."""
 
 
 def task_from_row(row: ResearchTaskRow) -> ResearchTask:
@@ -145,6 +156,71 @@ def artifact_from_row(row: TaskArtifactRow) -> TaskArtifact:
         payload=decode_payload(row.payload_json),
         created_at=row.created_at,
     )
+
+
+def context_artifact_from_row(row: ContextArtifactRow) -> ContextArtifactRecord:
+    return ContextArtifactRecord(
+        artifact_id=row.artifact_id,
+        conversation_id=row.conversation_id,
+        task_id=row.task_id,
+        tool_call_id=row.tool_call_id,
+        tool_name=row.tool_name,
+        kind=row.kind,
+        storage_key=row.storage_key,
+        sha256=row.sha256,
+        byte_size=row.byte_size,
+        token_estimate=row.token_estimate,
+        preview=row.preview,
+        initial_action=row.initial_action,
+        future_retention=row.future_retention,
+        created_at=row.created_at,
+    )
+
+
+def turn_archive_from_row(row: TurnArchiveRow) -> TurnArchiveRecord:
+    return TurnArchiveRecord(
+        archive_id=row.archive_id,
+        conversation_id=row.conversation_id,
+        task_id=row.task_id,
+        user_message_id=row.user_message_id,
+        terminal_status=row.terminal_status,
+        archive_version=row.archive_version,
+        seed_json=decode_context_json(row.seed_json, "seed_json"),
+        supersedes_json=decode_context_json(
+            row.supersedes_json, "supersedes_json"
+        ),
+        created_at=row.created_at,
+        narrative_summary=row.narrative_summary,
+        narrative_status=row.narrative_status,
+        updated_at=row.updated_at,
+    )
+
+
+def compression_state_from_row(row: CompressionStateRow) -> CompressionStateRecord:
+    return CompressionStateRecord(
+        conversation_id=row.conversation_id,
+        compressor_version=row.compressor_version,
+        state=row.state,
+        consecutive_failures=row.consecutive_failures,
+        last_failure_type=row.last_failure_type,
+        last_input_digest=row.last_input_digest,
+        opened_at=row.opened_at,
+        updated_at=row.updated_at,
+    )
+
+
+def decode_context_json(value: object, field_name: str) -> Any:
+    try:
+        decoded = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ContextDataCorruptionError(
+            f"invalid context JSON in {field_name}"
+        ) from exc
+    if not isinstance(decoded, (dict, list)):
+        raise ContextDataCorruptionError(
+            f"context JSON in {field_name} must be an object or array"
+        )
+    return decoded
 
 
 def select_owned_task(

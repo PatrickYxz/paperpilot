@@ -31,6 +31,12 @@ from paperpilot.web.task_store import (
     UsedPaperInput,
     VALID_DEPTHS,
     WebUser,
+    CompressionOutcomeRecord,
+    CompressionStateRecord,
+    ContextArtifactRecord,
+    NewContextArtifact,
+    TurnArchiveRecord,
+    TurnArchiveSeedRecord,
 )
 
 
@@ -65,6 +71,18 @@ EXPECTED_TASK_STORE_METHODS = {
     "add_artifact",
     "list_artifacts_page",
     "get_conversation_task_updates",
+    "create_context_artifact",
+    "get_context_artifact",
+    "find_context_artifact_by_digest",
+    "seed_turn_archive",
+    "list_turn_archives",
+    "claim_turn_archive_narrative",
+    "complete_turn_archive_narrative",
+    "fail_turn_archive_narrative",
+    "get_compression_state",
+    "claim_compression_probe",
+    "record_compression_outcome",
+    "is_context_artifact_referenced",
 }
 
 
@@ -99,6 +117,18 @@ EXPECTED_TASK_STORE_SIGNATURES = {
     "add_artifact": "(self, *, task_id: 'str', kind: 'str', title: 'str', content: 'str', payload: 'dict | None' = None) -> 'TaskArtifact'",
     "list_artifacts_page": "(self, task_id: 'str', *, user_id: 'str | None', after_id: 'int', limit: 'int') -> 'TaskArtifactBatch | None'",
     "get_conversation_task_updates": "(self, conversation_id: 'str', task_id: 'str', *, user_id: 'str', after_event_id: 'int' = 0, after_artifact_id: 'int' = 0, limit: 'int' = 50) -> 'TaskUpdates | None'",
+    "create_context_artifact": "(self, *, record: 'NewContextArtifact') -> 'ContextArtifactRecord'",
+    "get_context_artifact": "(self, artifact_id: 'str', *, conversation_id: 'str') -> 'ContextArtifactRecord | None'",
+    "find_context_artifact_by_digest": "(self, *, conversation_id: 'str', tool_name: 'str', sha256: 'str') -> 'ContextArtifactRecord | None'",
+    "seed_turn_archive": "(self, *, seed: 'TurnArchiveSeedRecord') -> 'TurnArchiveRecord'",
+    "list_turn_archives": "(self, conversation_id: 'str') -> 'list[TurnArchiveRecord]'",
+    "claim_turn_archive_narrative": "(self, archive_id: 'str') -> 'TurnArchiveRecord | None'",
+    "complete_turn_archive_narrative": "(self, archive_id: 'str', *, narrative_summary: 'str') -> 'TurnArchiveRecord'",
+    "fail_turn_archive_narrative": "(self, archive_id: 'str') -> 'TurnArchiveRecord'",
+    "get_compression_state": "(self, conversation_id: 'str', compressor_version: 'str') -> 'CompressionStateRecord'",
+    "claim_compression_probe": "(self, conversation_id: 'str', compressor_version: 'str') -> 'CompressionStateRecord | None'",
+    "record_compression_outcome": "(self, *, outcome: 'CompressionOutcomeRecord') -> 'CompressionStateRecord'",
+    "is_context_artifact_referenced": "(self, *, artifact_id: 'str') -> 'bool'",
 }
 
 
@@ -140,6 +170,12 @@ def test_task_store_reexports_canonical_records_and_errors() -> None:
     assert UsedPaperInput is records.UsedPaperInput
     assert PublishedConversationResult is records.PublishedConversationResult
     assert FinalizedConversationTask is records.FinalizedConversationTask
+    assert CompressionOutcomeRecord is records.CompressionOutcomeRecord
+    assert CompressionStateRecord is records.CompressionStateRecord
+    assert ContextArtifactRecord is records.ContextArtifactRecord
+    assert NewContextArtifact is records.NewContextArtifact
+    assert TurnArchiveRecord is records.TurnArchiveRecord
+    assert TurnArchiveSeedRecord is records.TurnArchiveSeedRecord
 
 
 def test_conversation_router_keeps_compatibility_entrypoint() -> None:

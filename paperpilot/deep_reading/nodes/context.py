@@ -7,6 +7,7 @@ from typing import Any
 
 from paperpilot.papers import PaperCandidate
 from paperpilot.tools.types import Tool
+from paperpilot.web.config import ContextManagementConfig
 from paperpilot.web.task_store import TaskStore
 
 PaperSearch = Callable[[str, int], list[PaperCandidate]]
@@ -27,10 +28,12 @@ class DeepReadingContext:
     mcp_tools: Mapping[str, Tool]
     paper_search: PaperSearch
     event_sink: EventSink
+    context_management: ContextManagementConfig = ContextManagementConfig()
+    context_management_runtime: Any | None = None
     summary_token_threshold: int = 32_000
     summary_recent_turns: int = 6
     research_recursion_limit: int = 24
-    research_model_call_limit: int = 8
+    research_model_call_limit: int = 12
     research_tool_call_limit: int = 12
     research_max_output_tokens: int = 4096
     research_model_retries: int = 1

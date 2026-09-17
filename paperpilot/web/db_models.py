@@ -195,6 +195,94 @@ class ConversationPaperRow(Base):
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class ContextArtifactRow(Base):
+    __tablename__ = "context_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id",
+            "tool_call_id",
+            "sha256",
+            name="uq_context_artifacts_task_call_hash",
+        ),
+        Index(
+            "idx_context_artifacts_conversation_sha256",
+            "conversation_id",
+            "sha256",
+        ),
+    )
+
+    artifact_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id"), nullable=False
+    )
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("research_tasks.id"), nullable=False
+    )
+    tool_call_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    token_estimate: Mapped[int] = mapped_column(Integer, nullable=False)
+    preview: Mapped[str] = mapped_column(Text, nullable=False)
+    initial_action: Mapped[str] = mapped_column(Text, nullable=False)
+    future_retention: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class TurnArchiveRow(Base):
+    __tablename__ = "turn_archives"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id",
+            "user_message_id",
+            "archive_version",
+            name="uq_turn_archives_conversation_message_version",
+        ),
+        Index(
+            "idx_turn_archives_conversation_created",
+            "conversation_id",
+            "created_at",
+            "archive_id",
+        ),
+    )
+
+    archive_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id"), nullable=False
+    )
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("research_tasks.id"), nullable=False
+    )
+    user_message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id"), nullable=False
+    )
+    terminal_status: Mapped[str] = mapped_column(Text, nullable=False)
+    archive_version: Mapped[str] = mapped_column(Text, nullable=False)
+    seed_json: Mapped[str] = mapped_column(Text, nullable=False)
+    narrative_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    narrative_status: Mapped[str] = mapped_column(Text, nullable=False)
+    supersedes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class CompressionStateRow(Base):
+    __tablename__ = "compression_states"
+
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id"), primary_key=True
+    )
+    compressor_version: Mapped[str] = mapped_column(Text, primary_key=True)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_failure_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_input_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    opened_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 Index(
     "idx_tasks_user_created_id",
     ResearchTaskRow.user_id,

@@ -70,6 +70,7 @@ def _build_deep_reading_runner(
         task_store=store,
         checkpointer=checkpoint.saver,
         mcp_runtime=mcp_runtime,
+        research_model_name=runtime_config.research_model_name,
         summary_token_threshold=runtime_config.summary_token_threshold,
         summary_recent_turns=runtime_config.summary_recent_turns,
         research_recursion_limit=runtime_config.research_recursion_limit,
@@ -77,6 +78,7 @@ def _build_deep_reading_runner(
         research_tool_call_limit=runtime_config.research_tool_call_limit,
         research_max_output_tokens=runtime_config.research_max_output_tokens,
         research_model_retries=runtime_config.research_model_retries,
+        context_management=runtime_config.context_management,
     )
 
 

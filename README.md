@@ -146,9 +146,11 @@ docker compose up -d redis
 LANGGRAPH_STRICT_MSGPACK=true ./.venv/bin/python -m paperpilot.web.checkpoint --setup
 ```
 
-Alembic head is `20260807_0002`. Migration owns the business schema; checkpoint
-setup owns only the LangGraph tables. Do not start multiple application
-processes until both commands succeed.
+Alembic head is `20260901_0003`. Migration owns the business schema; checkpoint
+setup owns only the LangGraph tables. Migration `20260901_0003` adds the
+internal context-artifact, turn-archive, and compression-state tables and has
+no downgrade. Do not start multiple application processes until both commands
+succeed.
 
 After preparation, open two bash/zsh terminals in the repository root and load
 the same `.env` in each. Start the Worker in terminal 1 and wait until it is
@@ -173,6 +175,96 @@ set +a
 For local thread execution, set `PAPERPILOT_TASK_EXECUTOR=thread`, export the
 same two database paths, run the same migration and checkpoint setup, and start
 only the API process.
+
+## Five-layer context management
+
+The context-management runtime is provider-neutral and disabled by default.
+The master flag enables the first four layers; full LLM compaction is a
+separate flag and must be enabled only after the first four layers are stable.
+The default model is the non-thinking `deepseek-v4-flash`, with an explicit
+1,048,576-token model window.
+
+The relevant configuration is:
+
+```bash
+PAPERPILOT_RESEARCH_MODEL_NAME=deepseek-v4-flash
+PAPERPILOT_CONTEXT_MANAGEMENT_ENABLED=false
+PAPERPILOT_FULL_COMPACTION_ENABLED=false
+PAPERPILOT_CONTEXT_MODEL_WINDOW_TOKENS=1048576
+```
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `PAPERPILOT_RESEARCH_MODEL_NAME` | `deepseek-v4-flash` | Research model |
+| `PAPERPILOT_CONTEXT_MANAGEMENT_ENABLED` | `false` | Master flag |
+| `PAPERPILOT_FULL_COMPACTION_ENABLED` | `false` | Stage B LLM compaction flag |
+| `PAPERPILOT_CONTEXT_MODEL_WINDOW_TOKENS` | `1048576` | Model context window |
+| `PAPERPILOT_CONTEXT_ARTIFACT_ROOT` | `data/context-artifacts` | Artifact root |
+| `PAPERPILOT_CONTEXT_TOOL_INLINE_MAX_TOKENS` | `2000` | Tool-result inline preview |
+| `PAPERPILOT_CONTEXT_ARTIFACT_READ_MAX_TOKENS` | `2000` | One artifact-read bound |
+| `PAPERPILOT_CONTEXT_MICRO_COMPACTION_TRIGGER_RATIO` | `0.70` | Micro-compaction trigger |
+| `PAPERPILOT_CONTEXT_MICRO_COMPACTION_MIN_RECLAIM_TOKENS` | `8000` | Minimum micro reclaim |
+| `PAPERPILOT_CONTEXT_MICRO_COMPACTION_MIN_RECLAIM_RATIO` | `0.10` | Minimum micro reclaim ratio |
+| `PAPERPILOT_CONTEXT_MICRO_COMPACTION_KEEP_RECENT_TOOL_RESULTS` | `3` | Recent tool results kept |
+| `PAPERPILOT_CONTEXT_ARCHIVE_BUDGET_TOKENS` | `4000` | Archive view budget |
+| `PAPERPILOT_CONTEXT_ARCHIVE_MAX_RECORDS` | `5` | Maximum archive records |
+| `PAPERPILOT_CONTEXT_ARCHIVE_RECENT_RECORDS` | `2` | Recent archive records |
+| `PAPERPILOT_CONTEXT_FULL_COMPACTION_TRIGGER_RATIO` | `0.80` | Stage B trigger |
+| `PAPERPILOT_CONTEXT_SESSION_MEMORY_TARGET_RATIO` | `0.65` | Stage A target |
+| `PAPERPILOT_CONTEXT_FULL_COMPACTION_TARGET_RATIO` | `0.50` | Stage B target |
+| `PAPERPILOT_CONTEXT_FULL_COMPACTION_RECENT_TURNS` | `2` | Protected recent turns |
+| `PAPERPILOT_CONTEXT_COMPRESSION_FAILURE_THRESHOLD` | `3` | Breaker failure threshold |
+| `PAPERPILOT_CONTEXT_COMPRESSION_TRANSIENT_RETRY_COUNT` | `1` | Transient compressor retries |
+| `PAPERPILOT_CONTEXT_COMPRESSION_BREAKER_COOLDOWN_SECONDS` | `300` | Breaker cooldown |
+| `PAPERPILOT_CONTEXT_SAFETY_MARGIN_RATIO` | `0.05` | Input-budget safety margin |
+
+The model input budget is the 1,048,576-token window minus configured output
+tokens and the safety margin. All candidate views are counted again before
+adoption. When the master flag is false, the existing summary and graph path
+remain active and no context-artifact root or context database write is
+created.
+
+### Artifact and database operations
+
+Set `PAPERPILOT_CONTEXT_ARTIFACT_ROOT` to a directory owned by the API/Worker
+operating user. For a deployment directory, create it before startup and use
+permissions such as `chmod 750 data/context-artifacts`; published files are
+immutable and should not be edited by hand. The first version does not
+automatically delete published artifacts. A failed call may remove only its own
+unpublished temporary/final files.
+
+Back up the business SQLite file, the LangGraph checkpoint SQLite file, and the
+entire artifact root as one timestamped set before enabling the flags:
+
+```bash
+BACKUP_DIR="data/backups/context-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP_DIR"
+sqlite3 "$PAPERPILOT_TASK_DB_PATH" ".backup '$BACKUP_DIR/business.sqlite3'"
+sqlite3 "$PAPERPILOT_LANGGRAPH_CHECKPOINT_DB_PATH" ".backup '$BACKUP_DIR/checkpoints.sqlite3'"
+cp -a "$PAPERPILOT_CONTEXT_ARTIFACT_ROOT" "$BACKUP_DIR/context-artifacts"
+sqlite3 "$BACKUP_DIR/business.sqlite3" "PRAGMA integrity_check;"
+sqlite3 "$BACKUP_DIR/checkpoints.sqlite3" "PRAGMA integrity_check;"
+```
+
+Deploy the code with both flags false, run Alembic `20260901_0003`, and verify
+the old Conversation and new Task baseline. Then enable
+`PAPERPILOT_CONTEXT_MANAGEMENT_ENABLED=true` for internal users and observe
+the first four layers. Only after that baseline is stable, enable
+`PAPERPILOT_FULL_COMPACTION_ENABLED=true` and observe candidate rejection,
+compression, breaker, latency, and Task outcomes. 禁用时，关闭两个 flag（set
+both flags to false）并重启 API/Worker。To recover to the pre-migration code,
+stop all processes, restore the matching business/checkpoint/artifact backup
+set, and deploy the old code; do not run old ORM code against the migrated
+database and call that a completed rollback.
+
+Context events are operational metadata only. They may contain bounded counts,
+safe identifiers, digests, stages, reasons, validation types, and breaker
+states, but must not contain Prompt text, user text, paper正文, full tool
+output, hidden reasoning, or credentials. Provider cache hit/miss fields are
+recorded only when the provider actually returns them; missing fields remain
+`None`. Relevant event types include `artifact_externalized`,
+`micro_compaction_completed`, `turn_archive_seeded`, `turn_archive_enriched`,
+`turn_archive_failed`, `compression_*`, and `context_capacity_exhausted`.
 
 ## Capacity, health, and retry operations
 
@@ -225,17 +317,17 @@ and a 14,400-second Redis visibility timeout. Keep
 ## Agent and nested-retrieval budgets
 
 One execution attempt defaults to
-`PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT=8`,
+`PAPERPILOT_RESEARCH_MODEL_CALL_LIMIT=12`,
 `PAPERPILOT_RESEARCH_TOOL_CALL_LIMIT=12`,
 `PAPERPILOT_RESEARCH_MAX_OUTPUT_TOKENS=4096`,
 `PAPERPILOT_RESEARCH_MODEL_RETRIES=1`, and a recursion limit of 24. Two
-structured-response attempts share the configured total by receiving at most 4
+structured-response attempts share the configured total by receiving at most 6
 logical model calls and 6 tool calls each. The DeepSeek client used by this
 agent has provider retries disabled; LangChain middleware owns the one retry.
 
-At the defaults, 8 logical model calls times 4,096 output tokens yields at most
-32,768 generated tokens in one execution attempt. The initial execution plus
-three infrastructure retries yields an extreme replay bound of 131,072
+At the defaults, 12 logical model calls times 4,096 output tokens yields at most
+49,152 generated tokens in one execution attempt. The initial execution plus
+three infrastructure retries yields an extreme replay bound of 196,608
 generated tokens. These are guardrail calculations, not billing guarantees:
 input tokens, provider attempts, and provider usage metadata remain separate.
 
@@ -293,6 +385,12 @@ search, temporary SQLite files, and broker doubles. It validates orchestration,
 ownership, budgets, retry classification, and persistence without paid calls.
 It does not prove live DeepSeek, arXiv, Hugging Face cache, MCP subprocess,
 Semantic Scholar, DashScope, Redis, or Celery-worker connectivity.
+
+本地测试不等于生产收益。没有真实 DeepSeek 流量和线上观测，不能据此声称
+输入 Token 降低 75%、缓存命中率提高、成本下降或线上成功率提升。上线验收还应
+记录输入 Token 的平均值/p50/p95、Artifact 外置和读取、DROP/micro/两阶段压缩
+事件、Archive 成败、Candidate rejection、breaker 三态、Provider cache
+hit/miss、Task 成功率、p95 延迟和估算成本。
 
 A real-model smoke test is a separate manual integration gate. It requires
 explicit approval before execution because it uses real credentials, network

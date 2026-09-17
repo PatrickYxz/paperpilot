@@ -9,10 +9,12 @@ import textwrap
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 from langchain.messages import AIMessage, HumanMessage
+from langchain_core.outputs import LLMResult
 from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
@@ -29,7 +31,9 @@ from paperpilot.deep_reading.runner import (
     DeepReadingRunner,
     build_deep_reading_model,
 )
+from paperpilot.deep_reading.model_usage import DeepSeekUsageCallback
 from paperpilot.deep_reading.schemas import ConversationSummary
+from paperpilot.web.config import ContextManagementConfig
 from paperpilot.papers import PaperCandidate
 from paperpilot.tools.types import Tool
 from paperpilot.tools.mcp_client import (
@@ -140,7 +144,8 @@ class _SummaryParserErrorModel:
         self.structured_output_calls.append((schema, include_raw))
         return self
 
-    def invoke(self, _model_input: object) -> object:
+    def invoke(self, _model_input: object, config: object | None = None) -> object:
+        del config
         self.invoke_count += 1
         return {
             "raw": AIMessage(content="secret-token full-paper-text"),
@@ -164,7 +169,8 @@ class _ProviderFailureModel:
         self.structured_output_calls.append((schema, include_raw))
         return self
 
-    def invoke(self, _model_input: object) -> object:
+    def invoke(self, _model_input: object, config: object | None = None) -> object:
+        del config
         self.invoke_count += 1
         raise self.failure
 
@@ -225,6 +231,60 @@ def _runner(store, checkpoint_runtime, mcp_runtime, model_factory):
     )
 
 
+def _emit_research_usage(
+    callback: DeepSeekUsageCallback,
+    *,
+    prompt_tokens: int,
+) -> None:
+    run_id = uuid4()
+    callback.on_chat_model_start(
+        {"kwargs": {"model": "deepseek-chat"}},
+        [[]],
+        run_id=run_id,
+        metadata={
+            "paperpilot_stage": "research",
+            "prompt_version": "research-v6",
+            "ls_model_name": "deepseek-chat",
+        },
+    )
+    callback.on_llm_end(
+        LLMResult(
+            generations=[[]],
+            llm_output={
+                "model_name": "deepseek-chat",
+                "token_usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": 5,
+                    "total_tokens": prompt_tokens + 5,
+                    "prompt_cache_hit_tokens": prompt_tokens - 10,
+                    "prompt_cache_miss_tokens": 10,
+                },
+            },
+        ),
+        run_id=run_id,
+    )
+
+
+class _UsageEmittingGraph:
+    def __init__(self, graph: Any, *, failure: Exception | None = None) -> None:
+        self._graph = graph
+        self._failure = failure
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._graph, name)
+
+    def invoke(self, *args: object, **kwargs: object) -> object:
+        config = cast(dict[str, object], kwargs["config"])
+        callbacks = cast(list[object], config["callbacks"])
+        assert len(callbacks) == 1
+        callback = cast(DeepSeekUsageCallback, callbacks[0])
+        _emit_research_usage(callback, prompt_tokens=100)
+        _emit_research_usage(callback, prompt_tokens=50)
+        if self._failure is not None:
+            raise self._failure
+        return self._graph.invoke(*args, **kwargs)
+
+
 def _artifact_count(store: TaskStore, task_id: str, user_id: str) -> int:
     batch = store.list_artifacts_page(
         task_id,
@@ -245,7 +305,7 @@ def _execute_business_sql(
         connection.execute(text(statement), parameters)
 
 
-def test_deepseek_model_disables_provider_retries_and_bounds_output(
+def test_deepseek_model_uses_explicit_model_and_bounds_output(
     monkeypatch,
 ) -> None:
     construction: list[dict[str, object]] = []
@@ -258,17 +318,45 @@ def test_deepseek_model_disables_provider_retries_and_bounds_output(
 
     monkeypatch.setattr(langchain_deepseek, "ChatDeepSeek", RecordingChatDeepSeek)
 
-    model = build_deep_reading_model(research_max_output_tokens=4096)
+    model = build_deep_reading_model(
+        model_name="deepseek-v4-flash",
+        research_max_output_tokens=4096,
+    )
 
     assert isinstance(model, RecordingChatDeepSeek)
     assert construction == [
         {
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "temperature": 0,
             "max_tokens": 4096,
             "max_retries": 0,
         }
     ]
+
+
+def test_v1_complete_checkpoint_is_accepted_as_read_only_recovery_base() -> None:
+    snapshot = SimpleNamespace(
+        created_at="2026-09-01T00:00:00+00:00",
+        next=(),
+        values={
+            "schema_version": 1,
+            "graph_version": "conversation-v1",
+            "current_task_id": "task-1",
+            "current_user_message_id": "message-1",
+            "published_message_id": "assistant-1",
+        },
+        config={"configurable": {"checkpoint_id": "checkpoint-1"}},
+    )
+    task = SimpleNamespace(id="task-1")
+    user_message = SimpleNamespace(id="message-1")
+    assistant = SimpleNamespace(id="assistant-1")
+
+    assert runner_module._is_trusted_recovery_snapshot(
+        snapshot,
+        task=task,
+        user_message=user_message,
+        assistant=assistant,
+    ) is True
 
 
 def test_strict_checkpoint_serializer_rejects_custom_application_object(
@@ -391,6 +479,358 @@ def test_success_finalizes_business_head_and_exposes_frozen_checkpoint(tmp_path)
             checkpoint.checkpoint_id = "mutated"  # type: ignore[misc]
         assert runner.read_checkpoint(conversation.id, "missing") is None
         assert len(calls) == 1
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_enabled_runner_persists_seed_after_finalize_and_enriches_narrative(tmp_path) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    calls: list[str] = []
+
+    class _NarrativeModel(_RecordingModel):
+        def with_structured_output(self, _schema):
+            return self
+
+        def invoke(self, _messages, config=None):
+            del config
+            return {"summary": "The completed turn was archived."}
+
+    model = _NarrativeModel(calls=[])
+    runner = DeepReadingRunner(
+        task_store=store,
+        checkpointer=checkpoint_runtime.saver,
+        mcp_runtime=mcp_runtime,
+        model_factory=lambda: model,
+        paper_search=lambda _query, _limit: [],
+        context_management=ContextManagementConfig(enabled=True),
+    )
+    original_finalize = store.finalize_conversation_task
+    original_seed = store.seed_turn_archive
+    original_claim = store.claim_turn_archive_narrative
+    original_complete = store.complete_turn_archive_narrative
+
+    def finalize(**kwargs):
+        calls.append("finalize")
+        return original_finalize(**kwargs)
+
+    def seed(**kwargs):
+        calls.append("seed")
+        return original_seed(**kwargs)
+
+    def claim(archive_id):
+        calls.append("claim")
+        return original_claim(archive_id)
+
+    def complete(archive_id, *, narrative_summary):
+        calls.append("complete")
+        return original_complete(archive_id, narrative_summary=narrative_summary)
+
+    store.finalize_conversation_task = finalize
+    store.seed_turn_archive = seed
+    store.claim_turn_archive_narrative = claim
+    store.complete_turn_archive_narrative = complete
+    try:
+        turn = _new_turn(store, user, conversation, "archive this completed turn")
+        assert runner.run(turn.task.id) is True
+
+        archives = store.list_turn_archives(conversation.id)
+        assert len(archives) == 1
+        assert archives[0].terminal_status == "success"
+        assert archives[0].seed_json["user_goal"]["exact_text"] == (
+            "archive this completed turn"
+        )
+        assert archives[0].narrative_status == "complete"
+        assert calls.index("finalize") < calls.index("seed") < calls.index("claim") < calls.index("complete")
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_failed_terminal_task_gets_failed_seed_without_reversing_task_status(tmp_path) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = DeepReadingRunner(
+        task_store=store,
+        checkpointer=checkpoint_runtime.saver,
+        mcp_runtime=mcp_runtime,
+        model_factory=_ModelFactory([], fail=True),
+        paper_search=lambda _query, _limit: [],
+        context_management=ContextManagementConfig(enabled=True),
+    )
+    try:
+        turn = _new_turn(store, user, conversation, "archive failed turn")
+        assert runner.run(turn.task.id) is True
+        task = store.get_task(turn.task.id, user_id=user.id)
+        assert task is not None and task.status == "failed"
+        archives = store.list_turn_archives(conversation.id)
+        assert len(archives) == 1
+        assert archives[0].terminal_status == "failed"
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_terminal_archive_resolves_artifact_refs_and_excludes_completed_todos(tmp_path) -> None:
+    from paperpilot.web.store.records import NewContextArtifact
+
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = DeepReadingRunner(
+        task_store=store,
+        checkpointer=checkpoint_runtime.saver,
+        mcp_runtime=mcp_runtime,
+        model_factory=_ModelFactory([]),
+        context_management=ContextManagementConfig(enabled=True),
+    )
+    try:
+        turn = _new_turn(store, user, conversation, "archive authoritative refs")
+        store.create_context_artifact(
+            record=NewContextArtifact(
+                artifact_id="artifact-1",
+                conversation_id=conversation.id,
+                task_id=turn.task.id,
+                tool_call_id="call-1",
+                tool_name="search_related_papers",
+                kind="search",
+                storage_key="artifact-1.json",
+                sha256="a" * 64,
+                byte_size=12,
+                token_estimate=4,
+                preview="preview",
+                initial_action="EXTERNALIZE_NOW",
+                future_retention="CLEARABLE_AFTER_USE",
+                created_at="2026-09-01T00:00:00+00:00",
+            )
+        )
+        runner._archive_terminal_best_effort(
+            task=turn.task,
+            user_message=turn.user_message,
+            terminal_status="failed",
+            snapshot=SimpleNamespace(
+                values={
+                    "research_trace": {
+                        "todos": ["todo_1:completed", "todo_2:in_progress"],
+                        "artifact_ids": ["artifact-1"],
+                        "verification": ["research:pass"],
+                    }
+                }
+            ),
+        )
+
+        archive = store.list_turn_archives(conversation.id)[0]
+        assert archive.seed_json["artifact_refs"] == [
+            {
+                "artifact_id": "artifact-1",
+                "preview": "preview",
+                "sha256": "a" * 64,
+                "token_estimate": 4,
+            }
+        ]
+        assert archive.seed_json["unresolved_todos"] == ["todo_2:in_progress"]
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_redelivery_repairs_missing_archive_after_business_completion(tmp_path) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    model_factory = _ModelFactory([])
+    runner = DeepReadingRunner(
+        task_store=store,
+        checkpointer=checkpoint_runtime.saver,
+        mcp_runtime=mcp_runtime,
+        model_factory=model_factory,
+        paper_search=lambda _query, _limit: [],
+        context_management=ContextManagementConfig(enabled=True),
+    )
+    original_seed = store.seed_turn_archive
+    failed_once = False
+
+    def fail_first_seed(**kwargs):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise RuntimeError("simulated crash after business finalize")
+        return original_seed(**kwargs)
+
+    store.seed_turn_archive = fail_first_seed
+    try:
+        turn = _new_turn(store, user, conversation, "repair archive on redelivery")
+        assert runner.run(turn.task.id) is True
+        task = store.get_task(turn.task.id, user_id=user.id)
+        assert task is not None and task.status == "completed"
+        assert store.list_turn_archives(conversation.id) == []
+
+        store.seed_turn_archive = original_seed
+        assert runner.run(turn.task.id) is False
+        archives = store.list_turn_archives(conversation.id)
+        assert len(archives) == 1
+        assert archives[0].terminal_status == "success"
+        assert archives[0].seed_json["user_goal"]["exact_text"] == (
+            "repair archive on redelivery"
+        )
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_runner_injects_callback_and_persists_one_stage_usage_event(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = _runner(store, checkpoint_runtime, mcp_runtime, _ModelFactory([]))
+    real_build = runner_module.build_deep_reading_graph
+    monkeypatch.setattr(
+        runner_module,
+        "build_deep_reading_graph",
+        lambda saver: _UsageEmittingGraph(real_build(saver)),
+    )
+    try:
+        turn = _new_turn(store, user, conversation, "measure cache")
+        runner.run(turn.task.id)
+
+        batch = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert batch is not None
+        usage_events = [item for item in batch.items if item.type == "model_usage"]
+        assert len(usage_events) == 1
+        event = usage_events[0]
+        assert event.stage == "research"
+        assert event.message == "2 model calls · 150 input tokens · 86.7% cache hit"
+        assert event.payload["prompt_version"] == "research-v6"
+        assert event.payload["call_count"] == 2
+        assert event.payload["cache_hit_tokens"] == 130
+        assert event.payload["cache_miss_tokens"] == 20
+        assert "measure cache" not in str(event.to_dict())
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_runner_flushes_usage_before_reraising_graph_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    provider_error = ConnectionError("provider reset")
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = _runner(store, checkpoint_runtime, mcp_runtime, _ModelFactory([]))
+    real_build = runner_module.build_deep_reading_graph
+    monkeypatch.setattr(
+        runner_module,
+        "build_deep_reading_graph",
+        lambda saver: _UsageEmittingGraph(real_build(saver), failure=provider_error),
+    )
+    try:
+        turn = _new_turn(store, user, conversation, "failing request")
+        with pytest.raises(ConnectionError) as exc_info:
+            runner.run(turn.task.id)
+        assert exc_info.value is provider_error
+        batch = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert batch is not None
+        assert len([item for item in batch.items if item.type == "model_usage"]) == 1
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
+def test_usage_persistence_failure_does_not_mask_graph_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    provider_error = ConnectionError("provider reset")
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = _runner(store, checkpoint_runtime, mcp_runtime, _ModelFactory([]))
+    real_build = runner_module.build_deep_reading_graph
+    real_add_event = store.add_event
+
+    def fail_usage_event(**kwargs: object) -> object:
+        if kwargs.get("type") == "model_usage":
+            raise sqlite3.OperationalError("usage write failed")
+        return real_add_event(**kwargs)
+
+    warnings: list[tuple[str, dict[str, object] | None]] = []
+
+    def record_warning(message: str, *args: object, **kwargs: object) -> None:
+        del args
+        extra = kwargs.get("extra")
+        warnings.append((message, extra if isinstance(extra, dict) else None))
+
+    monkeypatch.setattr(
+        runner_module,
+        "build_deep_reading_graph",
+        lambda saver: _UsageEmittingGraph(real_build(saver), failure=provider_error),
+    )
+    monkeypatch.setattr(store, "add_event", fail_usage_event)
+    monkeypatch.setattr(runner_module._LOGGER, "warning", record_warning)
+    try:
+        turn = _new_turn(store, user, conversation, "preserve original error")
+        with pytest.raises(ConnectionError) as exc_info:
+            runner.run(turn.task.id)
+
+        assert exc_info.value is provider_error
+        assert any(
+            extra is not None
+            and extra.get("event") == "task.model_usage_persist_failed"
+            for _message, extra in warnings
+        )
     finally:
         mcp_runtime.close()
         checkpoint_runtime.close()
@@ -566,9 +1006,12 @@ def test_runner_passes_custom_runtime_bounds_into_graph_context(
     )
     mcp_runtime = MCPRuntime(_FakeMCPClient)
     seen_bounds: list[tuple[int, int, int, int, int, int, int]] = []
+    context_config = ContextManagementConfig(enabled=True)
+    seen_context_config: list[object] = []
 
     def record_context(_state, runtime):
         context = runtime.context
+        seen_context_config.append(context.context_management)
         seen_bounds.append(
             (
                 context.summary_token_threshold,
@@ -602,12 +1045,15 @@ def test_runner_passes_custom_runtime_bounds_into_graph_context(
         research_tool_call_limit=14,
         research_max_output_tokens=2048,
         research_model_retries=0,
+        context_management=context_config,
     )
     try:
         turn = _new_turn(store, user, conversation, "Use custom runtime bounds")
         runner.run(turn.task.id)
 
         assert seen_bounds == [(1234, 3, 9, 8, 14, 2048, 0)]
+        assert seen_context_config == [context_config]
+        assert seen_context_config[0] is context_config
     finally:
         mcp_runtime.close()
         checkpoint_runtime.close()
@@ -657,7 +1103,7 @@ def test_runner_passes_default_research_bounds_into_graph_context(
         turn = _new_turn(store, user, conversation, "Use default runtime bounds")
         runner.run(turn.task.id)
 
-        assert seen_bounds == [(24, 8, 12, 4096, 1)]
+        assert seen_bounds == [(24, 12, 12, 4096, 1)]
     finally:
         mcp_runtime.close()
         checkpoint_runtime.close()
@@ -914,8 +1360,28 @@ def test_redelivery_after_finalization_failure_uses_only_trusted_complete_snapsh
         calls_after_crash = len(calls)
         factory_calls_after_crash = model_factory.factory_calls
         mcp_starts_after_crash = mcp_client.start_count
+        events_before = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events_before is not None
+        usage_count_before = len(
+            [event for event in events_before.items if event.type == "model_usage"]
+        )
 
         runner.run(turn.task.id, allow_running=True)
+        events_after = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events_after is not None
+        assert len(
+            [event for event in events_after.items if event.type == "model_usage"]
+        ) == usage_count_before
         task = store.get_task(turn.task.id, user_id=user.id)
         assert task is not None and task.status == "completed"
         assert len(calls) == calls_after_crash

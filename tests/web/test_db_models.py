@@ -8,7 +8,7 @@ from sqlalchemy.schema import CreateIndex
 from paperpilot.web.db_models import Base
 
 
-def test_web_metadata_owns_the_nine_business_tables() -> None:
+def test_web_metadata_owns_the_twelve_business_tables() -> None:
     assert set(Base.metadata.tables) == {
         "users",
         "sessions",
@@ -19,6 +19,9 @@ def test_web_metadata_owns_the_nine_business_tables() -> None:
         "conversations",
         "conversation_papers",
         "messages",
+        "context_artifacts",
+        "turn_archives",
+        "compression_states",
     }
 
 
@@ -106,6 +109,46 @@ def test_web_table_columns_match_the_existing_schema() -> None:
             "metadata_json",
             "created_at",
         ],
+        "context_artifacts": [
+            "artifact_id",
+            "conversation_id",
+            "task_id",
+            "tool_call_id",
+            "tool_name",
+            "kind",
+            "storage_key",
+            "sha256",
+            "byte_size",
+            "token_estimate",
+            "preview",
+            "initial_action",
+            "future_retention",
+            "created_at",
+        ],
+        "turn_archives": [
+            "archive_id",
+            "conversation_id",
+            "task_id",
+            "user_message_id",
+            "terminal_status",
+            "archive_version",
+            "seed_json",
+            "narrative_summary",
+            "narrative_status",
+            "supersedes_json",
+            "created_at",
+            "updated_at",
+        ],
+        "compression_states": [
+            "conversation_id",
+            "compressor_version",
+            "state",
+            "consecutive_failures",
+            "last_failure_type",
+            "last_input_digest",
+            "opened_at",
+            "updated_at",
+        ],
     }
 
     assert {
@@ -125,6 +168,22 @@ def test_timestamp_and_json_columns_remain_sqlite_text() -> None:
         "conversations": ["created_at", "updated_at", "archived_at"],
         "conversation_papers": ["created_at"],
         "messages": ["metadata_json", "created_at"],
+        "context_artifacts": ["storage_key", "sha256", "preview", "created_at"],
+        "turn_archives": [
+            "archive_version",
+            "seed_json",
+            "narrative_summary",
+            "supersedes_json",
+            "created_at",
+            "updated_at",
+        ],
+        "compression_states": [
+            "compressor_version",
+            "last_failure_type",
+            "last_input_digest",
+            "opened_at",
+            "updated_at",
+        ],
     }.items():
         table = Base.metadata.tables[table_name]
         assert {str(table.c[column_name].type) for column_name in column_names} == {
@@ -148,6 +207,8 @@ def test_metadata_declares_expected_indexes() -> None:
         "idx_conversation_papers_conversation_active",
         "idx_messages_conversation_parent_created",
         "uq_tasks_one_active_per_conversation",
+        "idx_context_artifacts_conversation_sha256",
+        "idx_turn_archives_conversation_created",
     }
 
     unique_indexes = {
@@ -166,6 +227,8 @@ def test_metadata_declares_expected_indexes() -> None:
     assert unique_constraints == {
         "uq_papers_source_external_id",
         "uq_messages_task_role",
+        "uq_context_artifacts_task_call_hash",
+        "uq_turn_archives_conversation_message_version",
     }
     active_task_index = next(
         index
@@ -207,6 +270,12 @@ def test_metadata_declares_expected_foreign_keys_and_autoincrement() -> None:
         ("messages", "conversation_id", "conversations.id"),
         ("messages", "task_id", "research_tasks.id"),
         ("messages", "parent_message_id", "messages.id"),
+        ("context_artifacts", "conversation_id", "conversations.id"),
+        ("context_artifacts", "task_id", "research_tasks.id"),
+        ("turn_archives", "conversation_id", "conversations.id"),
+        ("turn_archives", "task_id", "research_tasks.id"),
+        ("turn_archives", "user_message_id", "messages.id"),
+        ("compression_states", "conversation_id", "conversations.id"),
     }
     assert metadata.tables["task_events"].dialect_options["sqlite"]["autoincrement"]
     assert metadata.tables["task_artifacts"].dialect_options["sqlite"][

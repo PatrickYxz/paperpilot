@@ -10,7 +10,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from paperpilot.deep_reading.runner import DeepReadingRunner
-from paperpilot.deep_reading.state import GRAPH_VERSION, SCHEMA_VERSION
+from paperpilot.deep_reading.state import (
+    GRAPH_VERSION,
+    LEGACY_GRAPH_VERSION,
+    LEGACY_SCHEMA_VERSION,
+    SCHEMA_VERSION,
+)
 from paperpilot.web.routes.auth import RequireUser
 from paperpilot.web.routes.conversations.presenters import conversation_dict
 from paperpilot.web.schemas import ConversationResponse, RollbackRequest
@@ -138,9 +143,9 @@ def _validate_rollback_checkpoint(
     state = getattr(checkpoint, "state", None)
     if not isinstance(state, dict):
         raise HTTPException(status_code=409, detail="checkpoint schema is unsupported")
-    if state.get("schema_version") != SCHEMA_VERSION:
+    if state.get("schema_version") not in {SCHEMA_VERSION, LEGACY_SCHEMA_VERSION}:
         raise HTTPException(status_code=409, detail="checkpoint schema is unsupported")
-    if state.get("graph_version") != GRAPH_VERSION:
+    if state.get("graph_version") not in {GRAPH_VERSION, LEGACY_GRAPH_VERSION}:
         raise HTTPException(status_code=409, detail="checkpoint graph is unsupported")
     if getattr(checkpoint, "is_complete", None) is not True:
         raise HTTPException(status_code=409, detail="checkpoint is not complete")

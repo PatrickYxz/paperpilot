@@ -360,6 +360,7 @@ def test_worker_build_passes_one_custom_config_to_checkpoint_and_runner(
             "task_store": store,
             "checkpointer": checkpoint.saver,
             "mcp_runtime": mcp,
+            "research_model_name": "deepseek-v4-flash",
             "summary_token_threshold": 4321,
             "summary_recent_turns": 4,
             "research_recursion_limit": 30,
@@ -367,6 +368,7 @@ def test_worker_build_passes_one_custom_config_to_checkpoint_and_runner(
             "research_tool_call_limit": 14,
             "research_max_output_tokens": 2048,
             "research_model_retries": 0,
+            "context_management": config.context_management,
         }
     ]
 
@@ -448,6 +450,7 @@ def test_app_default_runtime_uses_injected_store_directory_and_closes_in_order(
             "task_store": store,
             "checkpointer": checkpoint.saver,
             "mcp_runtime": mcp,
+            "research_model_name": "deepseek-v4-flash",
             "summary_token_threshold": 2468,
             "summary_recent_turns": 5,
             "research_recursion_limit": 11,
@@ -455,6 +458,7 @@ def test_app_default_runtime_uses_injected_store_directory_and_closes_in_order(
             "research_tool_call_limit": 18,
             "research_max_output_tokens": 3072,
             "research_model_retries": 0,
+            "context_management": config.context_management,
         }
     ]
     assert close_order == ["executor", "checkpoint", "mcp"]

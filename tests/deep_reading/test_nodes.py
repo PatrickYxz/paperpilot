@@ -9,6 +9,7 @@ from importlib import import_module
 from threading import Barrier
 from types import SimpleNamespace
 from typing import Any, Sequence, get_type_hints
+from xml.etree import ElementTree
 
 import pytest
 from langchain.messages import AIMessage, HumanMessage, RemoveMessage
@@ -71,9 +72,11 @@ class _StructuredModel:
     def __init__(self, result: object) -> None:
         self.result = result
         self.invocations: list[object] = []
+        self.configs: list[object | None] = []
 
-    def invoke(self, model_input: object) -> object:
+    def invoke(self, model_input: object, config: object | None = None) -> object:
         self.invocations.append(model_input)
+        self.configs.append(config)
         return self.result
 
 
@@ -101,8 +104,8 @@ class _IncludeRawStructuredModel:
     def __init__(self, structured: _StructuredModel) -> None:
         self.structured = structured
 
-    def invoke(self, model_input: object) -> object:
-        parsed = self.structured.invoke(model_input)
+    def invoke(self, model_input: object, config: object | None = None) -> object:
+        parsed = self.structured.invoke(model_input, config=config)
         return {
             "raw": AIMessage(content=""),
             "parsed": parsed,
@@ -216,7 +219,8 @@ class _ProviderFailureModel:
             raise self.failure
         return self
 
-    def invoke(self, _model_input: object) -> object:
+    def invoke(self, _model_input: object, config: object | None = None) -> object:
+        del config
         self.invoke_count += 1
         raise self.failure
 
@@ -432,7 +436,7 @@ def test_context_is_frozen_and_rejects_unbounded_configuration() -> None:
         default_context.research_tool_call_limit,
         default_context.research_max_output_tokens,
         default_context.research_model_retries,
-    ) == (24, 8, 12, 4096, 1)
+    ) == (24, 12, 12, 4096, 1)
 
     with pytest.raises(FrozenInstanceError):
         context.task_id = "changed"  # type: ignore[misc]
@@ -455,11 +459,17 @@ def test_state_has_one_complete_research_result_field() -> None:
         "messages",
         "conversation_summary",
         "current_task_id",
-        "current_user_message_id",
-        "primary_paper_id",
-        "active_paper_ids",
-        "research_result",
-        "answer_draft",
+            "current_user_message_id",
+            "primary_paper_id",
+            "active_paper_ids",
+            "context_view",
+            "continuation_capsule",
+            "retrieved_archive_ids",
+            "context_input_tokens",
+            "research_result",
+            "research_trace",
+            "research_context_delta",
+            "answer_draft",
         "published_message_id",
         "error",
     }
@@ -514,6 +524,7 @@ def test_initialize_turn_clears_per_turn_fields_and_routes_with_command(
         "current_user_message_id": "message-old",
         "primary_paper_id": "paper-primary",
         "active_paper_ids": ["paper-primary", "paper-related"],
+        "continuation_capsule": {"current_goal": "preserved capsule"},
         "research_result": {
             "evidence_items": [{"id": "old-evidence"}],
             "used_papers": [],
@@ -532,10 +543,15 @@ def test_initialize_turn_clears_per_turn_fields_and_routes_with_command(
     assert isinstance(command, Command)
     assert command.goto == expected_goto
     assert command.update == {
-        "schema_version": 1,
-        "graph_version": "conversation-v1",
+        "schema_version": 2,
+        "graph_version": "conversation-v2",
         "current_task_id": "task-current",
         "current_user_message_id": "message-current",
+        "context_view": None,
+        "retrieved_archive_ids": [],
+        "context_input_tokens": None,
+        "research_trace": None,
+        "research_context_delta": None,
         "research_result": None,
         "answer_draft": None,
         "published_message_id": None,
@@ -546,6 +562,7 @@ def test_initialize_turn_clears_per_turn_fields_and_routes_with_command(
     assert merged["conversation_summary"] == old_summary
     assert merged["primary_paper_id"] == "paper-primary"
     assert merged["active_paper_ids"] == ["paper-primary", "paper-related"]
+    assert merged["continuation_capsule"] == {"current_goal": "preserved capsule"}
 
 
 def test_needs_summary_uses_exact_character_estimate_boundary() -> None:
@@ -606,6 +623,15 @@ def test_summarize_history_writes_json_and_retains_recent_six_turns() -> None:
     )
 
     assert model.schemas == [ConversationSummary]
+    assert model.structured.configs == [
+        {
+            "tags": ["paperpilot:model"],
+            "metadata": {
+                "paperpilot_stage": "summary",
+                "prompt_version": "summary-v2",
+            },
+        }
+    ]
     assert update["conversation_summary"] == SUMMARY.model_dump(mode="json")
     message_update = update["messages"]
     assert isinstance(message_update[0], RemoveMessage)
@@ -635,6 +661,56 @@ def test_summarize_history_writes_json_and_retains_recent_six_turns() -> None:
         "h-7",
         "a-7",
         "message-current",
+    ]
+
+
+def test_summarize_history_system_message_uses_semantic_xml_sop() -> None:
+    model = _FakeModel(SUMMARY.model_dump(mode="json"))
+
+    summarize_history(
+        _bound_state(
+            messages=[
+                HumanMessage(
+                    content="Current question",
+                    id="message-current",
+                )
+            ]
+        ),
+        Runtime(context=_context(model, threshold=1)),
+    )
+
+    summary_input = model.structured.invocations[0]
+    content = summary_input[0].content
+    assert isinstance(content, str)
+    root = ElementTree.fromstring(content)
+
+    assert root.tag == "conversation_summarizer"
+    assert [child.tag for child in root] == [
+        "role",
+        "objective",
+        "definitions",
+        "instruction_priority",
+        "summary_sop",
+        "field_policy",
+        "merge_policy",
+        "conflict_policy",
+        "compression_policy",
+        "trust_boundaries",
+        "output_contract",
+    ]
+    field_policy = root.find("field_policy")
+    assert field_policy is not None
+    assert [child.tag for child in field_policy] == [
+        "confirmed_facts",
+        "paper_findings",
+        "comparison_context",
+        "open_questions",
+    ]
+    trust_boundaries = root.find("trust_boundaries")
+    assert trust_boundaries is not None
+    assert [child.tag for child in trust_boundaries] == [
+        "previous_summary",
+        "conversation_messages",
     ]
 
 
@@ -820,6 +896,11 @@ def test_research_evidence_writes_complete_json_research_result(monkeypatch) -> 
     update = research_evidence(state, Runtime(context=context))
 
     assert seen == [(state, context)]
+    assert set(update) == {"research_result"}
+    assert "messages" not in update
+    assert "todos" not in update
+    assert "agent_status_bar" not in update
+    assert "research_tool_call_count" not in update
     assert update == {"research_result": result.model_dump(mode="json")}
     assert update["research_result"]["used_papers"][0]["paper"] == (
         paper.model_dump(mode="json")
@@ -1069,6 +1150,15 @@ def test_write_answer_uses_bounded_trusted_context_and_writes_json_draft() -> No
     )
 
     assert model.schemas == [AnswerDraft]
+    assert model.structured.configs == [
+        {
+            "tags": ["paperpilot:model"],
+            "metadata": {
+                "paperpilot_stage": "write_answer",
+                "prompt_version": "answer-v3",
+            },
+        }
+    ]
     assert update == {"answer_draft": draft.model_dump(mode="json")}
     prompt_messages = model.structured.invocations[0]
     assert [message.id for message in prompt_messages if message.id] == [
@@ -1085,6 +1175,77 @@ def test_write_answer_uses_bounded_trusted_context_and_writes_json_draft() -> No
     assert "Only one related paper was used." in rendered
     assert "Primary paper" in rendered
     assert "Trusted abstract" in rendered
+
+
+def test_write_answer_uses_same_context_view_without_legacy_summary() -> None:
+    store = _NodeStore()
+    draft = AnswerDraft(
+        content="Context-view answer.",
+        citations=[],
+        result_quality="partial",
+    )
+    model = _FakeModel(draft.model_dump(mode="json"))
+    state = _bound_state(
+        messages=[HumanMessage(content="Current question", id="message-current")],
+        conversation_summary=SUMMARY.model_dump(mode="json"),
+        context_view={
+            "active_projection": {"current_goal": "Current question"},
+            "messages": [{"role": "user", "content": "Current question"}],
+            "retrieved_archives": [],
+        },
+        research_result=_research_result().model_dump(mode="json"),
+    )
+
+    write_answer(state, Runtime(context=_node_context(store=store, model=model)))
+
+    rendered = "\n".join(str(message.content) for message in model.structured.invocations[0])
+    assert "PaperPilot Context View:" in rendered
+    assert "Conversation summary:" not in rendered
+    assert "legacy" not in rendered
+
+
+def test_write_answer_system_message_uses_semantic_xml_sop() -> None:
+    draft = AnswerDraft(
+        content="Insufficient evidence.",
+        citations=[],
+        result_quality="partial",
+    )
+    model = _FakeModel(draft.model_dump(mode="json"))
+
+    write_answer(
+        _bound_state(research_result=_research_result().model_dump(mode="json")),
+        Runtime(context=_node_context(store=_NodeStore(), model=model)),
+    )
+
+    model_input = model.structured.invocations[0]
+    content = model_input[0].content
+    assert isinstance(content, str)
+    root = ElementTree.fromstring(content)
+
+    assert root.tag == "answer_writer"
+    assert [child.tag for child in root] == [
+        "role",
+        "objective",
+        "definitions",
+        "instruction_priority",
+        "answer_sop",
+        "claim_policy",
+        "citation_policy",
+        "conflict_policy",
+        "limitation_policy",
+        "quality_policy",
+        "style_policy",
+        "trust_boundaries",
+        "output_contract",
+    ]
+    trust_boundaries = root.find("trust_boundaries")
+    assert trust_boundaries is not None
+    assert [child.tag for child in trust_boundaries] == [
+        "conversation_summary",
+        "conversation_history",
+        "paper_metadata",
+        "research_result",
+    ]
 
 
 def test_write_answer_rejects_citation_outside_research_result() -> None:

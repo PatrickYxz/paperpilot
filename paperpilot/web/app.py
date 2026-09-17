@@ -130,6 +130,7 @@ def _create_app(
             task_store=store,
             checkpointer=checkpoint.saver,
             mcp_runtime=mcp,
+            research_model_name=config.research_model_name,
             summary_token_threshold=config.summary_token_threshold,
             summary_recent_turns=config.summary_recent_turns,
             research_recursion_limit=config.research_recursion_limit,
@@ -137,6 +138,7 @@ def _create_app(
             research_tool_call_limit=config.research_tool_call_limit,
             research_max_output_tokens=config.research_max_output_tokens,
             research_model_retries=config.research_model_retries,
+            context_management=config.context_management,
         )
 
     if task_executor is None:

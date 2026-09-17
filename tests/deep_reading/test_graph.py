@@ -1,6 +1,7 @@
 """Fixed orchestration and checkpoint semantics for the deep-reading graph."""
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from langchain.messages import HumanMessage
@@ -19,6 +20,7 @@ from paperpilot.deep_reading.schemas import (
 )
 from paperpilot.papers import PaperCandidate
 from paperpilot.web.task_store import TaskStore
+from paperpilot.web.config import ContextManagementConfig
 
 
 def _context(
@@ -118,6 +120,53 @@ def test_graph_follows_fixed_path_with_only_optional_summary(monkeypatch) -> Non
         )
 
         assert seen == expected
+
+
+def test_graph_master_flag_routes_through_prepare_context(monkeypatch) -> None:
+    seen: list[str] = []
+
+    def fake_node(name: str):
+        def run(state: object, runtime: object) -> dict[str, object]:
+            del state, runtime
+            seen.append(name)
+            return {}
+
+        return run
+
+    from paperpilot.deep_reading.nodes import initialize_turn as real_initialize_turn
+
+    def initialize(state, runtime):
+        seen.append("initialize_turn")
+        return real_initialize_turn(state, runtime)
+
+    monkeypatch.setattr(graph_module, "initialize_turn", initialize)
+    monkeypatch.setattr(graph_module, "prepare_context", fake_node("prepare_context"))
+    monkeypatch.setattr(
+        graph_module,
+        "prepare_primary_paper",
+        fake_node("prepare_primary_paper"),
+    )
+    monkeypatch.setattr(graph_module, "research_evidence", fake_node("research_evidence"))
+    monkeypatch.setattr(graph_module, "write_answer", fake_node("write_answer"))
+    monkeypatch.setattr(graph_module, "publish_result", fake_node("publish_result"))
+
+    graph = build_deep_reading_graph(checkpointer=None)
+    graph.invoke(
+        {"messages": [HumanMessage(content="new context request")]},
+        context=replace(
+            _context(task_id="task-context", message_id="message-context", threshold=1),
+            context_management=ContextManagementConfig(enabled=True),
+        ),
+    )
+
+    assert seen == [
+        "initialize_turn",
+        "prepare_context",
+        "prepare_primary_paper",
+        "research_evidence",
+        "write_answer",
+        "publish_result",
+    ]
 
 
 def test_in_memory_saver_preserves_history_and_long_lived_state_across_two_turns(

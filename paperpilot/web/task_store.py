@@ -10,7 +10,15 @@ from paperpilot.web.database import (
     resolve_task_db_path,
 )
 from paperpilot.web.db_migrations import ensure_database_current
-from paperpilot.web.store import conversations, messages, publications, tasks, updates, users
+from paperpilot.web.store import (
+    context_memory,
+    conversations,
+    messages,
+    publications,
+    tasks,
+    updates,
+    users,
+)
 from paperpilot.web.store.records import (
     ConversationAlternative,
     ConversationBusyError,
@@ -33,6 +41,12 @@ from paperpilot.web.store.records import (
     UsedPaperInput,
     VALID_DEPTHS,
     WebUser,
+    CompressionOutcomeRecord,
+    CompressionStateRecord,
+    ContextArtifactRecord,
+    NewContextArtifact,
+    TurnArchiveRecord,
+    TurnArchiveSeedRecord,
 )
 
 class TaskStore:
@@ -390,4 +404,118 @@ class TaskStore:
             conversation_id,
             task_id,
             **kwargs,
+        )
+
+    def create_context_artifact(
+        self,
+        *,
+        record: NewContextArtifact,
+    ) -> ContextArtifactRecord:
+        return context_memory.create_context_artifact(
+            self._session_factory,
+            record=record,
+        )
+
+    def get_context_artifact(
+        self,
+        artifact_id: str,
+        *,
+        conversation_id: str,
+    ) -> ContextArtifactRecord | None:
+        return context_memory.get_context_artifact(
+            self._session_factory,
+            artifact_id,
+            conversation_id=conversation_id,
+        )
+
+    def find_context_artifact_by_digest(
+        self,
+        *,
+        conversation_id: str,
+        tool_name: str,
+        sha256: str,
+    ) -> ContextArtifactRecord | None:
+        return context_memory.find_context_artifact_by_digest(
+            self._session_factory,
+            conversation_id=conversation_id,
+            tool_name=tool_name,
+            sha256=sha256,
+        )
+
+    def seed_turn_archive(
+        self,
+        *,
+        seed: TurnArchiveSeedRecord,
+    ) -> TurnArchiveRecord:
+        return context_memory.seed_turn_archive(self._session_factory, seed=seed)
+
+    def list_turn_archives(self, conversation_id: str) -> list[TurnArchiveRecord]:
+        return context_memory.list_turn_archives(
+            self._session_factory,
+            conversation_id,
+        )
+
+    def claim_turn_archive_narrative(
+        self,
+        archive_id: str,
+    ) -> TurnArchiveRecord | None:
+        return context_memory.claim_turn_archive_narrative(
+            self._session_factory,
+            archive_id,
+        )
+
+    def complete_turn_archive_narrative(
+        self,
+        archive_id: str,
+        *,
+        narrative_summary: str,
+    ) -> TurnArchiveRecord:
+        return context_memory.complete_turn_archive_narrative(
+            self._session_factory,
+            archive_id,
+            narrative_summary=narrative_summary,
+        )
+
+    def fail_turn_archive_narrative(self, archive_id: str) -> TurnArchiveRecord:
+        return context_memory.fail_turn_archive_narrative(
+            self._session_factory,
+            archive_id,
+        )
+
+    def get_compression_state(
+        self,
+        conversation_id: str,
+        compressor_version: str,
+    ) -> CompressionStateRecord:
+        return context_memory.get_compression_state(
+            self._session_factory,
+            conversation_id,
+            compressor_version,
+        )
+
+    def claim_compression_probe(
+        self,
+        conversation_id: str,
+        compressor_version: str,
+    ) -> CompressionStateRecord | None:
+        return context_memory.claim_compression_probe(
+            self._session_factory,
+            conversation_id,
+            compressor_version,
+        )
+
+    def record_compression_outcome(
+        self,
+        *,
+        outcome: CompressionOutcomeRecord,
+    ) -> CompressionStateRecord:
+        return context_memory.record_compression_outcome(
+            self._session_factory,
+            outcome=outcome,
+        )
+
+    def is_context_artifact_referenced(self, *, artifact_id: str) -> bool:
+        return context_memory.is_context_artifact_referenced(
+            self._session_factory,
+            artifact_id=artifact_id,
         )

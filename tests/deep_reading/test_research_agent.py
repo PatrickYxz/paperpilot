@@ -6,12 +6,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Sequence
+from xml.etree import ElementTree
 
 import pytest
 from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
     ModelRetryMiddleware,
-    ToolCallLimitMiddleware,
 )
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
@@ -25,12 +25,20 @@ from langgraph.errors import GraphRecursionError
 from pydantic import PrivateAttr
 
 from paperpilot.deep_reading.nodes import DeepReadingContext
+from paperpilot.deep_reading.context_management.editing import ResearchContextMiddleware
 from paperpilot.deep_reading.research_agent import (
     AgentResearchDecision,
     DeepReadingTaskError,
     ResearchContractError,
+    _research_messages,
     run_research_agent,
 )
+from paperpilot.deep_reading.research_status import (
+    ResearchStatusMiddleware,
+    ResearchToolBudgetMiddleware,
+    ResearchTodoMiddleware,
+)
+from paperpilot.web.config import ContextManagementConfig
 from paperpilot.papers import PaperCandidate
 from paperpilot.tools.mcp_client import (
     MCPToolError,
@@ -108,14 +116,16 @@ class _Agent:
         self,
         tools: list[Any],
         behavior: Callable[[Mapping[str, Any], int], object],
+        attempt_number: int,
     ) -> None:
         self.tools = {item.name: item for item in tools}
         self.behavior = behavior
+        self.attempt_number = attempt_number
         self.invocations: list[tuple[object, object]] = []
 
     def invoke(self, model_input: object, *, config: object) -> object:
         self.invocations.append((model_input, config))
-        return self.behavior(self.tools, len(self.invocations))
+        return self.behavior(self.tools, self.attempt_number)
 
 
 class _AgentFactory:
@@ -126,10 +136,16 @@ class _AgentFactory:
         self.behavior = behavior
         self.calls: list[dict[str, object]] = []
         self.agent: _Agent | None = None
+        self.agents: list[_Agent] = []
 
     def __call__(self, **kwargs: object) -> _Agent:
         self.calls.append(kwargs)
-        self.agent = _Agent(list(kwargs["tools"]), self.behavior)  # type: ignore[arg-type]
+        self.agent = _Agent(
+            list(kwargs["tools"]),
+            self.behavior,
+            len(self.agents) + 1,
+        )  # type: ignore[arg-type]
+        self.agents.append(self.agent)
         return self.agent
 
 
@@ -140,6 +156,7 @@ class _ScriptedResearchChatModel(BaseChatModel):
     _invoke_count: int = PrivateAttr(default=0)
     _tool_trace: list[str] = PrivateAttr(default_factory=list)
     _bound_tool_names: list[str] = PrivateAttr(default_factory=list)
+    _received_messages: list[list[BaseMessage]] = PrivateAttr(default_factory=list)
 
     @property
     def _llm_type(self) -> str:
@@ -156,6 +173,10 @@ class _ScriptedResearchChatModel(BaseChatModel):
     @property
     def bound_tool_names(self) -> list[str]:
         return list(self._bound_tool_names)
+
+    @property
+    def received_messages(self) -> list[list[BaseMessage]]:
+        return [list(messages) for messages in self._received_messages]
 
     def bind_tools(
         self,
@@ -185,20 +206,134 @@ class _ScriptedResearchChatModel(BaseChatModel):
     ) -> ChatResult:
         del stop, run_manager, kwargs
         self._invoke_count += 1
+        self._received_messages.append(list(messages))
+        if self.script == "attempt_isolation":
+            status = messages[-1]
+            assert isinstance(status, HumanMessage)
+            root = ElementTree.fromstring(str(status.content))
+            attempt = int(root.attrib["attempt"])
+            sequence = int(root.attrib["sequence"])
+            if (attempt, sequence) == (1, 1):
+                name = "search_related_papers"
+                arguments = {
+                    "query": "related method",
+                    "limit": 1,
+                }
+            elif (attempt, sequence) == (1, 2):
+                name = AgentResearchDecision.__name__
+                arguments = {"selected_evidence_ids": []}
+            elif (attempt, sequence) == (2, 1):
+                name = AgentResearchDecision.__name__
+                arguments = {
+                    "selected_evidence_ids": [],
+                    "paper_uses": [],
+                    "limitations": ["No evidence selected."],
+                }
+            else:  # pragma: no cover - the scenario has only these logical calls
+                raise AssertionError(
+                    f"unexpected attempt/sequence pair: {(attempt, sequence)}"
+                )
+            self._tool_trace.append(name)
+            return ChatResult(
+                generations=[
+                    ChatGeneration(
+                        message=AIMessage(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": name,
+                                    "args": arguments,
+                                    "id": f"attempt-isolation-{self._invoke_count}",
+                                    "type": "tool_call",
+                                }
+                            ],
+                        )
+                    )
+                ]
+            )
+        if self.script == "todo_and_final":
+            final_arguments = {
+                "selected_evidence_ids": [],
+                "paper_uses": [],
+                "limitations": ["No evidence selected."],
+            }
+            if self._invoke_count == 1:
+                calls = [
+                    {
+                        "name": "write_todos",
+                        "args": {
+                            "todos": [
+                                {
+                                    "id": "todo_1",
+                                    "content": "检索证据",
+                                    "status": "in_progress",
+                                }
+                            ]
+                        },
+                        "id": "todo-and-final-todo",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": AgentResearchDecision.__name__,
+                        "args": final_arguments,
+                        "id": "todo-and-final-result",
+                        "type": "tool_call",
+                    },
+                ]
+                self._tool_trace.extend(call["name"] for call in calls)
+            elif self._invoke_count == 2:
+                rejected = [
+                    message
+                    for message in messages
+                    if isinstance(message, ToolMessage)
+                    and message.status == "error"
+                    and message.tool_call_id
+                    in {"todo-and-final-todo", "todo-and-final-result"}
+                ]
+                assert len(rejected) == 2
+                calls = [
+                    {
+                        "name": AgentResearchDecision.__name__,
+                        "args": final_arguments,
+                        "id": "final-after-rejection",
+                        "type": "tool_call",
+                    }
+                ]
+                self._tool_trace.append(AgentResearchDecision.__name__)
+            else:  # pragma: no cover - rejection must consume exactly one extra call
+                raise AssertionError("same-turn rejection did not terminate on call two")
+            return ChatResult(
+                generations=[
+                    ChatGeneration(message=AIMessage(content="", tool_calls=calls))
+                ]
+            )
         if self.script == "prepare_only":
             name = "prepare_paper"
             arguments: dict[str, object] = {"external_id": PRIMARY.external_id}
         elif self._invoke_count == 1:
+            name = "write_todos"
+            arguments = {
+                "todos": [
+                    {
+                        "id": "todo_1",
+                        "content": "检索并核对相关论文证据",
+                        "status": "in_progress",
+                    }
+                ]
+            }
+        elif self._invoke_count == 2:
+            last_tool = _last_tool_message(messages)
+            assert last_tool.name == "write_todos"
             name = "search_related_papers"
             arguments = {"query": "related method", "limit": 1}
-        elif self._invoke_count == 2:
+        elif self._invoke_count == 3:
             last_tool = _last_tool_message(messages)
             assert last_tool.name == "search_related_papers"
             found = json.loads(str(last_tool.content))
             assert found[0]["external_id"] == RELATED.external_id
             name = "prepare_paper"
             arguments = {"external_id": RELATED.external_id}
-        elif self._invoke_count == 3:
+        elif self._invoke_count == 4:
             last_tool = _last_tool_message(messages)
             assert last_tool.name == "prepare_paper"
             name = "retrieve_paper_evidence"
@@ -208,10 +343,25 @@ class _ScriptedResearchChatModel(BaseChatModel):
                 "top_k_each": 3,
                 "summary_k": 2,
             }
-        elif self._invoke_count == 4:
+        elif self._invoke_count == 5:
             last_tool = _last_tool_message(messages)
             assert last_tool.name == "retrieve_paper_evidence"
-            retrieved = json.loads(str(last_tool.content))
+            name = "write_todos"
+            arguments = {
+                "todos": [
+                    {
+                        "id": "todo_1",
+                        "content": "检索并核对相关论文证据",
+                        "status": "completed",
+                    }
+                ]
+            }
+        elif self._invoke_count == 6:
+            retrieved_message = _last_tool_message_named(
+                messages,
+                "retrieve_paper_evidence",
+            )
+            retrieved = json.loads(str(retrieved_message.content))
             evidence_id = retrieved["evidence_items"][0]["id"]
             name = AgentResearchDecision.__name__
             arguments = {
@@ -225,8 +375,8 @@ class _ScriptedResearchChatModel(BaseChatModel):
                 ],
                 "limitations": ["Only one related paper was compared."],
             }
-        else:  # pragma: no cover - a bounded successful run must stop at call four
-            raise AssertionError("real Agent made an unexpected fifth model call")
+        else:  # pragma: no cover - a bounded successful run must stop at call six
+            raise AssertionError("real Agent made an unexpected seventh model call")
 
         self._tool_trace.append(name)
         message = AIMessage(
@@ -246,6 +396,19 @@ class _ScriptedResearchChatModel(BaseChatModel):
 def _last_tool_message(messages: list[BaseMessage]) -> ToolMessage:
     selected = next(
         (message for message in reversed(messages) if isinstance(message, ToolMessage)),
+        None,
+    )
+    assert selected is not None
+    return selected
+
+
+def _last_tool_message_named(messages: list[BaseMessage], name: str) -> ToolMessage:
+    selected = next(
+        (
+            message
+            for message in reversed(messages)
+            if isinstance(message, ToolMessage) and message.name == name
+        ),
         None,
     )
     assert selected is not None
@@ -376,6 +539,148 @@ STATE = {
 }
 
 
+def test_research_messages_use_stable_layered_prefix() -> None:
+    summary = {
+        "confirmed_facts": ["Fact"],
+        "paper_findings": [],
+        "comparison_context": [],
+        "open_questions": ["Question"],
+    }
+    first = _research_messages(
+        {
+            "conversation_summary": summary,
+            "messages": [HumanMessage(content="first question", id="h-1")],
+        },
+        primary_external_id=PRIMARY.external_id,
+        active_external_ids=[
+            RELATED.external_id,
+            ACTIVE.external_id,
+            PRIMARY.external_id,
+            ACTIVE.external_id,
+        ],
+    )
+    second = _research_messages(
+        {
+            "conversation_summary": summary,
+            "messages": [HumanMessage(content="second question", id="h-2")],
+        },
+        primary_external_id=PRIMARY.external_id,
+        active_external_ids=[
+            ACTIVE.external_id,
+            PRIMARY.external_id,
+            RELATED.external_id,
+        ],
+    )
+
+    assert [message.type for message in first] == [
+        "system",
+        "human",
+        "human",
+        "human",
+    ]
+    assert first[0].content == second[0].content
+    assert PRIMARY.external_id not in first[0].content
+    assert ACTIVE.external_id not in first[0].content
+    assert first[1].content == second[1].content == (
+        "PaperPilot Runtime Context:\n"
+        '{"active_paper_external_ids":["2401.10001v1",'
+        '"2401.10002v1","2401.10003v1"],'
+        '"primary_paper_external_id":"2401.10001v1",'
+        '"schema_version":"paperpilot-runtime-context-v1"}'
+    )
+    assert first[2].content.startswith(
+        "PaperPilot Conversation Summary (model-generated):\n"
+    )
+    assert "Confirmed conversation summary" not in first[2].content
+    assert first[-1].content == "first question"
+    assert second[-1].content == "second question"
+
+
+def test_research_system_message_uses_semantic_xml_sections() -> None:
+    messages = _research_messages(
+        {"messages": [HumanMessage(content="question", id="h-1")]},
+        primary_external_id=PRIMARY.external_id,
+        active_external_ids=[PRIMARY.external_id],
+    )
+
+    content = messages[0].content
+    assert isinstance(content, str)
+    root = ElementTree.fromstring(content)
+
+    assert root.tag == "research_agent"
+    assert [child.tag for child in root] == [
+        "role",
+        "objective",
+        "definitions",
+        "instruction_priority",
+        "decision_policy",
+        "evidence_acceptance",
+        "coverage_policy",
+        "conflict_policy",
+        "paper_role_policy",
+        "output_contract",
+        "planning_and_status_policy",
+        "trust_boundaries",
+        "completion_criteria",
+    ]
+    decision_policy = root.find("decision_policy")
+    assert decision_policy is not None
+    assert [child.tag for child in decision_policy] == [
+        "question_classification",
+        "paper_scope",
+        "search_policy",
+        "preparation_policy",
+        "retrieval_policy",
+    ]
+    trust_boundaries = root.find("trust_boundaries")
+    assert trust_boundaries is not None
+    assert [child.tag for child in trust_boundaries] == [
+        "runtime_context",
+        "conversation_summary",
+        "conversation_history",
+        "tool_results",
+        "agent_status_bar",
+        "todo_plan",
+    ]
+    assert "research-v6" not in content
+    assert "<planning_and_status_policy>" in content
+    assert "call `write_todos` before the first research" in content
+
+
+def test_research_messages_without_summary_keep_history_after_runtime() -> None:
+    history = [HumanMessage(content="question", id="h-1")]
+
+    messages = _research_messages(
+        {"messages": history},
+        primary_external_id=PRIMARY.external_id,
+        active_external_ids=[PRIMARY.external_id],
+    )
+
+    assert [message.type for message in messages] == ["system", "human", "human"]
+    assert messages[2] is history[0]
+
+
+def test_research_messages_use_context_view_instead_of_legacy_summary_or_history() -> None:
+    messages = _research_messages(
+        {
+            "conversation_summary": {"confirmed_facts": ["legacy"]},
+            "context_view": {
+                "active_projection": {"current_goal": "new goal"},
+                "messages": [{"role": "user", "content": "new goal"}],
+            },
+            "messages": [HumanMessage(content="old history", id="old")],
+        },
+        primary_external_id=PRIMARY.external_id,
+        active_external_ids=[PRIMARY.external_id],
+    )
+
+    assert len(messages) == 3
+    assert "PaperPilot Context View:" in messages[-1].content
+    assert "legacy" not in messages[-1].content
+    assert "old history" not in messages[-1].content
+    assert "new goal" in messages[-1].content
+
+
 def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> None:
     selected_ids: list[str] = []
 
@@ -443,7 +748,14 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
     assert response_format.schema is AgentResearchDecision
     assert response_format.handle_errors is False
     assert factory.agent is not None
-    assert factory.agent.invocations[0][1] == {"recursion_limit": 24}
+    assert factory.agent.invocations[0][1] == {
+        "recursion_limit": 24,
+        "tags": ["paperpilot:model"],
+        "metadata": {
+            "paperpilot_stage": "research",
+            "prompt_version": "research-v7",
+        },
+    }
     assert mcp_calls == [
         (
             "mcp__arxiv__download_paper",
@@ -474,7 +786,7 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
     ]
 
 
-def test_real_agent_completes_three_tool_chain_in_exactly_four_model_calls() -> None:
+def test_real_agent_completes_planned_three_tool_chain_in_exactly_six_model_calls() -> None:
     model = _ScriptedResearchChatModel()
     context, _factory, mcp_calls = _context(
         lambda _tools, _attempt: None,
@@ -482,21 +794,23 @@ def test_real_agent_completes_three_tool_chain_in_exactly_four_model_calls() -> 
         search=lambda _query, _limit: [RELATED],
     )
 
+    context = replace(context, research_model_call_limit=12)
     result = run_research_agent(STATE, context)
 
-    assert model.invoke_count == 4
+    assert model.invoke_count == 6
     assert model.tool_trace == [
+        "write_todos",
         "search_related_papers",
         "prepare_paper",
         "retrieve_paper_evidence",
+        "write_todos",
         AgentResearchDecision.__name__,
     ]
-    assert model.bound_tool_names == [
-        "search_related_papers",
-        "prepare_paper",
-        "retrieve_paper_evidence",
-        AgentResearchDecision.__name__,
-    ]
+    assert "write_todos" in model.bound_tool_names
+    assert "search_related_papers" in model.bound_tool_names
+    assert "prepare_paper" in model.bound_tool_names
+    assert "retrieve_paper_evidence" in model.bound_tool_names
+    assert AgentResearchDecision.__name__ in model.bound_tool_names
     assert [name for name, _arguments in mcp_calls] == [
         "mcp__arxiv__download_paper",
         "mcp__colbert__build_index",
@@ -506,6 +820,37 @@ def test_real_agent_completes_three_tool_chain_in_exactly_four_model_calls() -> 
     assert result.evidence_items[0].chunk_text == f"Evidence from {RELATED.external_id}"
     assert result.used_papers[0].paper == RELATED
     assert result.limitations == ["Only one related paper was compared."]
+    assert len(model.received_messages) == 6
+    for sequence, current_messages in enumerate(model.received_messages, start=1):
+        status = current_messages[-1]
+        assert isinstance(status, HumanMessage)
+        assert status.additional_kwargs == {"paperpilot_source": "agent_status_bar"}
+        root = ElementTree.fromstring(str(status.content))
+        assert root.attrib["attempt"] == "1"
+        assert root.attrib["sequence"] == str(sequence)
+        if sequence > 1:
+            previous_messages = model.received_messages[sequence - 2]
+            assert current_messages[: len(previous_messages)] == previous_messages
+
+
+def test_real_agent_rejects_write_todos_with_final_result_in_one_model_turn() -> None:
+    model = _ScriptedResearchChatModel(script="todo_and_final")
+    context, _factory, mcp_calls = _context(
+        lambda _tools, _attempt: None,
+        model=model,
+    )
+
+    result = run_research_agent(STATE, context)
+
+    assert model.invoke_count == 2
+    assert model.tool_trace == [
+        "write_todos",
+        AgentResearchDecision.__name__,
+        AgentResearchDecision.__name__,
+    ]
+    assert mcp_calls == []
+    assert result.evidence_items == []
+    assert result.limitations == ["No evidence selected."]
 
 
 def test_real_agent_rejects_old_three_model_call_attempt_budget() -> None:
@@ -528,9 +873,9 @@ def test_real_agent_rejects_old_three_model_call_attempt_budget() -> None:
     assert isinstance(exc_info.value.__cause__, ModelCallLimitExceededError)
     assert model.invoke_count == 3
     assert model.tool_trace == [
+        "write_todos",
         "search_related_papers",
         "prepare_paper",
-        "retrieve_paper_evidence",
     ]
 
 
@@ -546,24 +891,71 @@ def test_agent_installs_official_per_attempt_limits_and_model_retry() -> None:
 
     context, factory, _calls = _context(behavior)
 
+    context = replace(context, research_model_call_limit=12)
     run_research_agent(STATE, context, create_agent_factory=factory)
 
     middleware = factory.calls[0]["middleware"]
     assert isinstance(middleware, list)
-    assert len(middleware) == 3
-    model_limit, tool_limit, model_retry = middleware
+    assert [type(item) for item in middleware] == [
+        ModelCallLimitMiddleware,
+        ResearchToolBudgetMiddleware,
+        ResearchTodoMiddleware,
+        ResearchStatusMiddleware,
+        ModelRetryMiddleware,
+    ]
+    assert len(middleware) == 5
+    model_limit, tool_budget, todo_middleware, status_middleware, model_retry = middleware
     assert isinstance(model_limit, ModelCallLimitMiddleware)
     assert model_limit.thread_limit is None
-    assert model_limit.run_limit == 4
+    assert model_limit.run_limit == 6
     assert model_limit.exit_behavior == "error"
-    assert isinstance(tool_limit, ToolCallLimitMiddleware)
-    assert tool_limit.tool_name is None
-    assert tool_limit.thread_limit is None
-    assert tool_limit.run_limit == 6
-    assert tool_limit.exit_behavior == "error"
+    assert isinstance(tool_budget, ResearchToolBudgetMiddleware)
+    assert tool_budget.run_limit == 6
+    assert isinstance(todo_middleware, ResearchTodoMiddleware)
+    assert isinstance(status_middleware, ResearchStatusMiddleware)
     assert isinstance(model_retry, ModelRetryMiddleware)
     assert model_retry.max_retries == 1
     assert model_retry.on_failure == "error"
+    assert [tool.name for tool in factory.calls[0]["tools"]] == [  # type: ignore[union-attr]
+        "search_related_papers",
+        "prepare_paper",
+        "retrieve_paper_evidence",
+    ]
+    assert [tool.name for tool in todo_middleware.tools] == ["write_todos"]
+
+
+def test_enabled_context_registers_read_tools_and_fixed_middleware_order() -> None:
+    def behavior(_tools: Mapping[str, Any], _attempt: int) -> object:
+        return {
+            "structured_response": {
+                "selected_evidence_ids": [],
+                "paper_uses": [],
+                "limitations": [],
+            }
+        }
+
+    context, factory, _calls = _context(behavior)
+    context = replace(
+        context,
+        context_management=ContextManagementConfig(enabled=True),
+    )
+    run_research_agent(STATE, context, create_agent_factory=factory)
+    middleware = factory.calls[0]["middleware"]
+    assert [type(item) for item in middleware] == [
+        ModelCallLimitMiddleware,
+        ResearchToolBudgetMiddleware,
+        ResearchTodoMiddleware,
+        ResearchContextMiddleware,
+        ResearchStatusMiddleware,
+        ModelRetryMiddleware,
+    ]
+    assert [tool.name for tool in factory.calls[0]["tools"]] == [
+        "search_related_papers",
+        "prepare_paper",
+        "retrieve_paper_evidence",
+        "read_artifact_slice",
+        "search_artifact",
+    ]
 
 
 def test_official_model_retry_exhaustion_preserves_provider_exception() -> None:
@@ -1133,18 +1525,119 @@ def test_invalid_structured_response_is_attempted_at_most_twice() -> None:
     with pytest.raises(DeepReadingTaskError, match="structured response") as exc_info:
         run_research_agent(STATE, context, create_agent_factory=factory)
 
-    assert factory.agent is not None
-    assert len(factory.agent.invocations) == 2
+    assert len(factory.agents) == 2
+    assert [len(agent.invocations) for agent in factory.agents] == [1, 1]
     assert exc_info.value.error_code == "agent_budget_exhausted"
     middleware = factory.calls[0]["middleware"]
     model_limit = next(
         item for item in middleware if isinstance(item, ModelCallLimitMiddleware)
     )
-    tool_limit = next(
-        item for item in middleware if isinstance(item, ToolCallLimitMiddleware)
+    tool_budget = next(
+        item for item in middleware if isinstance(item, ResearchToolBudgetMiddleware)
     )
-    assert len(factory.agent.invocations) * model_limit.run_limit <= 8
-    assert len(factory.agent.invocations) * tool_limit.run_limit <= 12
+    assert len(factory.agents) * model_limit.run_limit <= 12
+    assert len(factory.agents) * tool_budget.run_limit <= 12
+
+
+def test_structured_attempts_isolate_status_state_but_retain_business_ledgers() -> None:
+    def behavior(tools: Mapping[str, Any], attempt: int) -> object:
+        tools["search_related_papers"].invoke({"query": "related", "limit": 1})
+        if attempt == 1:
+            return {"structured_response": {"selected_evidence_ids": []}}
+        return {
+            "structured_response": {
+                "selected_evidence_ids": [],
+                "paper_uses": [],
+                "limitations": ["No evidence selected."],
+            }
+        }
+
+    context, factory, _calls = _context(
+        behavior,
+        search=lambda _query, _limit: [RELATED],
+    )
+    context = replace(context, research_model_call_limit=12)
+
+    result = run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert result.evidence_items == []
+    assert len(factory.agents) == 2
+    first_middleware = factory.calls[0]["middleware"]
+    second_middleware = factory.calls[1]["middleware"]
+    assert isinstance(first_middleware, list)
+    assert isinstance(second_middleware, list)
+    first_status = first_middleware[3]
+    second_status = second_middleware[3]
+    first_budget = first_middleware[1]
+    second_budget = second_middleware[1]
+    assert isinstance(first_status, ResearchStatusMiddleware)
+    assert isinstance(second_status, ResearchStatusMiddleware)
+    assert first_status is not second_status
+    assert isinstance(first_budget, ResearchToolBudgetMiddleware)
+    assert isinstance(second_budget, ResearchToolBudgetMiddleware)
+    assert first_budget is not second_budget
+
+    first_status.tracker.next_snapshot(
+        [{"id": "todo_1", "content": "计划", "status": "in_progress"}],
+        0,
+        6,
+        0,
+        6,
+    )
+    assert first_status.tracker.sequence == 1
+    assert second_status.tracker.sequence == 0
+    second_snapshot = second_status.tracker.next_snapshot([], 0, 6, 0, 6)
+    assert second_snapshot.attempt == 2
+    assert second_snapshot.sequence == 1
+    assert second_snapshot.mode == "unplanned"
+    assert second_snapshot.ledger.candidate_ids
+    assert second_snapshot.last_event is None
+    assert second_snapshot.alerts == ()
+    assert second_budget.used == 0
+
+
+def test_real_structured_attempt_retry_resets_status_and_keeps_candidate_ledger() -> None:
+    model = _ScriptedResearchChatModel(script="attempt_isolation")
+    context, _factory, _mcp_calls = _context(
+        lambda _tools, _attempt: None,
+        model=model,
+        search=lambda _query, _limit: [RELATED],
+    )
+
+    result = run_research_agent(STATE, context)
+
+    assert result.evidence_items == []
+    assert result.limitations == ["No evidence selected."]
+    assert model.tool_trace == [
+        "search_related_papers",
+        AgentResearchDecision.__name__,
+        AgentResearchDecision.__name__,
+        AgentResearchDecision.__name__,
+    ]
+    received = model.received_messages
+    roots = [ElementTree.fromstring(str(messages[-1].content)) for messages in received]
+    assert [
+        (root.attrib["attempt"], root.attrib["sequence"]) for root in roots
+    ] == [("1", "1"), ("1", "2"), ("1", "2"), ("2", "1")]
+    assert received[1][-1] is received[2][-1]
+
+    first_candidate_count = int(
+        roots[0].find("execution_state/candidate_papers").attrib["count"]
+    )
+    second_attempt_candidate_count = int(
+        roots[-1].find("execution_state/candidate_papers").attrib["count"]
+    )
+    assert first_candidate_count == 2
+    assert second_attempt_candidate_count == 3
+    assert roots[-1].find("task_progress").attrib["mode"] == "unplanned"
+    assert roots[-1].find("side_channel/last_event").attrib == {"available": "false"}
+    second_attempt_statuses = [
+        message
+        for message in received[-1]
+        if isinstance(message, HumanMessage)
+        and message.additional_kwargs.get("paperpilot_source") == "agent_status_bar"
+    ]
+    assert len(second_attempt_statuses) == 1
 
 
 def test_second_structured_attempt_can_idempotently_repeat_retrieval() -> None:
@@ -1186,8 +1679,8 @@ def test_second_structured_attempt_can_idempotently_repeat_retrieval() -> None:
 
     result = run_research_agent(STATE, context, create_agent_factory=factory)
 
-    assert factory.agent is not None
-    assert len(factory.agent.invocations) == 2
+    assert len(factory.agents) == 2
+    assert [len(agent.invocations) for agent in factory.agents] == [1, 1]
     assert retrieved_ids[0] == retrieved_ids[1]
     assert [item.id for item in result.evidence_items] == [retrieved_ids[0]]
     assert sum(
@@ -1291,8 +1784,8 @@ def test_structured_output_error_is_retried_once_at_outer_boundary() -> None:
     result = run_research_agent(STATE, context, create_agent_factory=factory)
 
     assert result.evidence_items == []
-    assert factory.agent is not None
-    assert len(factory.agent.invocations) == 2
+    assert len(factory.agents) == 2
+    assert [len(agent.invocations) for agent in factory.agents] == [1, 1]
 
 
 def test_structured_output_error_stops_after_two_agent_invocations() -> None:
@@ -1304,8 +1797,8 @@ def test_structured_output_error_stops_after_two_agent_invocations() -> None:
     with pytest.raises(DeepReadingTaskError, match="structured response"):
         run_research_agent(STATE, context, create_agent_factory=factory)
 
-    assert factory.agent is not None
-    assert len(factory.agent.invocations) == 2
+    assert len(factory.agents) == 2
+    assert [len(agent.invocations) for agent in factory.agents] == [1, 1]
 
 
 def test_graph_recursion_exhaustion_becomes_deep_reading_task_error() -> None:

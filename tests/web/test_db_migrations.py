@@ -32,6 +32,9 @@ MANAGED_TABLES = {
     "conversations",
     "conversation_papers",
     "messages",
+    "context_artifacts",
+    "turn_archives",
+    "compression_states",
 }
 
 EXPECTED_INDEXES = {
@@ -43,6 +46,8 @@ EXPECTED_INDEXES = {
     "idx_conversation_papers_conversation_active",
     "idx_messages_conversation_parent_created",
     "uq_tasks_one_active_per_conversation",
+    "idx_context_artifacts_conversation_sha256",
+    "idx_turn_archives_conversation_created",
 }
 
 
@@ -215,8 +220,57 @@ def test_blank_database_upgrades_to_complete_managed_schema(tmp_path: Path) -> N
         "metadata_json",
         "created_at",
     }
+    assert _column_names(db_path, "context_artifacts") == {
+        "artifact_id",
+        "conversation_id",
+        "task_id",
+        "tool_call_id",
+        "tool_name",
+        "kind",
+        "storage_key",
+        "sha256",
+        "byte_size",
+        "token_estimate",
+        "preview",
+        "initial_action",
+        "future_retention",
+        "created_at",
+    }
+    assert _column_names(db_path, "turn_archives") == {
+        "archive_id",
+        "conversation_id",
+        "task_id",
+        "user_message_id",
+        "terminal_status",
+        "archive_version",
+        "seed_json",
+        "narrative_summary",
+        "narrative_status",
+        "supersedes_json",
+        "created_at",
+        "updated_at",
+    }
+    assert _column_names(db_path, "compression_states") == {
+        "conversation_id",
+        "compressor_version",
+        "state",
+        "consecutive_failures",
+        "last_failure_type",
+        "last_input_digest",
+        "opened_at",
+        "updated_at",
+    }
     assert ("source", "external_id") in _unique_column_sets(db_path, "papers")
     assert ("task_id", "role") in _unique_column_sets(db_path, "messages")
+    assert ("task_id", "tool_call_id", "sha256") in _unique_column_sets(
+        db_path, "context_artifacts"
+    )
+    assert ("conversation_id", "user_message_id", "archive_version") in _unique_column_sets(
+        db_path, "turn_archives"
+    )
+    assert ("conversation_id", "compressor_version") in _unique_column_sets(
+        db_path, "compression_states"
+    )
     assert ("user_id", "users", "id") in _foreign_key_targets(
         db_path,
         "research_tasks",
@@ -234,6 +288,9 @@ def test_current_five_table_database_upgrades_to_conversation_schema(
         "conversations",
         "conversation_papers",
         "messages",
+        "context_artifacts",
+        "turn_archives",
+        "compression_states",
     } <= _table_names(db_path)
 
     upgrade_database(db_path)
@@ -245,7 +302,7 @@ def test_current_five_table_database_upgrades_to_conversation_schema(
         "final_checkpoint_id",
         "result_quality",
     } <= _column_names(db_path, "research_tasks")
-    assert get_database_heads(db_path) == {"20260807_0002"}
+    assert get_database_heads(db_path) == {"20260901_0003"}
 
 
 def test_legacy_database_is_adopted_without_losing_rows_or_unknown_tables(
@@ -306,6 +363,18 @@ def test_new_tables_enforce_sqlite_foreign_keys(tmp_path: Path) -> None:
         ("source_task_id", "research_tasks", "id"),
         ("source_message_id", "messages", "id"),
     }
+    assert _foreign_key_targets(db_path, "context_artifacts") == {
+        ("conversation_id", "conversations", "id"),
+        ("task_id", "research_tasks", "id"),
+    }
+    assert _foreign_key_targets(db_path, "turn_archives") == {
+        ("conversation_id", "conversations", "id"),
+        ("task_id", "research_tasks", "id"),
+        ("user_message_id", "messages", "id"),
+    }
+    assert _foreign_key_targets(db_path, "compression_states") == {
+        ("conversation_id", "conversations", "id"),
+    }
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
@@ -324,6 +393,36 @@ def test_new_tables_enforce_sqlite_foreign_keys(tmp_path: Path) -> None:
                     "2026-08-07T00:00:00Z",
                 ),
             )
+
+
+def test_context_tables_upgrade_from_0002_and_preserve_business_rows(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "from-0002.sqlite3"
+    upgrade_database(db_path, "20260807_0002")
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "INSERT INTO users VALUES (?, ?, ?, ?, ?)",
+            ("user-1", "user", "hash", "salt", "2026-08-07T00:00:00Z"),
+        )
+        connection.execute(
+            "INSERT INTO research_tasks(id, question, depth, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("task-1", "question", "quick", "pending", "now", "now"),
+        )
+    upgrade_database(db_path)
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT question FROM research_tasks WHERE id = 'task-1'"
+        ).fetchone() == ("question",)
+    assert get_database_heads(db_path) == {"20260901_0003"}
+
+
+def test_context_migration_downgrade_is_explicitly_unsupported(tmp_path: Path) -> None:
+    db_path = tmp_path / "no-downgrade.sqlite3"
+    upgrade_database(db_path)
+    with pytest.raises(RuntimeError, match="downgrade"):
+        command.downgrade(build_alembic_config(db_path), "20260807_0002")
 
 
 def test_partial_unique_index_rejects_concurrent_active_tasks(
