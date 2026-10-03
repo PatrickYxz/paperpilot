@@ -13,7 +13,7 @@ import urllib.request
 from pathlib import Path
 
 import certifi
-import fitz
+import pymupdf as fitz
 
 PDF_DPI = 150
 _SAFE_PAPER_KEY_RE = re.compile(r"[^A-Za-z0-9._-]+")

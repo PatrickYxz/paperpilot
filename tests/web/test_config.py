@@ -25,7 +25,7 @@ def test_runtime_config_defaults_are_local_and_bounded():
     assert config.checkpoint_db_path == Path("data/langgraph/checkpoints.sqlite3")
     assert config.summary_token_threshold == 32_000
     assert config.summary_recent_turns == 6
-    assert config.research_recursion_limit == 24
+    assert config.research_recursion_limit == 33
     assert config.research_model_call_limit == 12
     assert config.research_tool_call_limit == 12
     assert config.research_max_output_tokens == 4096

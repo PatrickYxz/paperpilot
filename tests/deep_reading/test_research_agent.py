@@ -207,6 +207,52 @@ class _ScriptedResearchChatModel(BaseChatModel):
         del stop, run_manager, kwargs
         self._invoke_count += 1
         self._received_messages.append(list(messages))
+        if self.script == "budget_continuation":
+            status = messages[-1]
+            assert isinstance(status, HumanMessage)
+            if ElementTree.fromstring(str(status.content)).attrib["attempt"] == "2":
+                repair = next(
+                    message
+                    for message in messages
+                    if isinstance(message, HumanMessage)
+                    and message.additional_kwargs.get("paperpilot_source")
+                    == "structured_response_repair"
+                )
+                evidence = ElementTree.fromstring(str(repair.content)).find(
+                    "authoritative_ledger/evidence_items/evidence"
+                )
+                assert evidence is not None
+                name = AgentResearchDecision.__name__
+                self._tool_trace.append(name)
+                return ChatResult(
+                    generations=[
+                        ChatGeneration(
+                            message=AIMessage(
+                                content="",
+                                tool_calls=[
+                                    {
+                                        "name": name,
+                                        "args": {
+                                            "selected_evidence_ids": [evidence.attrib["id"]],
+                                            "paper_uses": [
+                                                {
+                                                    "external_id": evidence.attrib[
+                                                        "paper_external_id"
+                                                    ],
+                                                    "role": "comparison",
+                                                    "evidence_ids": [evidence.attrib["id"]],
+                                                }
+                                            ],
+                                            "limitations": [],
+                                        },
+                                        "id": "budget-continuation-final",
+                                        "type": "tool_call",
+                                    }
+                                ],
+                            )
+                        )
+                    ]
+                )
         if self.script == "attempt_isolation":
             status = messages[-1]
             assert isinstance(status, HumanMessage)
@@ -307,10 +353,16 @@ class _ScriptedResearchChatModel(BaseChatModel):
                     ChatGeneration(message=AIMessage(content="", tool_calls=calls))
                 ]
             )
+        scripted_step = self._invoke_count
+        if self.script == "eight_calls" and scripted_step >= 7:
+            scripted_step -= 2
         if self.script == "prepare_only":
             name = "prepare_paper"
             arguments: dict[str, object] = {"external_id": PRIMARY.external_id}
-        elif self._invoke_count == 1:
+        elif self.script == "eight_calls" and self._invoke_count in (5, 6):
+            name = "search_related_papers"
+            arguments = {"query": "additional related method", "limit": 1}
+        elif scripted_step == 1:
             name = "write_todos"
             arguments = {
                 "todos": [
@@ -321,19 +373,19 @@ class _ScriptedResearchChatModel(BaseChatModel):
                     }
                 ]
             }
-        elif self._invoke_count == 2:
+        elif scripted_step == 2:
             last_tool = _last_tool_message(messages)
             assert last_tool.name == "write_todos"
             name = "search_related_papers"
             arguments = {"query": "related method", "limit": 1}
-        elif self._invoke_count == 3:
+        elif scripted_step == 3:
             last_tool = _last_tool_message(messages)
             assert last_tool.name == "search_related_papers"
             found = json.loads(str(last_tool.content))
             assert found[0]["external_id"] == RELATED.external_id
             name = "prepare_paper"
             arguments = {"external_id": RELATED.external_id}
-        elif self._invoke_count == 4:
+        elif scripted_step == 4:
             last_tool = _last_tool_message(messages)
             assert last_tool.name == "prepare_paper"
             name = "retrieve_paper_evidence"
@@ -343,9 +395,13 @@ class _ScriptedResearchChatModel(BaseChatModel):
                 "top_k_each": 3,
                 "summary_k": 2,
             }
-        elif self._invoke_count == 5:
+        elif scripted_step == 5:
             last_tool = _last_tool_message(messages)
-            assert last_tool.name == "retrieve_paper_evidence"
+            assert last_tool.name == (
+                "search_related_papers"
+                if self.script == "eight_calls"
+                else "retrieve_paper_evidence"
+            )
             name = "write_todos"
             arguments = {
                 "todos": [
@@ -356,7 +412,7 @@ class _ScriptedResearchChatModel(BaseChatModel):
                     }
                 ]
             }
-        elif self._invoke_count == 6:
+        elif scripted_step == 6:
             retrieved_message = _last_tool_message_named(
                 messages,
                 "retrieve_paper_evidence",
@@ -645,6 +701,9 @@ def test_research_system_message_uses_semantic_xml_sections() -> None:
     assert "research-v6" not in content
     assert "<planning_and_status_policy>" in content
     assert "call `write_todos` before the first research" in content
+    assert "do not call `write_todos` again merely to reword" in content
+    assert "preserve every existing TODO" in content
+    assert "`id` and `content`\n  exactly" in content
 
 
 def test_research_messages_without_summary_keep_history_after_runtime() -> None:
@@ -749,7 +808,7 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
     assert response_format.handle_errors is False
     assert factory.agent is not None
     assert factory.agent.invocations[0][1] == {
-        "recursion_limit": 24,
+        "recursion_limit": 33,
         "tags": ["paperpilot:model"],
         "metadata": {
             "paperpilot_stage": "research",
@@ -833,6 +892,30 @@ def test_real_agent_completes_planned_three_tool_chain_in_exactly_six_model_call
             assert current_messages[: len(previous_messages)] == previous_messages
 
 
+def test_real_agent_default_graph_budget_accommodates_eight_model_calls() -> None:
+    model = _ScriptedResearchChatModel(script="eight_calls")
+    context, _factory, _mcp_calls = _context(
+        lambda _tools, _attempt: None,
+        model=model,
+        search=lambda _query, _limit: [RELATED],
+    )
+
+    result = run_research_agent(STATE, context)
+
+    assert model.invoke_count == 8
+    assert len(result.evidence_items) == 1
+    assert model.tool_trace == [
+        "write_todos",
+        "search_related_papers",
+        "prepare_paper",
+        "retrieve_paper_evidence",
+        "search_related_papers",
+        "search_related_papers",
+        "write_todos",
+        AgentResearchDecision.__name__,
+    ]
+
+
 def test_real_agent_rejects_write_todos_with_final_result_in_one_model_turn() -> None:
     model = _ScriptedResearchChatModel(script="todo_and_final")
     context, _factory, mcp_calls = _context(
@@ -853,8 +936,8 @@ def test_real_agent_rejects_write_todos_with_final_result_in_one_model_turn() ->
     assert result.limitations == ["No evidence selected."]
 
 
-def test_real_agent_rejects_old_three_model_call_attempt_budget() -> None:
-    model = _ScriptedResearchChatModel()
+def test_real_agent_uses_reserved_attempt_after_primary_model_limit() -> None:
+    model = _ScriptedResearchChatModel(script="budget_continuation")
     context, _factory, _mcp_calls = _context(
         lambda _tools, _attempt: None,
         model=model,
@@ -866,16 +949,16 @@ def test_real_agent_rejects_old_three_model_call_attempt_budget() -> None:
         research_recursion_limit=24,
     )
 
-    with pytest.raises(DeepReadingTaskError) as exc_info:
-        run_research_agent(STATE, old_budget_context)
+    result = run_research_agent(STATE, old_budget_context)
 
-    assert exc_info.value.error_code == "agent_budget_exhausted"
-    assert isinstance(exc_info.value.__cause__, ModelCallLimitExceededError)
-    assert model.invoke_count == 3
+    assert len(result.evidence_items) == 1
+    assert model.invoke_count == 5
     assert model.tool_trace == [
         "write_todos",
         "search_related_papers",
         "prepare_paper",
+        "retrieve_paper_evidence",
+        AgentResearchDecision.__name__,
     ]
 
 
@@ -907,10 +990,10 @@ def test_agent_installs_official_per_attempt_limits_and_model_retry() -> None:
     model_limit, tool_budget, todo_middleware, status_middleware, model_retry = middleware
     assert isinstance(model_limit, ModelCallLimitMiddleware)
     assert model_limit.thread_limit is None
-    assert model_limit.run_limit == 6
+    assert model_limit.run_limit == 8
     assert model_limit.exit_behavior == "error"
     assert isinstance(tool_budget, ResearchToolBudgetMiddleware)
-    assert tool_budget.run_limit == 6
+    assert tool_budget.run_limit == 8
     assert isinstance(todo_middleware, ResearchTodoMiddleware)
     assert isinstance(status_middleware, ResearchStatusMiddleware)
     assert isinstance(model_retry, ModelRetryMiddleware)
@@ -955,6 +1038,91 @@ def test_enabled_context_registers_read_tools_and_fixed_middleware_order() -> No
         "retrieve_paper_evidence",
         "read_artifact_slice",
         "search_artifact",
+    ]
+
+
+def test_artifact_tools_clamp_model_requests_to_runtime_budgets() -> None:
+    read_calls: list[dict[str, object]] = []
+    search_calls: list[dict[str, object]] = []
+
+    class ArtifactStore:
+        def read_slice(self, artifact_id, *, conversation_id, cursor, max_tokens):
+            read_calls.append(
+                {
+                    "artifact_id": artifact_id,
+                    "conversation_id": conversation_id,
+                    "cursor": cursor,
+                    "max_tokens": max_tokens,
+                }
+            )
+            return SimpleNamespace(
+                artifact_id=artifact_id,
+                text="bounded",
+                next_cursor=None,
+                actual_tokens=max_tokens,
+                sha256="sha-read",
+            )
+
+        def search(self, artifact_id, *, conversation_id, query, max_matches):
+            search_calls.append(
+                {
+                    "artifact_id": artifact_id,
+                    "conversation_id": conversation_id,
+                    "query": query,
+                    "max_matches": max_matches,
+                }
+            )
+            return SimpleNamespace(
+                artifact_id=artifact_id,
+                matches=[],
+                actual_tokens=0,
+                sha256="sha-search",
+            )
+
+    def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
+        read_result = tools["read_artifact_slice"].invoke(
+            {"artifact_id": "artifact-1", "cursor": -10, "max_tokens": 99_999}
+        )
+        search_result = tools["search_artifact"].invoke(
+            {"artifact_id": "artifact-1", "query": "method", "max_matches": 999}
+        )
+        assert read_result["actual_tokens"] == 321
+        assert search_result["matches"] == []
+        return {
+            "structured_response": {
+                "selected_evidence_ids": [],
+                "paper_uses": [],
+                "limitations": ["no_direct_evidence: probe - bounded reads only"],
+            }
+        }
+
+    context, factory, _calls = _context(behavior)
+    context = replace(
+        context,
+        context_management=ContextManagementConfig(
+            enabled=True,
+            artifact_read_max_tokens=321,
+        ),
+        context_management_runtime=SimpleNamespace(artifact_store=ArtifactStore()),
+    )
+
+    run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert read_calls == [
+        {
+            "artifact_id": "artifact-1",
+            "conversation_id": "conversation-1",
+            "cursor": 0,
+            "max_tokens": 321,
+        }
+    ]
+    assert search_calls == [
+        {
+            "artifact_id": "artifact-1",
+            "conversation_id": "conversation-1",
+            "query": "method",
+            "max_matches": 10,
+        }
     ]
 
 
@@ -1516,6 +1684,106 @@ def test_authoritative_ledger_rejects_hallucinated_duplicate_or_mismatched_ids(
         run_research_agent(STATE, context, create_agent_factory=factory)
 
 
+def test_ledger_invalid_decision_gets_one_fresh_structured_attempt() -> None:
+    retrieved_ids: list[str] = []
+
+    def behavior(tools: Mapping[str, Any], attempt: int) -> object:
+        if attempt == 1:
+            tools["prepare_paper"].invoke({"external_id": PRIMARY.external_id})
+            retrieved = tools["retrieve_paper_evidence"].invoke(
+                {
+                    "question": "question",
+                    "external_id": PRIMARY.external_id,
+                    "top_k_each": 2,
+                    "summary_k": 2,
+                }
+            )
+            retrieved_ids.append(retrieved["evidence_items"][0]["id"])
+            selected_ids = ["ev-hallucinated"]
+        else:
+            selected_ids = [retrieved_ids[0]]
+        return {
+            "structured_response": {
+                "selected_evidence_ids": selected_ids,
+                "paper_uses": [],
+                "limitations": [],
+            }
+        }
+
+    context, factory, _calls = _context(behavior)
+
+    outcome = run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert [item.id for item in outcome.evidence_items] == retrieved_ids
+    assert len(factory.agents) == 2
+    second_input = factory.agents[1].invocations[0][0]
+    repair = second_input["messages"][-1]
+    assert isinstance(repair, HumanMessage)
+    assert repair.additional_kwargs == {
+        "paperpilot_source": "structured_response_repair"
+    }
+    assert retrieved_ids[0] in str(repair.content)
+    assert PRIMARY.external_id in str(repair.content)
+    assert "ResearchContractError" in str(repair.content)
+
+
+@pytest.mark.parametrize(
+    "budget_error",
+    [
+        GraphRecursionError("recursion limit reached"),
+        ModelCallLimitExceededError(
+            thread_count=0,
+            run_count=9,
+            thread_limit=None,
+            run_limit=8,
+        ),
+        ToolCallLimitExceededError(
+            thread_count=0,
+            run_count=9,
+            thread_limit=None,
+            run_limit=8,
+        ),
+    ],
+)
+def test_budget_exhaustion_uses_reserved_attempt_with_authoritative_ledger(
+    budget_error,
+) -> None:
+    retrieved_ids: list[str] = []
+
+    def behavior(tools: Mapping[str, Any], attempt: int) -> object:
+        if attempt == 1:
+            tools["prepare_paper"].invoke({"external_id": PRIMARY.external_id})
+            retrieved = tools["retrieve_paper_evidence"].invoke(
+                {
+                    "question": "question",
+                    "external_id": PRIMARY.external_id,
+                    "top_k_each": 2,
+                    "summary_k": 2,
+                }
+            )
+            retrieved_ids.append(retrieved["evidence_items"][0]["id"])
+            raise budget_error
+        return {
+            "structured_response": {
+                "selected_evidence_ids": [retrieved_ids[0]],
+                "paper_uses": [],
+                "limitations": [],
+            }
+        }
+
+    context, factory, _calls = _context(behavior)
+
+    outcome = run_research_agent(STATE, context, create_agent_factory=factory)
+
+    assert [item.id for item in outcome.evidence_items] == retrieved_ids
+    assert len(factory.agents) == 2
+    second_input = factory.agents[1].invocations[0][0]
+    continuation = second_input["messages"][-1]
+    assert isinstance(continuation, HumanMessage)
+    assert retrieved_ids[0] in str(continuation.content)
+    assert "bounded continuation" in str(continuation.content)
+
+
 def test_invalid_structured_response_is_attempted_at_most_twice() -> None:
     def behavior(_tools: Mapping[str, Any], _attempt: int) -> object:
         return {"structured_response": {"selected_evidence_ids": []}}
@@ -1528,15 +1796,26 @@ def test_invalid_structured_response_is_attempted_at_most_twice() -> None:
     assert len(factory.agents) == 2
     assert [len(agent.invocations) for agent in factory.agents] == [1, 1]
     assert exc_info.value.error_code == "agent_budget_exhausted"
-    middleware = factory.calls[0]["middleware"]
-    model_limit = next(
-        item for item in middleware if isinstance(item, ModelCallLimitMiddleware)
-    )
-    tool_budget = next(
-        item for item in middleware if isinstance(item, ResearchToolBudgetMiddleware)
-    )
-    assert len(factory.agents) * model_limit.run_limit <= 12
-    assert len(factory.agents) * tool_budget.run_limit <= 12
+    model_limits = [
+        next(
+            item.run_limit
+            for item in call["middleware"]
+            if isinstance(item, ModelCallLimitMiddleware)
+        )
+        for call in factory.calls
+    ]
+    tool_limits = [
+        next(
+            item.run_limit
+            for item in call["middleware"]
+            if isinstance(item, ResearchToolBudgetMiddleware)
+        )
+        for call in factory.calls
+    ]
+    assert model_limits == [8, 4]
+    assert sum(model_limits) == 12
+    assert tool_limits == [8, 4]
+    assert sum(tool_limits) == 12
 
 
 def test_structured_attempts_isolate_status_state_but_retain_business_ledgers() -> None:
@@ -1813,7 +2092,8 @@ def test_graph_recursion_exhaustion_becomes_deep_reading_task_error() -> None:
     assert exc_info.value.error_code == "agent_budget_exhausted"
     assert "recursion limit reached" not in exc_info.value.public_message
     assert factory.agent is not None
-    assert len(factory.agent.invocations) == 1
+    assert len(factory.agents) == 2
+    assert [len(agent.invocations) for agent in factory.agents] == [1, 1]
 
 
 @pytest.mark.parametrize(
@@ -1850,7 +2130,8 @@ def test_official_call_limit_errors_become_safe_terminal_budget_error(
     )
     assert str(budget_error) not in exc_info.value.public_message
     assert factory.agent is not None
-    assert len(factory.agent.invocations) == 1
+    assert len(factory.agents) == 2
+    assert [len(agent.invocations) for agent in factory.agents] == [1, 1]
 
 
 def test_unrelated_contract_error_is_not_retried_or_wrapped() -> None:

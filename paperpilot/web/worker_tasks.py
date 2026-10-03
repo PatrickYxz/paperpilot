@@ -16,7 +16,10 @@ from paperpilot.web.celery_app import (
 )
 from paperpilot.web.checkpoint import SqliteCheckpointRuntime
 from paperpilot.web.config import WebRuntimeConfig
-from paperpilot.web.task_executor import task_retry_countdown_seconds
+from paperpilot.web.task_executor import (
+    is_retryable_task_exception,
+    task_retry_countdown_seconds,
+)
 from paperpilot.web.task_store import TaskStore
 
 _runtime: MCPRuntime | None = None
@@ -151,6 +154,23 @@ def execute_research_task(
         )
     except _RetryableConversationExecution as retryable:
         exc = retryable.original
+        if not is_retryable_task_exception(exc):
+            try:
+                _fail_non_retryable(
+                    task_id,
+                    attempts=retries + 1,
+                    exc=exc,
+                )
+            except Exception:
+                _LOGGER.exception(
+                    "Conversation non-retryable failure finalization failed",
+                    extra={
+                        "event": "task.execution_failure_finalize_failed",
+                        "executor": "celery",
+                        "reason": "store_exception",
+                    },
+                )
+            raise exc
         if retries < config.task_max_retries:
             countdown = task_retry_countdown_seconds(
                 retries,
@@ -213,6 +233,28 @@ def _fail_retry_exhausted(
             backend="celery",
             attempts=attempts,
             max_retries=max_retries,
+            exc=exc,
+        )
+    finally:
+        store.close()
+
+
+def _fail_non_retryable(
+    task_id: str,
+    *,
+    attempts: int,
+    exc: Exception,
+) -> None:
+    store = _store_factory()
+    try:
+        DeepReadingRunner(
+            task_store=store,
+            checkpointer=object(),
+            mcp_runtime=object(),
+        ).fail_non_retryable(
+            task_id,
+            backend="celery",
+            attempts=attempts,
             exc=exc,
         )
     finally:

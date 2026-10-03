@@ -31,6 +31,16 @@ class ConversationTaskRunnerLike(Protocol):
     ) -> None:
         """Persist retry exhaustion unless the task already completed."""
 
+    def fail_non_retryable(
+        self,
+        task_id: str,
+        *,
+        backend: str,
+        attempts: int,
+        exc: Exception,
+    ) -> None:
+        """Persist a deterministic execution failure without retrying it."""
+
 
 class TaskExecutorAtCapacityError(RuntimeError):
     """Raised when all running and queued thread slots are reserved."""
@@ -225,6 +235,24 @@ class TaskExecutor:
                     self.runner.run(task_id, allow_running=True)
                 return
             except Exception as exc:
+                if not is_retryable_task_exception(exc):
+                    try:
+                        self.runner.fail_non_retryable(
+                            task_id,
+                            backend="thread",
+                            attempts=attempt_index + 1,
+                            exc=exc,
+                        )
+                    except Exception:
+                        _LOGGER.exception(
+                            "Conversation non-retryable failure finalization failed",
+                            extra={
+                                "event": "task.execution_failure_finalize_failed",
+                                "executor": "thread",
+                                "reason": "store_exception",
+                            },
+                        )
+                    raise
                 if attempt_index < self.max_retries:
                     countdown = task_retry_countdown_seconds(
                         attempt_index,
@@ -368,3 +396,22 @@ def task_retry_countdown_seconds(
     if retry_index < 0:
         raise ValueError("retry_index must be at least 0")
     return min(initial_seconds * (2**retry_index), max_seconds)
+
+
+def is_retryable_task_exception(exc: Exception) -> bool:
+    """Return whether task-level execution may benefit from another attempt."""
+    status_code = _exception_status_code(exc)
+    if status_code is None:
+        return True
+    if 400 <= status_code < 500:
+        return status_code in {408, 409, 425, 429}
+    return True
+
+
+def _exception_status_code(exc: Exception) -> int | None:
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    response = getattr(exc, "response", None)
+    response_status = getattr(response, "status_code", None)
+    return response_status if isinstance(response_status, int) else None

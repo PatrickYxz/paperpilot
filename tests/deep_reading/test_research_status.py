@@ -215,6 +215,25 @@ def test_write_todos_tool_returns_command_without_echoing_todo_text() -> None:
     assert "检索方法" not in str(message.content)
 
 
+def test_write_todos_tool_schema_exposes_required_item_contract() -> None:
+    middleware = ResearchTodoMiddleware()
+    description = middleware.tools[0].description
+    schema = middleware.tools[0].args_schema.model_json_schema()
+    item_schema = schema["$defs"]["ResearchTodoInput"]
+
+    assert item_schema["additionalProperties"] is False
+    assert item_schema["required"] == ["id", "content", "status"]
+    assert item_schema["properties"]["id"]["type"] == "string"
+    assert item_schema["properties"]["content"]["type"] == "string"
+    assert item_schema["properties"]["status"]["enum"] == [
+        "pending",
+        "in_progress",
+        "completed",
+    ]
+    assert "preserve every existing id and content exactly" in description
+    assert "proceed to the next business tool" in description
+
+
 def test_write_todos_invalid_update_returns_error_without_state_update() -> None:
     middleware = ResearchTodoMiddleware()
     write_todos = _write_todos(middleware)

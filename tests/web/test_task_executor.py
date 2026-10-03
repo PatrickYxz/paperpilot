@@ -18,10 +18,19 @@ from paperpilot.web.task_executor import (
     TaskSubmissionReservation,
     build_task_executor,
 )
+
+
+class HttpStatusError(RuntimeError):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
 class FakeRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[str, bool]] = []
         self.exhaustions: list[dict[str, object]] = []
+        self.non_retryable_failures: list[dict[str, object]] = []
 
     def run(self, task_id: str, *, allow_running: bool = False) -> bool:
         self.calls.append((task_id, allow_running))
@@ -29,6 +38,9 @@ class FakeRunner:
 
     def fail_retry_exhausted(self, task_id: str, **kwargs) -> None:
         self.exhaustions.append({"task_id": task_id, **kwargs})
+
+    def fail_non_retryable(self, task_id: str, **kwargs) -> None:
+        self.non_retryable_failures.append({"task_id": task_id, **kwargs})
 
 
 class FakeTaskSender:
@@ -168,6 +180,63 @@ def test_retry_countdown_uses_exponential_backoff_with_cap():
         )
         for retry_index in range(5)
     ] == [3, 6, 10, 10, 10]
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    [
+        (400, False),
+        (401, False),
+        (404, False),
+        (408, True),
+        (409, True),
+        (425, True),
+        (429, True),
+        (500, True),
+    ],
+)
+def test_http_status_retry_classifier(status_code, expected):
+    classifier = getattr(
+        task_executor_module,
+        "is_retryable_task_exception",
+        None,
+    )
+
+    assert classifier is not None
+    assert classifier(HttpStatusError(status_code)) is expected
+
+
+def test_thread_executor_does_not_retry_deterministic_http_4xx():
+    class BadRequestRunner(FakeRunner):
+        def run(self, task_id: str, *, allow_running: bool = False) -> bool:
+            super().run(task_id, allow_running=allow_running)
+            raise HttpStatusError(400)
+
+    runner = BadRequestRunner()
+    sleeps: list[float] = []
+    executor = TaskExecutor(
+        runner,
+        max_workers=1,
+        max_retries=3,
+        sleeper=sleeps.append,
+    )
+    try:
+        future = executor.submit("task_bad_request")
+
+        with pytest.raises(HttpStatusError, match="HTTP 400"):
+            future.result(timeout=1)
+    finally:
+        executor.shutdown()
+
+    assert runner.calls == [("task_bad_request", False)]
+    assert sleeps == []
+    assert runner.exhaustions == []
+    assert len(runner.non_retryable_failures) == 1
+    failure = runner.non_retryable_failures[0]
+    assert failure["task_id"] == "task_bad_request"
+    assert failure["backend"] == "thread"
+    assert failure["attempts"] == 1
+    assert isinstance(failure["exc"], HttpStatusError)
 
 
 @pytest.mark.parametrize("failures_before_success", [1, 2])

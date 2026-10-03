@@ -95,21 +95,12 @@ class ModelAwareTokenCounter:
             counter = getattr(self._model, "get_num_tokens_from_messages", None)
             if callable(counter):
                 try:
-                    if tool_schemas:
-                        try:
-                            value = counter(
-                                list(messages),
-                                tools=list(tool_schemas),
-                            )
-                        except TypeError:
-                            value = counter(list(messages))
-                            if isinstance(value, int) and value >= 0:
-                                return value + _fallback_tokens(
-                                    _normalize_tool_schemas(tool_schemas)
-                                )
-                    else:
-                        value = counter(list(messages))
+                    value = counter(list(messages))
                     if isinstance(value, int) and value >= 0:
+                        if tool_schemas:
+                            value += _fallback_tokens(
+                                _normalize_tool_schemas(tool_schemas)
+                            )
                         return value
                 except Exception:
                     pass

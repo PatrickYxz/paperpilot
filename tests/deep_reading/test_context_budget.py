@@ -97,6 +97,29 @@ def test_model_counter_adds_tool_schema_tokens_when_provider_only_counts_message
     assert long_count > short_count
 
 
+def test_model_counter_does_not_trust_silently_ignored_tools_argument():
+    class SilentlyIgnoringModel:
+        def __init__(self) -> None:
+            self.seen_tools = "not-called"
+
+        def get_num_tokens_from_messages(self, messages, tools=None):
+            del messages
+            self.seen_tools = tools
+            return 17
+
+    model = SilentlyIgnoringModel()
+    counter = ModelAwareTokenCounter(model=model)
+    schemas = [{"name": "search", "parameters": {"type": "object"}}]
+
+    count = counter.count_messages(
+        [HumanMessage(content="find papers")],
+        tool_schemas=schemas,
+    )
+
+    assert count > 17
+    assert model.seen_tools is None
+
+
 def test_budget_and_reclaim_threshold_use_exact_boundaries():
     assert usable_input_budget(
         model_context_window_tokens=1_000,

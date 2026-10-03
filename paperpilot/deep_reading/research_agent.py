@@ -262,6 +262,12 @@ If more than one role applies, choose the first applicable role in this order:
   business tool.
 - Call `write_todos` at most once in one model response and never combine it
   with another tool or the final structured response.
+- After `write_todos` reports that the list was updated, proceed to the next
+  required business tool; do not call `write_todos` again merely to reword,
+  shorten, expand, translate, or normalize the plan.
+- On every later TODO update, preserve every existing TODO `id` and `content`
+  exactly. Change only `status` according to completed work. Never rename a
+  TODO or edit its text after the initial plan is accepted.
 - IF a TODO plan exists, complete every item in a dedicated `write_todos` call
   before returning `AgentResearchDecision` on the next model call.
 - `budget_low`: finish only indispensable work or return limitations.
@@ -457,12 +463,6 @@ def run_research_agent(
                 _build_search_artifact_tool(context),
             ]
         )
-    per_attempt_model_limit = (
-        context.research_model_call_limit // _STRUCTURED_RESPONSE_ATTEMPTS
-    )
-    per_attempt_tool_limit = (
-        context.research_tool_call_limit // _STRUCTURED_RESPONSE_ATTEMPTS
-    )
     messages = _research_messages(
         state,
         primary_external_id=primary_external_id,
@@ -478,6 +478,14 @@ def run_research_agent(
         )
 
     for attempt in range(1, _STRUCTURED_RESPONSE_ATTEMPTS + 1):
+        per_attempt_model_limit = _structured_attempt_limit(
+            context.research_model_call_limit,
+            attempt,
+        )
+        per_attempt_tool_limit = _structured_attempt_limit(
+            context.research_tool_call_limit,
+            attempt,
+        )
         tracker = ResearchExecutionTracker(
             attempt=attempt,
             ledger_snapshot=ledger_snapshot,
@@ -516,6 +524,17 @@ def run_research_agent(
                 ),
             ]
         )
+        attempt_messages = list(messages)
+        if attempt > 1 and last_structured_error is not None:
+            attempt_messages.append(
+                _structured_response_repair_message(
+                    attempt=attempt,
+                    error=last_structured_error,
+                    candidates=candidate_ledger,
+                    prepared=prepared_ledger,
+                    evidence=evidence_ledger,
+                )
+            )
         agent = create_agent_factory(
             model=context.model,
             tools=registered_tools,
@@ -527,7 +546,7 @@ def run_research_agent(
         )
         try:
             result = agent.invoke(
-                {"messages": messages},
+                {"messages": attempt_messages},
                 config={
                     "recursion_limit": context.research_recursion_limit,
                     "tags": ["paperpilot:model"],
@@ -542,9 +561,12 @@ def run_research_agent(
             ModelCallLimitExceededError,
             ToolCallLimitExceededError,
         ) as exc:
-            raise AgentBudgetExceededError(
-                "research agent budget exhausted before a valid decision"
-            ) from exc
+            if attempt == _STRUCTURED_RESPONSE_ATTEMPTS:
+                raise AgentBudgetExceededError(
+                    "research agent budget exhausted before a valid decision"
+                ) from exc
+            last_structured_error = exc
+            continue
         except StructuredOutputError as exc:
             last_structured_error = exc
             continue
@@ -556,21 +578,96 @@ def run_research_agent(
             last_structured_error = exc
             continue
 
-        materialized = _validate_and_materialize_result(
-            decision,
-            candidates=candidate_ledger,
-            evidence=evidence_ledger,
-            primary_external_id=primary_external_id,
-        )
+        try:
+            materialized = _validate_and_materialize_result(
+                decision,
+                candidates=candidate_ledger,
+                evidence=evidence_ledger,
+                primary_external_id=primary_external_id,
+            )
+        except ResearchContractError as exc:
+            last_structured_error = exc
+            continue
         return ResearchExecutionOutcome(
             result=materialized,
             trace=_research_trace(result, context_middleware),
             context_delta=_validated_context_delta(decision, state, context),
         )
 
+    if isinstance(last_structured_error, ResearchContractError):
+        raise last_structured_error
     raise AgentBudgetExceededError(
         "research agent structured response attempts exhausted after 2 attempts"
     ) from last_structured_error
+
+
+def _structured_attempt_limit(total_limit: int, attempt: int) -> int:
+    """Reserve one third for repair while prioritizing the primary attempt."""
+    repair_reserve = max(1, total_limit // 3)
+    if attempt == 1:
+        return total_limit - repair_reserve
+    return repair_reserve
+
+
+def _structured_response_repair_message(
+    *,
+    attempt: int,
+    error: Exception,
+    candidates: Mapping[str, PaperCandidate],
+    prepared: Mapping[str, PaperCandidate],
+    evidence: Mapping[str, EvidenceItem],
+) -> HumanMessage:
+    from xml.etree.ElementTree import Element, SubElement, tostring
+
+    root = Element(
+        "structured_response_repair",
+        {
+            "source": "paperpilot_harness",
+            "schema_version": "paperpilot-structured-repair-v1",
+            "attempt": str(attempt),
+            "previous_error_type": type(error).__name__,
+        },
+    )
+    ledger = SubElement(root, "authoritative_ledger")
+    candidates_element = SubElement(ledger, "candidate_papers")
+    for external_id in sorted(candidates):
+        SubElement(candidates_element, "paper", {"external_id": external_id})
+    prepared_element = SubElement(ledger, "prepared_papers")
+    for external_id in sorted(prepared):
+        SubElement(prepared_element, "paper", {"external_id": external_id})
+    evidence_element = SubElement(ledger, "evidence_items")
+    for evidence_id, item in sorted(evidence.items()):
+        SubElement(
+            evidence_element,
+            "evidence",
+            {
+                "id": evidence_id,
+                "paper_external_id": item.paper_external_id,
+            },
+        )
+    instruction = SubElement(root, "instruction")
+    if isinstance(
+        error,
+        (GraphRecursionError, ModelCallLimitExceededError, ToolCallLimitExceededError),
+    ):
+        instruction.text = (
+            "This is the final bounded continuation attempt. Use only IDs in "
+            "the authoritative ledger. Prefer returning a valid "
+            "AgentResearchDecision now; if evidence is insufficient, state a "
+            "limitation rather than inventing evidence. Call another tool only "
+            "to cover a material gap, and do not repeat completed tools."
+        )
+    else:
+        instruction.text = (
+            "Return one corrected AgentResearchDecision using only IDs in this "
+            "authoritative ledger. Do not repeat completed tools unless an uncovered "
+            "required point still permits a materially different call."
+        )
+    return HumanMessage(
+        content=tostring(root, encoding="unicode", short_empty_elements=True),
+        id=f"paperpilot-structured-repair-attempt-{attempt}",
+        additional_kwargs={"paperpilot_source": "structured_response_repair"},
+    )
 
 
 def _validated_context_delta(
@@ -993,17 +1090,23 @@ def _build_read_artifact_slice_tool(context: DeepReadingContext) -> BaseTool:
         cursor: int,
         max_tokens: int,
     ) -> dict[str, object]:
-        """Read a bounded slice from an artifact in this conversation."""
+        """Read a slice; cursor and token count are clamped to safe bounds."""
         store = _context_artifact_store(context)
         if store is None:
             raise ResearchContractError("context artifact runtime is unavailable")
-        if max_tokens > context.context_management.artifact_read_max_tokens:
-            raise ResearchContractError("artifact read token budget exceeded")
+        bounded_cursor = max(0, cursor)
+        bounded_max_tokens = max(
+            1,
+            min(
+                max_tokens,
+                context.context_management.artifact_read_max_tokens,
+            ),
+        )
         result = store.read_slice(
             artifact_id,
             conversation_id=context.conversation_id,
-            cursor=cursor,
-            max_tokens=max_tokens,
+            cursor=bounded_cursor,
+            max_tokens=bounded_max_tokens,
         )
         return {
             "artifact_id": result.artifact_id,
@@ -1023,17 +1126,16 @@ def _build_search_artifact_tool(context: DeepReadingContext) -> BaseTool:
         query: str,
         max_matches: int,
     ) -> dict[str, object]:
-        """Search bounded matches in an artifact in this conversation."""
+        """Search an artifact; match count is clamped to the safe bound."""
         store = _context_artifact_store(context)
         if store is None:
             raise ResearchContractError("context artifact runtime is unavailable")
-        if max_matches > 10:
-            raise ResearchContractError("artifact search match budget exceeded")
+        bounded_max_matches = max(1, min(max_matches, 10))
         result = store.search(
             artifact_id,
             conversation_id=context.conversation_id,
             query=query,
-            max_matches=max_matches,
+            max_matches=bounded_max_matches,
         )
         return {
             "artifact_id": result.artifact_id,

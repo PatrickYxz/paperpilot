@@ -330,6 +330,7 @@ def test_deepseek_model_uses_explicit_model_and_bounds_output(
             "temperature": 0,
             "max_tokens": 4096,
             "max_retries": 0,
+            "extra_body": {"thinking": {"type": "disabled"}},
         }
     ]
 
@@ -994,6 +995,64 @@ def test_retry_exhausted_failure_is_idempotent_and_preserves_completed_race(
         store.close()
 
 
+def test_non_retryable_failure_is_sanitized_and_archived(tmp_path) -> None:
+    store, user, conversation = _create_store_and_conversation(
+        tmp_path / "business.sqlite3"
+    )
+    checkpoint_runtime = SqliteCheckpointRuntime.open(
+        tmp_path / "checkpoints.sqlite3"
+    )
+    mcp_runtime = MCPRuntime(_FakeMCPClient)
+    runner = DeepReadingRunner(
+        task_store=store,
+        checkpointer=checkpoint_runtime.saver,
+        mcp_runtime=mcp_runtime,
+        model_factory=_ModelFactory([]),
+        paper_search=lambda _query, _limit: [],
+        context_management=ContextManagementConfig(enabled=True),
+    )
+    turn = _new_turn(store, user, conversation, "Reject this request")
+    assert store.claim_task(turn.task.id) is not None
+
+    class BadRequestError(RuntimeError):
+        status_code = 400
+
+    failure = BadRequestError("secret provider response")
+    try:
+        runner.fail_non_retryable(
+            turn.task.id,
+            backend="thread",
+            attempts=1,
+            exc=failure,
+        )
+
+        assert store.get_task(turn.task.id, user_id=user.id).status == "failed"
+        events = store.list_events_page(
+            turn.task.id,
+            user_id=user.id,
+            after_id=0,
+            limit=100,
+        )
+        assert events is not None
+        failures = [event for event in events.items if event.type == "failed"]
+        assert len(failures) == 1
+        assert failures[0].stage == "execution_non_retryable"
+        assert failures[0].payload == {
+            "backend": "thread",
+            "attempts": 1,
+            "error_type": "BadRequestError",
+            "status_code": 400,
+        }
+        assert "secret provider response" not in str(failures[0].to_dict())
+        archives = store.list_turn_archives(conversation.id)
+        assert len(archives) == 1
+        assert archives[0].terminal_status == "failed"
+    finally:
+        mcp_runtime.close()
+        checkpoint_runtime.close()
+        store.close()
+
+
 def test_runner_passes_custom_runtime_bounds_into_graph_context(
     tmp_path,
     monkeypatch,
@@ -1103,7 +1162,7 @@ def test_runner_passes_default_research_bounds_into_graph_context(
         turn = _new_turn(store, user, conversation, "Use default runtime bounds")
         runner.run(turn.task.id)
 
-        assert seen_bounds == [(24, 12, 12, 4096, 1)]
+        assert seen_bounds == [(33, 12, 12, 4096, 1)]
     finally:
         mcp_runtime.close()
         checkpoint_runtime.close()

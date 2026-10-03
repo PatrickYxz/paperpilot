@@ -32,7 +32,7 @@ class DeepReadingContext:
     context_management_runtime: Any | None = None
     summary_token_threshold: int = 32_000
     summary_recent_turns: int = 6
-    research_recursion_limit: int = 24
+    research_recursion_limit: int = 33
     research_model_call_limit: int = 12
     research_tool_call_limit: int = 12
     research_max_output_tokens: int = 4096

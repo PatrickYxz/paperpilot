@@ -23,7 +23,7 @@ from langchain.tools import ToolRuntime
 from langchain_core.tools import StructuredTool
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from langgraph.types import Command
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -153,9 +153,18 @@ def validate_research_todo_update(
     return normalized, max(high_water_mark, max_accepted_id)
 
 
+class ResearchTodoInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^todo_[1-9][0-9]*$")
+    content: str = Field(min_length=1, max_length=160)
+    status: TodoStatus
+
+
 class WriteResearchTodosInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    todos: list[dict[str, object]]
+
+    todos: list[ResearchTodoInput] = Field(min_length=1, max_length=6)
 
 
 class ResearchTodoMiddleware(AgentMiddleware[ResearchAgentState, Any, Any]):
@@ -169,7 +178,14 @@ class ResearchTodoMiddleware(AgentMiddleware[ResearchAgentState, Any, Any]):
         self.tools = [
             StructuredTool.from_function(
                 name="write_todos",
-                description="Replace the current Research execution TODO plan.",
+                description=(
+                    "Replace the Research TODO plan. The initial plan must contain "
+                    "1-6 items with exactly one in_progress item and the rest "
+                    "pending. After a successful update, proceed to the next business "
+                    "tool. On later updates, preserve every existing id and content "
+                    "exactly and change only status; a fully completed plan has all "
+                    "items completed."
+                ),
                 func=self._write_todos,
                 args_schema=WriteResearchTodosInput,
                 infer_schema=False,
@@ -180,13 +196,19 @@ class ResearchTodoMiddleware(AgentMiddleware[ResearchAgentState, Any, Any]):
         self,
         *,
         runtime: ToolRuntime,
-        todos: list[dict[str, object]],
+        todos: list[ResearchTodoInput],
     ) -> Command[Any] | ToolMessage:
         current = runtime.state.get("todos", [])
         try:
+            proposed = [
+                item.model_dump()
+                if isinstance(item, ResearchTodoInput)
+                else dict(item)
+                for item in todos
+            ]
             normalized, new_high_water_mark = validate_research_todo_update(
                 current=current if isinstance(current, list) else [],
-                proposed=todos,
+                proposed=proposed,
                 high_water_mark=self._high_water_mark,
             )
         except ResearchTodoValidationError as exc:

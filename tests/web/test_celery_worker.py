@@ -43,6 +43,12 @@ class NonRetryableWorkerError(RuntimeError):
     pass
 
 
+class HttpStatusError(RuntimeError):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
 class FailingDeepReadingRunner:
     def __init__(self, exc: Exception, store=None) -> None:
         self.exc = exc
@@ -216,6 +222,56 @@ def test_celery_task_retries_real_conversation_execution_exception(
     check = TaskStore(db_path)
     assert check.get_task(task.id).status == "running"
     check.close()
+
+
+def test_celery_task_does_not_retry_deterministic_http_4xx(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "conversation-bad-request.sqlite3"
+    seed = TaskStore(db_path)
+    task = _new_conversation_task(seed)
+    seed.close()
+    execution_error = HttpStatusError(400)
+    _configure_failing_conversation(
+        monkeypatch,
+        db_path=db_path,
+        execution_error=execution_error,
+    )
+    retry_calls = _capture_retry(monkeypatch)
+    finalized: list[dict[str, object]] = []
+
+    def record_non_retryable(task_id, *, attempts, exc):
+        finalized.append(
+            {
+                "task_id": task_id,
+                "attempts": attempts,
+                "exc": exc,
+            }
+        )
+
+    monkeypatch.setattr(
+        worker_tasks,
+        "_fail_non_retryable",
+        record_non_retryable,
+        raising=False,
+    )
+
+    result = worker_tasks.execute_research_task.apply(
+        args=[task.id],
+        throw=False,
+    )
+
+    assert result.failed()
+    assert result.result is execution_error
+    assert retry_calls == []
+    assert finalized == [
+        {
+            "task_id": task.id,
+            "attempts": 1,
+            "exc": execution_error,
+        }
+    ]
 
 
 @pytest.mark.parametrize("failure_point", ["mcp", "checkpoint"])

@@ -436,7 +436,7 @@ def test_context_is_frozen_and_rejects_unbounded_configuration() -> None:
         default_context.research_tool_call_limit,
         default_context.research_max_output_tokens,
         default_context.research_model_retries,
-    ) == (24, 12, 12, 4096, 1)
+    ) == (33, 12, 12, 4096, 1)
 
     with pytest.raises(FrozenInstanceError):
         context.task_id = "changed"  # type: ignore[misc]

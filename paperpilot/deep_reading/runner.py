@@ -91,6 +91,7 @@ def build_deep_reading_model(
         temperature=0,
         max_tokens=research_max_output_tokens,
         max_retries=0,
+        extra_body={"thinking": {"type": "disabled"}},
     )
 
 
@@ -108,7 +109,7 @@ class DeepReadingRunner:
         paper_search: PaperSearch = search_arxiv_candidates,
         summary_token_threshold: int = 32_000,
         summary_recent_turns: int = 6,
-        research_recursion_limit: int = 24,
+        research_recursion_limit: int = 33,
         research_model_call_limit: int = 12,
         research_tool_call_limit: int = 12,
         research_max_output_tokens: int = 4096,
@@ -208,6 +209,52 @@ class DeepReadingRunner:
                     "max_retries": max_retries,
                     "error_type": type(exc).__name__,
                 },
+            )
+        except ValueError:
+            task = self._task_store.get_task(task_id)
+            if (
+                task is not None
+                and task.conversation_id is not None
+                and task.status == "completed"
+            ):
+                return
+            raise
+        self._archive_task_terminal_best_effort(task_id, terminal_status="failed")
+
+    def fail_non_retryable(
+        self,
+        task_id: str,
+        *,
+        backend: str,
+        attempts: int,
+        exc: Exception,
+    ) -> None:
+        """Idempotently fail active work after a deterministic provider error."""
+        status_code = _exception_status_code(exc)
+        _LOGGER.error(
+            "Conversation execution failed with a non-retryable error",
+            exc_info=(type(exc), exc, exc.__traceback__),
+            extra={
+                "event": "task.execution_non_retryable",
+                "executor": backend,
+                "reason": "non_retryable_exception",
+                "exception_type": type(exc).__name__,
+                "status_code": status_code,
+            },
+        )
+        payload: dict[str, object] = {
+            "backend": backend,
+            "attempts": attempts,
+            "error_type": type(exc).__name__,
+        }
+        if status_code is not None:
+            payload["status_code"] = status_code
+        try:
+            self._task_store.fail_conversation_task(
+                task_id=task_id,
+                message="Conversation execution failed with a non-retryable error.",
+                stage="execution_non_retryable",
+                payload=payload,
             )
         except ValueError:
             task = self._task_store.get_task(task_id)
@@ -837,6 +884,15 @@ def _archive_values(snapshot: object | None) -> dict[str, object]:
     if isinstance(snapshot, Mapping):
         return dict(snapshot)
     return {}
+
+
+def _exception_status_code(exc: Exception) -> int | None:
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    response = getattr(exc, "response", None)
+    response_status = getattr(response, "status_code", None)
+    return response_status if isinstance(response_status, int) else None
 
 
 def _trace_from_state(values: Mapping[str, object]) -> ResearchTrace:

@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 import arxiv
 import certifi
-import fitz
+import pymupdf as fitz
 from mcp.server.fastmcp import FastMCP
 
 from paperpilot.papers import normalize_arxiv_id, search_arxiv_candidates
