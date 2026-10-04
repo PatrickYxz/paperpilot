@@ -222,6 +222,22 @@ def evaluate_checks(
         )
     )
 
+    if outcome.scenario.trap_terms:
+        triggered = [
+            f"{term} (turn {index})"
+            for index, turn in enumerate(turns, start=1)
+            for term in outcome.scenario.trap_terms
+            if term.lower()
+            in ((turn.assistant_message or {}).get("content") or "").lower()
+        ]
+        checks.append(
+            CheckResult(
+                "no_trap_terms",
+                not triggered,
+                f"trap terms found: {triggered or 'none'}",
+            )
+        )
+
     if context_management:
         artifact_count = sum(len(turn.artifacts) for turn in turns)
         checks.append(

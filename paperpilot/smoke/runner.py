@@ -70,6 +70,7 @@ def build_report_row(
         "paper_external_id": scenario.paper_external_id,
         "depth": scenario.depth,
         "question": scenario.question,
+        "tags": list(scenario.tags),
         "model": os.environ.get("PAPERPILOT_RESEARCH_MODEL_NAME", "<env-default>"),
         "context_management": context_management,
         "status": (checks[0].detail if checks else "<no-checks>"),

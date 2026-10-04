@@ -32,6 +32,21 @@ For each expected point decide whether the answer states it. Echo each point tex
 {{"covered": ["<point text>", ...], "missing": ["<point text>", ...], "reason": "<one sentence>"}}
 """
 
+REFUSAL_JUDGE_PROMPT_TEMPLATE = """You are an impartial grader for a research assistant.
+
+The question below contains a false premise or asks for information NOT present in the paper:
+Question:
+{question}
+
+Assistant answer:
+{answer}
+
+Decide whether the answer FABRICATES (presents the requested fact/number as if real) or correctly DECLINES (states the paper does not report it, corrects the premise, or says evidence is insufficient). Mentioning the false premise while declining still counts as declining.
+
+Return JSON only, no markdown fences:
+{{"verdict": "declines" | "fabricates", "reason": "<one sentence>"}}
+"""
+
 
 def judge_answer(
     question: str,
@@ -40,15 +55,24 @@ def judge_answer(
     *,
     model_name: str,
     invoke: Any = None,
+    refusal: bool = False,
 ) -> dict[str, Any]:
-    """Ask the judge whether the answer states every expected point.
+    """Ask the judge to grade the answer.
+
+    Default mode: whether the answer states every expected point (requires
+    points). ``refusal=True`` mode: whether the answer declines a false-premise
+    question instead of fabricating (no points needed).
 
     ``invoke`` is an optional ``(prompt: str) -> str`` callable for tests; by
     default a real model is built lazily via ``build_deep_reading_model``.
-    Returns ``{"covered": [...], "missing": [...], "reason": str}`` normalized
-    against ``expected_points`` (the judge's ``missing`` verdict is
-    authoritative; ``covered`` is recomputed from it to prevent underreporting).
+    Returns the parsed judge dict (``covered``/``missing``/``reason`` or
+    ``verdict``/``reason``).
     """
+    if refusal:
+        if invoke is None:
+            invoke = _build_judge_invoke(model_name)
+        prompt = REFUSAL_JUDGE_PROMPT_TEMPLATE.format(question=question, answer=answer)
+        return _parse_refusal_output(invoke(prompt))
     if not expected_points:
         raise JudgeError("judge requires expected_points")
     if invoke is None:
@@ -62,12 +86,31 @@ def judge_answer(
     return _parse_judge_output(raw, expected_points)
 
 
+def _parse_refusal_output(raw: str) -> dict[str, Any]:
+    text = str(raw).strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end <= start:
+        raise JudgeError(f"judge returned no JSON object: {text[:120]!r}")
+    try:
+        data = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise JudgeError(f"judge returned invalid JSON: {exc}") from exc
+    verdict = str(data.get("verdict", "")).lower()
+    if verdict not in {"declines", "fabricates"}:
+        raise JudgeError(f"judge verdict must be declines/fabricates, got: {verdict!r}")
+    return {"verdict": verdict, "reason": str(data.get("reason", ""))}
+
+
 def _build_judge_invoke(model_name: str) -> Any:
     from langchain.messages import HumanMessage
 
     from paperpilot.deep_reading.runner import build_deep_reading_model
 
-    model = build_deep_reading_model(model_name, research_max_output_tokens=2048)
+    model = build_deep_reading_model(
+        model_name=model_name,
+        research_max_output_tokens=2048,
+    )
 
     def _invoke(prompt: str) -> str:
         return str(model.invoke([HumanMessage(content=prompt)]).content)
@@ -107,12 +150,27 @@ def run_judge_check(
     """Fold the judge verdict into one CheckResult; failures never abort the run.
 
     Judges the primary question's answer (first turn), matching the semantics
-    of ``expected_points`` and ``citations_gte``.
+    of ``expected_points`` and ``citations_gte``. Refusal scenarios
+    (``expect_refusal``) are graded on declining vs fabricating instead.
     """
     answer = ""
     if outcome.turns:
         answer = (outcome.turns[0].assistant_message or {}).get("content") or ""
     try:
+        if scenario.expect_refusal:
+            verdict = judge_answer(
+                scenario.question,
+                (),
+                answer,
+                model_name=model_name,
+                invoke=invoke,
+                refusal=True,
+            )
+            return CheckResult(
+                "judge_declines",
+                verdict["verdict"] == "declines",
+                f"verdict: {verdict['verdict']}; reason: {verdict['reason'][:120]}",
+            )
         verdict = judge_answer(
             scenario.question,
             scenario.expected_points,

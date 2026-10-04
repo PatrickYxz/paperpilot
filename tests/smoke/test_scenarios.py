@@ -89,6 +89,32 @@ def test_load_scenarios_rejects_bad_follow_ups(tmp_path: Path) -> None:
         load_scenarios(cases)
 
 
+def test_load_scenarios_parses_tags_refusal_and_traps(tmp_path: Path) -> None:
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(
+        '{"id": "a", "question": "q", "depth": "quick", "paper_external_id": "1v1",'
+        ' "tags": ["adversarial", "honesty"], "expect_refusal": true,'
+        ' "trap_terms": ["80.5", "76%"]}\n',
+        encoding="utf-8",
+    )
+    scenario = load_scenarios(cases)[0]
+    assert scenario.tags == ("adversarial", "honesty")
+    assert scenario.expect_refusal is True
+    assert scenario.trap_terms == ("80.5", "76%")
+
+
+@pytest.mark.parametrize("bad_field", ["tags", "trap_terms"])
+def test_load_scenarios_rejects_non_string_tag_lists(tmp_path: Path, bad_field: str) -> None:
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(
+        '{"id": "a", "question": "q", "depth": "quick", "paper_external_id": "1v1",'
+        f' "{bad_field}": ["ok", 3]}}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ScenarioError, match=bad_field):
+        load_scenarios(cases)
+
+
 def test_default_cases_file_ships_with_the_package() -> None:
     from paperpilot.smoke.scenarios import DEFAULT_CASES_PATH
 

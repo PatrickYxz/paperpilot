@@ -72,3 +72,90 @@ def test_run_judge_check_converts_invoke_failure(passing_outcome, make_scenario)
     check = run_judge_check(outcome.scenario, outcome, model_name="m", invoke=_boom)
     assert check.passed is False
     assert "judge error" in check.detail
+
+
+# ---------- 拒绝判定（诱导题） ----------
+
+
+def _refusal_invoke(payload: str):
+    return lambda prompt: payload
+
+
+def test_refusal_judge_declines_passes(passing_outcome, make_scenario) -> None:
+    outcome = passing_outcome(
+        scenario=make_scenario(expect_refusal=True, expected_points=()),
+    )
+    payload = '{"verdict": "declines", "reason": "answer states no such metric is reported"}'
+    check = run_judge_check(
+        outcome.scenario, outcome, model_name="m", invoke=_refusal_invoke(payload)
+    )
+    assert check.name == "judge_declines"
+    assert check.passed is True
+
+
+def test_refusal_judge_fabricates_fails(passing_outcome, make_scenario) -> None:
+    outcome = passing_outcome(
+        scenario=make_scenario(expect_refusal=True, expected_points=()),
+    )
+    payload = '{"verdict": "fabricates", "reason": "answer invents 76.4 top-1"}'
+    check = run_judge_check(
+        outcome.scenario, outcome, model_name="m", invoke=_refusal_invoke(payload)
+    )
+    assert check.passed is False
+    assert "fabricates" in check.detail
+
+
+def test_refusal_judge_rejects_bad_verdict(passing_outcome, make_scenario) -> None:
+    outcome = passing_outcome(
+        scenario=make_scenario(expect_refusal=True, expected_points=()),
+    )
+    with pytest.raises(JudgeError, match="declines/fabricates"):
+        judge_answer(
+            "q",
+            (),
+            "a",
+            model_name="m",
+            invoke=_refusal_invoke('{"verdict": "maybe"}'),
+            refusal=True,
+        )
+
+
+def test_refusal_judge_needs_no_points(passing_outcome, make_scenario) -> None:
+    outcome = passing_outcome(
+        scenario=make_scenario(expect_refusal=True, expected_points=()),
+    )
+    payload = '{"verdict": "declines", "reason": "ok"}'
+    check = run_judge_check(
+        outcome.scenario, outcome, model_name="m", invoke=_refusal_invoke(payload)
+    )
+    assert check.passed is True  # 无 expected_points 的拒绝判定合法
+
+
+# ---------- 真实构造路径（2026-10-04 真跑暴露的签名 bug 回归） ----------
+
+
+def test_real_judge_invoke_builds_model_with_keyword_args(monkeypatch) -> None:
+    import paperpilot.deep_reading.runner as runner_module
+    from paperpilot.smoke.judge import _build_judge_invoke
+
+    calls: list[dict] = []
+
+    class _FakeModel:
+        def invoke(self, messages):
+            calls.append({"messages": [type(m).__name__ for m in messages]})
+            return type("R", (), {"content": '{"covered": [], "missing": ["p"], "reason": "x"}'})()
+
+    def _recorder(**kwargs):
+        calls.append(kwargs)
+        return _FakeModel()
+
+    monkeypatch.setattr(runner_module, "build_deep_reading_model", _recorder)
+    invoke = _build_judge_invoke("judge-model")
+    raw = invoke("grade this")
+
+    assert calls[0] == {
+        "model_name": "judge-model",
+        "research_max_output_tokens": 2048,
+    }
+    assert "HumanMessage" in calls[1]["messages"]
+    assert "missing" in raw

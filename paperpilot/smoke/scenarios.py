@@ -31,6 +31,9 @@ class Scenario:
     paper_metadata: dict[str, Any] | None = None
     expected_points: tuple[str, ...] = ()
     follow_ups: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
+    expect_refusal: bool = False
+    trap_terms: tuple[str, ...] = ()
     active: bool = False
     notes: str = ""
 
@@ -78,6 +81,20 @@ def load_scenarios(path: Path) -> list[Scenario]:
             raise ScenarioError(
                 f"{path.name}:{line_no}: follow_ups must be a list of non-empty strings"
             )
+        raw_tags = row.get("tags") or []
+        if not isinstance(raw_tags, list) or not all(
+            isinstance(tag, str) and tag.strip() for tag in raw_tags
+        ):
+            raise ScenarioError(
+                f"{path.name}:{line_no}: tags must be a list of non-empty strings"
+            )
+        raw_traps = row.get("trap_terms") or []
+        if not isinstance(raw_traps, list) or not all(
+            isinstance(term, str) and term.strip() for term in raw_traps
+        ):
+            raise ScenarioError(
+                f"{path.name}:{line_no}: trap_terms must be a list of non-empty strings"
+            )
         scenarios.append(
             Scenario(
                 id=row["id"],
@@ -88,6 +105,9 @@ def load_scenarios(path: Path) -> list[Scenario]:
                 paper_metadata=row.get("paper_metadata"),
                 expected_points=tuple(point.strip() for point in raw_points),
                 follow_ups=tuple(item.strip() for item in raw_follow_ups),
+                tags=tuple(tag.strip() for tag in raw_tags),
+                expect_refusal=bool(row.get("expect_refusal", False)),
+                trap_terms=tuple(term.strip() for term in raw_traps),
                 active=bool(row.get("active", False)),
                 notes=row.get("notes", ""),
             )

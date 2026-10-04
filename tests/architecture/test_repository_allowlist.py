@@ -25,6 +25,7 @@ DOCS_KEEP_ALLOWLIST = {
     "docs/codex-only-plans/2026-10-03-test-system-phase2-plan.md",
     "docs/codex-only-plans/2026-10-04-test-system-phase3-plan.md",
     "docs/codex-only-plans/2026-10-04-citation-anchoring-check-plan.md",
+    "docs/codex-only-plans/2026-10-04-test-set-dimensions-plan.md",
 }
 
 ACTIVE_ENV_VARIABLES = {

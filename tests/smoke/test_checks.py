@@ -240,6 +240,43 @@ def test_real_payload_shape_regression() -> None:
     assert {c["evidence_id"] for c in citations} <= set(extract_evidence_ids(message))
 
 
+# ---------- 诱导题（trap terms 程序化层） ----------
+
+
+def test_trap_terms_absent_passes(passing_outcome, make_scenario) -> None:
+    outcome = passing_outcome(
+        scenario=make_scenario(trap_terms=("88.55", "76%")),
+    )
+    outcome.turns[0].assistant_message = {
+        "content": "the paper does not report an ImageNet accuracy",
+        "metadata": {"citations": [], "research_result": {"evidence_items": []}},
+    }
+    outcome.turns[0].citations = []
+    check = {
+        c.name: c
+        for c in evaluate_checks(outcome, context_management=False)
+    }["no_trap_terms"]
+    assert check.passed is True
+
+
+def test_trap_term_present_fails_with_term_and_turn(passing_outcome, make_scenario) -> None:
+    outcome = passing_outcome(scenario=make_scenario(trap_terms=("CONLL", "88.55")))
+    outcome.turns[0].assistant_message["content"] = (
+        "the dataset is CoNLL-2003 with 88.55 accuracy"
+    )
+    check = {
+        c.name: c
+        for c in evaluate_checks(outcome, context_management=False)
+    }["no_trap_terms"]
+    assert check.passed is False
+    assert "CONLL (turn 1)" in check.detail and "88.55 (turn 1)" in check.detail
+
+
+def test_trap_check_absent_without_trap_terms(passing_outcome) -> None:
+    checks = evaluate_checks(passing_outcome(), context_management=False)
+    assert "no_trap_terms" not in {c.name for c in checks}
+
+
 # ---------- 多轮断言 ----------
 
 
