@@ -36,6 +36,10 @@ class Scenario:
     trap_terms: tuple[str, ...] = ()
     active: bool = False
     notes: str = ""
+    memory_seed: tuple[str, ...] = ()
+    """Cross-session memory probes: run each seed question in its own new
+    conversation under the same user first (exercising memory extraction),
+    then ask the main question in yet another conversation."""
 
 
 class ScenarioError(ValueError):
@@ -95,6 +99,13 @@ def load_scenarios(path: Path) -> list[Scenario]:
             raise ScenarioError(
                 f"{path.name}:{line_no}: trap_terms must be a list of non-empty strings"
             )
+        raw_seed = row.get("memory_seed") or []
+        if not isinstance(raw_seed, list) or not all(
+            isinstance(item, str) and item.strip() for item in raw_seed
+        ):
+            raise ScenarioError(
+                f"{path.name}:{line_no}: memory_seed must be a list of non-empty strings"
+            )
         scenarios.append(
             Scenario(
                 id=row["id"],
@@ -110,6 +121,7 @@ def load_scenarios(path: Path) -> list[Scenario]:
                 trap_terms=tuple(term.strip() for term in raw_traps),
                 active=bool(row.get("active", False)),
                 notes=row.get("notes", ""),
+                memory_seed=tuple(item.strip() for item in raw_seed),
             )
         )
     if not scenarios:

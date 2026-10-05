@@ -33,7 +33,17 @@ def run_scenario(
     questions = [scenario.question, *scenario.follow_ups]
     head_message_id: str | None = None
     try:
-        api.open_conversation(scenario)
+        for seed_question in scenario.memory_seed:
+            api.open_conversation_as_current_user(scenario)
+            api.ask(seed_question, scenario.depth)
+            seed_task, _seed_events, _seed_artifacts = (
+                api.poll_until_terminal(timeout_s=timeout_s)
+            )
+            if (seed_task or {}).get("status") != "completed":
+                raise RuntimeError(
+                    f"memory seed turn failed: {seed_question[:60]!r}"
+                )
+        api.open_conversation_as_current_user(scenario) if scenario.memory_seed else api.open_conversation(scenario)
         for question in questions:
             api.ask(question, scenario.depth, head_message_id)
             task, events, artifacts = api.poll_until_terminal(timeout_s=timeout_s)

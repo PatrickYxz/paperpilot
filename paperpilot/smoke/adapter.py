@@ -29,7 +29,10 @@ class ConversationApi:
             json={"username": username, "password": "smoke-password-1"},
         )
         self._raise_for_status(resp, "register")
+        self.open_conversation_as_current_user(scenario)
 
+    def open_conversation_as_current_user(self, scenario: Scenario) -> None:
+        """Open another conversation under the already-authenticated user."""
         resp = self._client.post(
             "/api/conversations",
             json={
