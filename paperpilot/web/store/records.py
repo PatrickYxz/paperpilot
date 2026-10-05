@@ -318,3 +318,21 @@ class NewUserMemory:
 @dataclass(frozen=True)
 class UserMemoryRecord(NewUserMemory):
     status: str
+
+
+@dataclass(frozen=True)
+class UserProfileRecord:
+    user_id: str
+    profile_text: str
+    source_memory_count: int
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class UserTurnSummary:
+    conversation_id: str
+    task_id: str
+    user_message_id: str
+    question: str
+    narrative: str | None
+    created_at: str

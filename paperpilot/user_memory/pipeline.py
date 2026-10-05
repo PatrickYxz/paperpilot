@@ -1,6 +1,12 @@
 """Idempotent extraction pipeline from one published turn to memories."""
 from __future__ import annotations
 
+import logging
+
+from paperpilot.user_memory.profile import (
+    generate_profile,
+    profile_due_for_refresh,
+)
 from paperpilot.user_memory.extractor import (
     extract_memory_candidates,
     verify_candidates,
@@ -52,4 +58,35 @@ def run_memory_extraction(
             )
         )
         written += 1
+    if written:
+        refresh_user_profile_if_due(
+            store=store, model=model, user_id=task.user_id
+        )
     return written
+
+
+def refresh_user_profile_if_due(*, store, model, user_id: str) -> bool:
+    """Regenerate the overview profile once enough new memories exist."""
+    _LOGGER = logging.getLogger("paperpilot.user_memory")
+    try:
+        active = store.list_user_memories(user_id)
+        profile = store.get_user_profile(user_id)
+        if not profile_due_for_refresh(
+            active_memory_count=len(active),
+            profiled_memory_count=(
+                profile.source_memory_count if profile else None
+            ),
+        ):
+            return False
+        text = generate_profile(model=model, memories=active)
+        if not text:
+            return False
+        store.upsert_user_profile(
+            user_id=user_id,
+            profile_text=text,
+            source_memory_count=len(active),
+        )
+        return True
+    except Exception:
+        _LOGGER.warning("user profile refresh failed", exc_info=True)
+        return False

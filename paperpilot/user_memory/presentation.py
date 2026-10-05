@@ -11,9 +11,12 @@ _MEMORY_DATA_NOTICE = (
 )
 
 
-def format_memory_hits(hits: Sequence[ScoredMemory]) -> str:
-    """One block per hit plus an explicit data-vs-instruction boundary."""
-    if not hits:
+def format_memory_hits(
+    hits: Sequence[ScoredMemory],
+    summary_hits: Sequence = (),
+) -> str:
+    """Render memory hits plus optional conversation-digest hits."""
+    if not hits and not summary_hits:
         return "No stored user memories match this query."
     lines = [
         f"[{hit.record.kind}] {hit.record.content} "
@@ -21,6 +24,13 @@ def format_memory_hits(hits: Sequence[ScoredMemory]) -> str:
         f"from conversation {hit.record.source_conversation_id})"
         for hit in hits
     ]
+    for summary, _score in summary_hits:
+        detail = (summary.narrative or "").strip()[:240]
+        lines.append(
+            f"[conversation {summary.conversation_id} on "
+            f"{summary.created_at[:10]}] asked: {summary.question[:120]}"
+            + (f" — {detail}" if detail else "")
+        )
     lines.append("")
     lines.append(_MEMORY_DATA_NOTICE)
     return "\n".join(lines)

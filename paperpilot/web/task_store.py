@@ -50,6 +50,8 @@ from paperpilot.web.store.records import (
     NewContextArtifact,
     TurnArchiveRecord,
     TurnArchiveSeedRecord,
+    UserProfileRecord,
+    UserTurnSummary,
 )
 
 class TaskStore:
@@ -507,6 +509,35 @@ class TaskStore:
         return user_memories.count_task_memories(
             self._session_factory,
             task_id,
+        )
+
+    def get_user_profile(self, user_id: str) -> UserProfileRecord | None:
+        return user_memories.get_user_profile(self._session_factory, user_id)
+
+    def upsert_user_profile(
+        self,
+        *,
+        user_id: str,
+        profile_text: str,
+        source_memory_count: int,
+    ) -> UserProfileRecord:
+        return user_memories.upsert_user_profile(
+            self._session_factory,
+            user_id=user_id,
+            profile_text=profile_text,
+            source_memory_count=source_memory_count,
+        )
+
+    def list_user_turn_summaries(
+        self,
+        user_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[UserTurnSummary]:
+        return user_memories.list_user_turn_summaries(
+            self._session_factory,
+            user_id,
+            limit=limit,
         )
 
     def get_compression_state(

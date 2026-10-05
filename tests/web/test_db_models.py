@@ -23,6 +23,7 @@ def test_web_metadata_owns_the_twelve_business_tables() -> None:
         "turn_archives",
         "compression_states",
         "user_memories",
+        "user_memory_profiles",
     }
 
 
@@ -163,6 +164,12 @@ def test_web_table_columns_match_the_existing_schema() -> None:
             "status",
             "created_at",
         ],
+        "user_memory_profiles": [
+            "user_id",
+            "profile_text",
+            "source_memory_count",
+            "updated_at",
+        ],
     }
 
     assert {
@@ -300,6 +307,7 @@ def test_metadata_declares_expected_foreign_keys_and_autoincrement() -> None:
         ("user_memories", "source_conversation_id", "conversations.id"),
         ("user_memories", "source_task_id", "research_tasks.id"),
         ("user_memories", "source_message_id", "messages.id"),
+        ("user_memory_profiles", "user_id", "users.id"),
     }
     assert metadata.tables["task_events"].dialect_options["sqlite"]["autoincrement"]
     assert metadata.tables["task_artifacts"].dialect_options["sqlite"][

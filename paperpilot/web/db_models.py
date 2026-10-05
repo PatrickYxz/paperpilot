@@ -358,3 +358,17 @@ class UserMemoryRow(Base):
     support_span: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class UserMemoryProfileRow(Base):
+    """One materialized overview profile per user (the always-visible layer)."""
+
+    __tablename__ = "user_memory_profiles"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", name="fk_user_memory_profiles_user_id_users"),
+        primary_key=True,
+    )
+    profile_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_memory_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)

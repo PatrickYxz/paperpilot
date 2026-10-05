@@ -95,3 +95,34 @@ def search_user_memories(
 ) -> list[ScoredMemory]:
     """Convenience wrapper: index one user's records and search once."""
     return MemorySearchIndex(records, now=now).search(query, top_k)
+
+
+def turn_summary_prefix(summary) -> str:
+    """Contextual prefix anchoring one turn digest to its conversation."""
+    return (
+        f"[conversation {summary.conversation_id}; {summary.created_at[:10]}; "
+        f"question: {summary.question[:80]}]"
+    )
+
+
+def search_turn_summaries(
+    summaries: Sequence,
+    query: str,
+    top_k: int,
+) -> list[tuple[object, float]]:
+    """BM25 search over prefixed turn digests; returns (summary, score)."""
+    if not summaries or top_k <= 0:
+        return []
+    index = BM25Index().build(
+        {
+            summary.user_message_id: (
+                f"{turn_summary_prefix(summary)}\n"
+                f"{summary.narrative or ''}\n{summary.question}"
+            )
+            for summary in summaries
+        }
+    )
+    by_id = {summary.user_message_id: summary for summary in summaries}
+    return [
+        (by_id[doc_id], score) for doc_id, score in index.search(query, top_k)
+    ]

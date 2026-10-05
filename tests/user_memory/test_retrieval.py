@@ -71,3 +71,28 @@ def test_chinese_query_matches_via_cjk_bigrams():
 
 def test_top_k_zero_returns_empty():
     assert search_user_memories(FACTS, "federated", top_k=0) == []
+
+
+def test_turn_summary_search_matches_question_and_prefix():
+    from paperpilot.user_memory.retrieval import search_turn_summaries
+
+    class _Summary:
+        def __init__(self, mid, conversation_id, question, narrative, created_at):
+            self.user_message_id = mid
+            self.conversation_id = conversation_id
+            self.question = question
+            self.narrative = narrative
+            self.created_at = created_at
+
+    summaries = [
+        _Summary("m1", "conv-a", "How does LoRA rank affect accuracy?",
+                 "Found rank 8 sufficient.", "2026-09-01T00:00:00Z"),
+        _Summary("m2", "conv-b", "Summarize the federated aggregation paper.",
+                 None, "2026-09-20T00:00:00Z"),
+    ]
+    hits = search_turn_summaries(summaries, "lora rank", top_k=1)
+    assert hits[0][0].user_message_id == "m1"
+
+    # Prefix clue only: conversation id is not in the raw texts.
+    hits = search_turn_summaries(summaries, "conversation conv-b", top_k=1)
+    assert hits[0][0].user_message_id == "m2"

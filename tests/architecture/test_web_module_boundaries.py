@@ -39,6 +39,8 @@ from paperpilot.web.task_store import (
     TurnArchiveSeedRecord,
     NewUserMemory,
     UserMemoryRecord,
+    UserProfileRecord,
+    UserTurnSummary,
 )
 
 
@@ -88,6 +90,9 @@ EXPECTED_TASK_STORE_METHODS = {
     "append_user_memory",
     "list_user_memories",
     "count_task_memories",
+    "get_user_profile",
+    "upsert_user_profile",
+    "list_user_turn_summaries",
 }
 
 
@@ -137,6 +142,9 @@ EXPECTED_TASK_STORE_SIGNATURES = {
     "append_user_memory": "(self, *, record: 'NewUserMemory') -> 'UserMemoryRecord'",
     "list_user_memories": "(self, user_id: 'str', *, active_only: 'bool' = True) -> 'list[UserMemoryRecord]'",
     "count_task_memories": "(self, task_id: 'str') -> 'int'",
+    "get_user_profile": "(self, user_id: 'str') -> 'UserProfileRecord | None'",
+    "upsert_user_profile": "(self, *, user_id: 'str', profile_text: 'str', source_memory_count: 'int') -> 'UserProfileRecord'",
+    "list_user_turn_summaries": "(self, user_id: 'str', *, limit: 'int' = 50) -> 'list[UserTurnSummary]'",
 }
 
 
@@ -186,6 +194,8 @@ def test_task_store_reexports_canonical_records_and_errors() -> None:
     assert TurnArchiveSeedRecord is records.TurnArchiveSeedRecord
     assert NewUserMemory is records.NewUserMemory
     assert UserMemoryRecord is records.UserMemoryRecord
+    assert UserProfileRecord is records.UserProfileRecord
+    assert UserTurnSummary is records.UserTurnSummary
 
 
 def test_conversation_router_keeps_compatibility_entrypoint() -> None:

@@ -101,6 +101,52 @@ def test_pipeline_is_idempotent_per_source_task(tmp_path):
     )
 
     assert first == 1
-    assert second == 0  # idempotent: LLM not even invoked again
-    model.with_structured_output.return_value.invoke.assert_called_once()
+    assert second == 0  # idempotent: second run makes no LLM calls at all
+    model.with_structured_output.return_value.invoke.reset_mock()
+    _ = run_memory_extraction(
+        store=store, model=model, task=turn.task,
+        user_message_id=turn.user_message.id,
+        user_text=USER_TEXT, assistant_text=ASSISTANT_TEXT,
+    )
+    model.with_structured_output.return_value.invoke.assert_not_called()
     assert len(store.list_user_memories(user.id)) == 1
+
+
+def test_pipeline_refreshes_profile_when_due(tmp_path):
+    from paperpilot.user_memory.profile import UserProfileOutput
+
+    store, user, turn = _setup(tmp_path)
+
+    def _model_with(profile_text):
+        model = MagicMock()
+        # First invoke is extraction, the second is the profile refresh.
+        outputs = iter(
+            [
+                MemoryExtractionOutput(
+                    memories=[
+                        MemoryCandidate(
+                            kind="fact",
+                            content="User focuses on model distillation.",
+                            support_span="I focus on model distillation.",
+                        )
+                    ]
+                ),
+                UserProfileOutput(profile=profile_text),
+            ]
+        )
+        model.with_structured_output.return_value.invoke.side_effect = (
+            lambda msgs: next(outputs)
+        )
+        return model
+
+    model = _model_with("PhD student working on model distillation.")
+    written = run_memory_extraction(
+        store=store, model=model, task=turn.task,
+        user_message_id=turn.user_message.id,
+        user_text=USER_TEXT, assistant_text=ASSISTANT_TEXT,
+    )
+    assert written == 1
+    profile = store.get_user_profile(user.id)
+    assert profile is not None
+    assert "distillation" in profile.profile_text
+    assert profile.source_memory_count == 1

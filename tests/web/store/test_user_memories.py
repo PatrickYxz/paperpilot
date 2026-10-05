@@ -104,3 +104,93 @@ def test_count_scoped_to_source_task(tmp_path):
 
     assert store.count_task_memories(turn.task.id) == 1
     assert store.count_task_memories("task-that-never-extracted") == 0
+
+
+def test_profile_upsert_roundtrip(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    user, _conversation, _turn_rec = _turn(store)
+
+    assert store.get_user_profile(user.id) is None
+    record = store.upsert_user_profile(
+        user_id=user.id,
+        profile_text="PhD student working on model distillation.",
+        source_memory_count=3,
+    )
+    assert record.source_memory_count == 3
+
+    updated = store.upsert_user_profile(
+        user_id=user.id,
+        profile_text="Updated profile.",
+        source_memory_count=8,
+    )
+    assert updated.profile_text == "Updated profile."
+    assert store.get_user_profile(user.id).source_memory_count == 8
+
+
+def test_list_user_turn_summaries_is_user_scoped_newest_first(tmp_path):
+    from paperpilot.web.store.records import TurnArchiveSeedRecord
+
+    store = TaskStore(tmp_path / "tasks.sqlite3")
+    user_a, conv_a, turn_a = _turn(store, "alice")
+    user_b, _conv_b, _turn_b = _turn(store, "bob")
+
+    def _seed(conversation_id, turn, archive_id, created_at, narrative=None):
+        from paperpilot.web.store.context_memory import (
+            claim_turn_archive_narrative,
+            complete_turn_archive_narrative,
+            seed_turn_archive,
+        )
+        seed_turn_archive(
+            session_factory=store._session_factory,
+            seed=TurnArchiveSeedRecord(
+                archive_id=archive_id,
+                conversation_id=conversation_id,
+                task_id=turn.task.id,
+                user_message_id=turn.user_message.id,
+                terminal_status="success",
+                archive_version="turn-archive-v1",
+                seed_json={"question": turn.user_message.content},
+                supersedes_json=[],
+                created_at=created_at,
+            ),
+        )
+        if narrative is not None:
+            claim_turn_archive_narrative(store._session_factory, archive_id)
+            complete_turn_archive_narrative(
+                store._session_factory,
+                archive_id,
+                narrative_summary=narrative,
+            )
+
+    _seed(conv_a.id, turn_a, "arch-1", "2026-09-01T00:00:00Z",
+          narrative="Compared LoRA ranks.")
+    from paperpilot.web.store.records import TurnArchiveSeedRecord as _SR
+    from paperpilot.web.store.context_memory import seed_turn_archive as _sta
+    _sta(
+        store._session_factory,
+        seed=_SR(
+            archive_id="arch-2",
+            conversation_id=conv_a.id,
+            task_id=turn_a.task.id,
+            user_message_id=turn_a.user_message.id,
+            terminal_status="success",
+            archive_version="turn-archive-v2",
+            seed_json={"question": turn_a.user_message.content},
+            supersedes_json=[],
+            created_at="2026-09-20T00:00:00Z",
+        ),
+    )
+
+    summaries = store.list_user_turn_summaries(user_a.id)
+    assert [s.user_message_id for s in summaries] == [
+        turn_a.user_message.id,
+        turn_a.user_message.id,
+    ] or len(summaries) == 2
+    assert [s.created_at for s in summaries] == sorted(
+        [s.created_at for s in summaries], reverse=True
+    )
+    assert summaries[0].narrative is None  # newest has no narrative yet
+    assert "Compared LoRA ranks." in {
+        s.narrative for s in summaries if s.narrative
+    }
+    assert store.list_user_turn_summaries(user_b.id) == []
