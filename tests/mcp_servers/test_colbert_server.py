@@ -57,8 +57,14 @@ def test_search_passes_paper_id_to_manager(mock_manager):
 
     out = colbert_server._search_impl("q", paper_id="p1", top_k=3)
 
-    mock_manager.search.assert_called_once_with("q", "p1", 3)
+    mock_manager.search.assert_called_once_with("q", "p1", 3, mode="hybrid")
     assert out[0]["paper_id"] == "p1"
+
+
+def test_search_unknown_mode_raises_value_error(mock_manager):
+    with pytest.raises(ValueError, match="mode"):
+        colbert_server._search_impl("q", paper_id="p1", top_k=5, mode="sparse")
+    mock_manager.search.assert_not_called()
 
 
 def test_search_index_missing_raises(mock_manager):

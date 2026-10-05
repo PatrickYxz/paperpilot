@@ -1,5 +1,6 @@
 """Retrieval planning and evidence pooling helpers."""
 
+from paperpilot.retrieval.bm25 import BM25Index, tokenize
 from paperpilot.retrieval.evidence_pool import (
     EvidencePool,
     RawSearchHit,
@@ -11,6 +12,8 @@ from paperpilot.retrieval.evidence_verifier import (
     EvidenceVerificationResult,
     run_evidence_verification,
 )
+from paperpilot.retrieval.fusion import rrf_fuse
+from paperpilot.retrieval.metrics import mrr, ndcg, recall_at_k
 from paperpilot.retrieval.llm_query_planner import (
     build_planner_prompt,
     plan_with_llm,
@@ -33,6 +36,7 @@ from paperpilot.retrieval.query_plan_validator import (
 )
 
 __all__ = [
+    "BM25Index",
     "EvidencePool",
     "EvidenceVerificationDecision",
     "EvidenceVerificationResult",
@@ -47,9 +51,14 @@ __all__ = [
     "build_planner_prompt",
     "format_evidence_summary",
     "minimal_fallback_plan",
+    "mrr",
+    "ndcg",
     "parse_query_plan_json",
     "plan_with_llm",
+    "recall_at_k",
+    "rrf_fuse",
     "run_evidence_verification",
     "run_planned_retrieval",
+    "tokenize",
     "validate_query_plan",
 ]

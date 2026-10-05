@@ -57,24 +57,34 @@ def _build_index_impl(documents: list[dict]) -> dict:
 
 
 @mcp.tool()
-def search(query: str, paper_id: str, top_k: int = 5) -> list[dict]:
+def search(
+    query: str, paper_id: str, top_k: int = 5, mode: str = "hybrid"
+) -> list[dict]:
     """Search top-k chunks inside one paper's isolated index.
 
     Args:
         query: Natural language query.
         paper_id: The same paper_id previously passed to build_index.
         top_k: Number of chunks to return, default 5.
+        mode: "hybrid" fuses ColBERT dense retrieval with BM25 via reciprocal
+            rank fusion (default); "dense" keeps dense-only behavior.
 
     Returns:
-        list of dicts with paper_id, chunk_text, and score.
-        Raises IndexNotFoundError if that paper has not been indexed.
+        list of dicts with paper_id, chunk_text, score, and (hybrid) rank
+        fields. Raises IndexNotFoundError if that paper is not indexed.
     """
-    return _search_impl(query, paper_id, top_k)
+    return _search_impl(query, paper_id, top_k, mode)
 
 
-def _search_impl(query: str, paper_id: str, top_k: int) -> list[dict]:
+def _search_impl(
+    query: str, paper_id: str, top_k: int, mode: str = "hybrid"
+) -> list[dict]:
+    if mode not in IndexManager.SEARCH_MODES:
+        raise ValueError(
+            f"mode must be one of {IndexManager.SEARCH_MODES}, got {mode!r}"
+        )
     assert _manager is not None, "IndexManager not initialized"
-    return _manager.search(query, paper_id, top_k)
+    return _manager.search(query, paper_id, top_k, mode=mode)
 
 
 @mcp.tool()

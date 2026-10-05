@@ -1,0 +1,8 @@
+{"query": "rank 8 and rank 16 capacity", "kind": "exact", "relevant": ["lora-transfer::chunk_2"]}
+{"query": "clipped to a bounded norm", "kind": "exact", "relevant": ["feddp-aggregation::chunk_1"]}
+{"query": "momentum correction communication rounds", "kind": "exact", "relevant": ["feddp-aggregation::chunk_4"]}
+{"query": "adapter placement attention projections feed-forward", "kind": "exact", "relevant": ["lora-transfer::chunk_5"]}
+{"query": "CIFAR-10 non-private baseline epsilon 8", "kind": "exact", "relevant": ["feddp-aggregation::chunk_3"]}
+{"query": "proposed approach reduction lora-transfer paper", "kind": "ambiguous", "relevant": ["lora-transfer::chunk_3"]}
+{"query": "proposed scheme reduction feddp-aggregation paper", "kind": "ambiguous", "relevant": ["feddp-aggregation::chunk_4"]}
+{"query": "experiment section of the lora-transfer paper", "kind": "ambiguous", "relevant": ["lora-transfer::chunk_3", "lora-transfer::chunk_4", "lora-transfer::chunk_5", "lora-transfer::chunk_8"]}
