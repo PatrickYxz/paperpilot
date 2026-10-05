@@ -23,6 +23,12 @@ download, retrieval, citation-graph, and visual-reading extensions.
 - Search and prepare associated papers, then attach only validated paper and
   evidence identifiers to the Conversation.
 - Build paper-isolated ColBERT indexes and return traceable evidence chunks.
+- Retrieve evidence via hybrid search: structure-aware chunks with contextual
+  prefixes, ColBERT dense retrieval fused with BM25 by reciprocal rank fusion.
+- Remember users across conversations: append-only long-term memories are
+  extracted (with verbatim span verification) after each published turn,
+  searched through the agent-owned `search_user_memory` tool, and distilled
+  into a resident research profile injected as background data.
 - Preserve alternative branches and roll back to any compatible, complete
   assistant checkpoint without deleting later branches.
 - Run locally with a bounded in-process thread executor or deploy an API and

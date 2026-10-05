@@ -24,6 +24,11 @@ from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from paperpilot.papers import PaperCandidate, normalize_arxiv_id
+from paperpilot.user_memory.presentation import format_memory_hits
+from paperpilot.user_memory.retrieval import (
+    search_turn_summaries,
+    search_user_memories,
+)
 from paperpilot.tools.mcp_client import MCPToolError
 from paperpilot.tools.types import Tool
 
