@@ -37,6 +37,8 @@ from paperpilot.web.task_store import (
     NewContextArtifact,
     TurnArchiveRecord,
     TurnArchiveSeedRecord,
+    NewUserMemory,
+    UserMemoryRecord,
 )
 
 
@@ -83,6 +85,9 @@ EXPECTED_TASK_STORE_METHODS = {
     "claim_compression_probe",
     "record_compression_outcome",
     "is_context_artifact_referenced",
+    "append_user_memory",
+    "list_user_memories",
+    "count_task_memories",
 }
 
 
@@ -129,6 +134,9 @@ EXPECTED_TASK_STORE_SIGNATURES = {
     "claim_compression_probe": "(self, conversation_id: 'str', compressor_version: 'str') -> 'CompressionStateRecord | None'",
     "record_compression_outcome": "(self, *, outcome: 'CompressionOutcomeRecord') -> 'CompressionStateRecord'",
     "is_context_artifact_referenced": "(self, *, artifact_id: 'str') -> 'bool'",
+    "append_user_memory": "(self, *, record: 'NewUserMemory') -> 'UserMemoryRecord'",
+    "list_user_memories": "(self, user_id: 'str', *, active_only: 'bool' = True) -> 'list[UserMemoryRecord]'",
+    "count_task_memories": "(self, task_id: 'str') -> 'int'",
 }
 
 
@@ -176,6 +184,8 @@ def test_task_store_reexports_canonical_records_and_errors() -> None:
     assert NewContextArtifact is records.NewContextArtifact
     assert TurnArchiveRecord is records.TurnArchiveRecord
     assert TurnArchiveSeedRecord is records.TurnArchiveSeedRecord
+    assert NewUserMemory is records.NewUserMemory
+    assert UserMemoryRecord is records.UserMemoryRecord
 
 
 def test_conversation_router_keeps_compatibility_entrypoint() -> None:

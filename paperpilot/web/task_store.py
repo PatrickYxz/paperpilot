@@ -17,6 +17,7 @@ from paperpilot.web.store import (
     publications,
     tasks,
     updates,
+    user_memories,
     users,
 )
 from paperpilot.web.store.records import (
@@ -29,6 +30,7 @@ from paperpilot.web.store.records import (
     DuplicateUsernameError,
     FinalizedConversationTask,
     MessageRecord,
+    NewUserMemory,
     PaperRecord,
     PublishedConversationResult,
     ResearchTask,
@@ -39,6 +41,7 @@ from paperpilot.web.store.records import (
     TaskEventBatch,
     TaskUpdates,
     UsedPaperInput,
+    UserMemoryRecord,
     VALID_DEPTHS,
     WebUser,
     CompressionOutcomeRecord,
@@ -480,6 +483,30 @@ class TaskStore:
         return context_memory.fail_turn_archive_narrative(
             self._session_factory,
             archive_id,
+        )
+
+    def append_user_memory(self, *, record: NewUserMemory) -> UserMemoryRecord:
+        return user_memories.append_user_memory(
+            self._session_factory,
+            record=record,
+        )
+
+    def list_user_memories(
+        self,
+        user_id: str,
+        *,
+        active_only: bool = True,
+    ) -> list[UserMemoryRecord]:
+        return user_memories.list_user_memories(
+            self._session_factory,
+            user_id,
+            active_only=active_only,
+        )
+
+    def count_task_memories(self, task_id: str) -> int:
+        return user_memories.count_task_memories(
+            self._session_factory,
+            task_id,
         )
 
     def get_compression_state(

@@ -299,3 +299,22 @@ class CompressionOutcomeRecord:
     cache_hit_tokens: int | None = None
     cache_miss_tokens: int | None = None
     failure_threshold: int = 3
+
+
+@dataclass(frozen=True)
+class NewUserMemory:
+    memory_id: str
+    user_id: str
+    kind: str
+    content: str
+    context: dict[str, Any]
+    source_conversation_id: str
+    source_task_id: str
+    source_message_id: str
+    support_span: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class UserMemoryRecord(NewUserMemory):
+    status: str

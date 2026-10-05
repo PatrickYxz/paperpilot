@@ -25,6 +25,7 @@ from paperpilot.web.db_models import (
     TaskArtifactRow,
     TaskEventRow,
     TurnArchiveRow,
+    UserMemoryRow,
     UserRow,
 )
 from paperpilot.web.store.records import (
@@ -41,6 +42,7 @@ from paperpilot.web.store.records import (
     CompressionStateRecord,
     ContextArtifactRecord,
     TurnArchiveRecord,
+    UserMemoryRecord,
 )
 
 
@@ -359,4 +361,20 @@ def utc_now() -> str:
 def utc_in(*, days: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat(
         timespec="seconds"
+    )
+
+
+def user_memory_from_row(row: UserMemoryRow) -> UserMemoryRecord:
+    return UserMemoryRecord(
+        memory_id=row.memory_id,
+        user_id=row.user_id,
+        kind=row.kind,
+        content=row.content,
+        context=decode_context_json(row.context_json, "context_json"),
+        source_conversation_id=row.source_conversation_id,
+        source_task_id=row.source_task_id,
+        source_message_id=row.source_message_id,
+        support_span=row.support_span,
+        created_at=row.created_at,
+        status=row.status,
     )

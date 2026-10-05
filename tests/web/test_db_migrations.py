@@ -35,6 +35,7 @@ MANAGED_TABLES = {
     "context_artifacts",
     "turn_archives",
     "compression_states",
+    "user_memories",
 }
 
 EXPECTED_INDEXES = {
@@ -291,6 +292,7 @@ def test_current_five_table_database_upgrades_to_conversation_schema(
         "context_artifacts",
         "turn_archives",
         "compression_states",
+        "user_memories",
     } <= _table_names(db_path)
 
     upgrade_database(db_path)
@@ -302,7 +304,7 @@ def test_current_five_table_database_upgrades_to_conversation_schema(
         "final_checkpoint_id",
         "result_quality",
     } <= _column_names(db_path, "research_tasks")
-    assert get_database_heads(db_path) == {"20260901_0003"}
+    assert get_database_heads(db_path) == {"20261005_0004"}
 
 
 def test_legacy_database_is_adopted_without_losing_rows_or_unknown_tables(
@@ -415,7 +417,7 @@ def test_context_tables_upgrade_from_0002_and_preserve_business_rows(
         assert connection.execute(
             "SELECT question FROM research_tasks WHERE id = 'task-1'"
         ).fetchone() == ("question",)
-    assert get_database_heads(db_path) == {"20260901_0003"}
+    assert get_database_heads(db_path) == {"20261005_0004"}
 
 
 def test_context_migration_downgrade_is_explicitly_unsupported(tmp_path: Path) -> None:

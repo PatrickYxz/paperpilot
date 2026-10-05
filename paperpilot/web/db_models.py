@@ -323,3 +323,38 @@ Index(
         "conversation_id IS NOT NULL AND status IN ('pending', 'running')"
     ),
 )
+
+
+class UserMemoryRow(Base):
+    """One append-only long-term memory fact extracted for a single user."""
+
+    __tablename__ = "user_memories"
+    __table_args__ = (
+        Index(
+            "idx_user_memories_user_created_id",
+            "user_id",
+            "created_at",
+            "memory_id",
+        ),
+    )
+
+    memory_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", name="fk_user_memories_user_id_users"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    context_json: Mapped[str] = mapped_column(Text, nullable=False)
+    source_conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id"), nullable=False
+    )
+    source_task_id: Mapped[str] = mapped_column(
+        ForeignKey("research_tasks.id"), nullable=False
+    )
+    source_message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id"), nullable=False
+    )
+    support_span: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)

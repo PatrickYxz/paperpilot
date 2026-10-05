@@ -23,6 +23,7 @@ from paperpilot.web.task_store import (
     TaskStore,
 )
 from paperpilot.web.store.records import TurnArchiveSeedRecord
+from paperpilot.user_memory.pipeline import run_memory_extraction
 from paperpilot.web.config import ContextManagementConfig, WebRuntimeConfig
 
 from .graph import build_deep_reading_graph
@@ -510,6 +511,54 @@ class DeepReadingRunner:
             snapshot=trusted,
             model=model,
         )
+        self._extract_user_memories_best_effort(
+            task=task,
+            user_message=user_message,
+            model=model,
+        )
+
+    def _extract_user_memories_best_effort(
+        self,
+        *,
+        task: ResearchTask,
+        user_message: MessageRecord,
+        model: Any | None,
+    ) -> None:
+        """Extract append-only user memories after a successful publication.
+
+        Only the normal execution path passes a model: the recovery path
+        stays model-free, and its memories were already extracted by the
+        original publication (the pipeline is idempotent per source task).
+        """
+        if model is None or task.user_id is None or task.conversation_id is None:
+            return
+        try:
+            assistant = self._task_store.get_task_message(task.id, "assistant")
+            if assistant is None:
+                return
+            written = run_memory_extraction(
+                store=self._task_store,
+                model=model,
+                task=task,
+                user_message_id=user_message.id,
+                user_text=user_message.content,
+                assistant_text=assistant.content,
+            )
+            if written:
+                self._record_event(
+                    task.id,
+                    "user_memories_extracted",
+                    {"stage": "memory_extraction", "count": written},
+                )
+        except Exception as exc:
+            _LOGGER.warning(
+                "User memory extraction failed after publication",
+                extra={
+                    "event": "task.user_memory_extraction_failed",
+                    "reason": "extraction_error",
+                    "exception_type": type(exc).__name__,
+                },
+            )
 
     def _build_model(self) -> Any:
         if self._model_factory is None:

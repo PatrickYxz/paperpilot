@@ -22,6 +22,7 @@ def test_web_metadata_owns_the_twelve_business_tables() -> None:
         "context_artifacts",
         "turn_archives",
         "compression_states",
+        "user_memories",
     }
 
 
@@ -149,6 +150,19 @@ def test_web_table_columns_match_the_existing_schema() -> None:
             "opened_at",
             "updated_at",
         ],
+        "user_memories": [
+            "memory_id",
+            "user_id",
+            "kind",
+            "content",
+            "context_json",
+            "source_conversation_id",
+            "source_task_id",
+            "source_message_id",
+            "support_span",
+            "status",
+            "created_at",
+        ],
     }
 
     assert {
@@ -184,6 +198,11 @@ def test_timestamp_and_json_columns_remain_sqlite_text() -> None:
             "opened_at",
             "updated_at",
         ],
+        "user_memories": [
+            "context_json",
+            "support_span",
+            "created_at",
+        ],
     }.items():
         table = Base.metadata.tables[table_name]
         assert {str(table.c[column_name].type) for column_name in column_names} == {
@@ -209,6 +228,7 @@ def test_metadata_declares_expected_indexes() -> None:
         "uq_tasks_one_active_per_conversation",
         "idx_context_artifacts_conversation_sha256",
         "idx_turn_archives_conversation_created",
+        "idx_user_memories_user_created_id",
     }
 
     unique_indexes = {
@@ -276,6 +296,10 @@ def test_metadata_declares_expected_foreign_keys_and_autoincrement() -> None:
         ("turn_archives", "task_id", "research_tasks.id"),
         ("turn_archives", "user_message_id", "messages.id"),
         ("compression_states", "conversation_id", "conversations.id"),
+        ("user_memories", "user_id", "users.id"),
+        ("user_memories", "source_conversation_id", "conversations.id"),
+        ("user_memories", "source_task_id", "research_tasks.id"),
+        ("user_memories", "source_message_id", "messages.id"),
     }
     assert metadata.tables["task_events"].dialect_options["sqlite"]["autoincrement"]
     assert metadata.tables["task_artifacts"].dialect_options["sqlite"][
