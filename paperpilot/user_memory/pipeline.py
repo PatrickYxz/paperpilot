@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from paperpilot.user_memory.dashscope_model import build_reviewer_model_from_env
+from paperpilot.user_memory.reviewer_model import build_reviewer_model_from_env
 from paperpilot.user_memory.profile import (
     generate_profile,
     profile_due_for_refresh,
