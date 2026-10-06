@@ -81,3 +81,38 @@ def test_verify_normalizes_whitespace_and_case():
         [USER_TEXT],
     )
     assert len(verified) == 1
+
+
+def test_cards_carry_disambiguation_fields():
+    model = _model_returning(
+        [
+            MemoryCandidate(
+                kind="fact",
+                content="User's advisor works on speech synthesis.",
+                subject="user's advisor",
+                relationship="advisor",
+                topic="team",
+                backstory="mentioned while discussing supervision.",
+                support_span="my advisor works on speech synthesis",
+            )
+        ]
+    )
+    cards = extract_memory_candidates(
+        user_text="My advisor works on speech synthesis, so I often test on audio.",
+        assistant_text="Noted.",
+        model=model,
+    )
+    assert cards[0].subject == "user's advisor"
+    assert cards[0].relationship == "advisor"
+    assert cards[0].topic == "team"
+
+
+def test_card_fields_default_to_user_self():
+    card = MemoryCandidate(
+        kind="fact",
+        content="User works on retrieval.",
+        support_span="I work on retrieval.",
+    )
+    assert card.subject == "user"
+    assert card.relationship == "self"
+    assert card.topic == "general"

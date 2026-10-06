@@ -21,7 +21,8 @@ def research_evidence(
     if isinstance(outcome, ResearchResult):
         return {"research_result": outcome.model_dump(mode="json")}
     update: DeepReadingState = {
-        "research_result": outcome.result.model_dump(mode="json")
+        "research_result": outcome.result.model_dump(mode="json"),
+        "user_memory_context": outcome.user_memory_context or None,
     }
     if context.context_management.enabled:
         update["research_trace"] = outcome.trace.to_dict()

@@ -18,12 +18,7 @@ def format_memory_hits(
     """Render memory hits plus optional conversation-digest hits."""
     if not hits and not summary_hits:
         return "No stored user memories match this query."
-    lines = [
-        f"[{hit.record.kind}] {hit.record.content} "
-        f"(recorded {hit.record.created_at[:10]}; "
-        f"from conversation {hit.record.source_conversation_id})"
-        for hit in hits
-    ]
+    lines = [_render_card(hit.record) for hit in hits]
     for summary, _score in summary_hits:
         detail = (summary.narrative or "").strip()[:240]
         lines.append(
@@ -34,3 +29,17 @@ def format_memory_hits(
     lines.append("")
     lines.append(_MEMORY_DATA_NOTICE)
     return "\n".join(lines)
+
+
+def _render_card(record) -> str:
+    context = record.context or {}
+    topic = context.get("topic", "general")
+    subject = context.get("subject", "user")
+    label = f"[{record.kind}|{topic}|{subject}]"
+    origin = (
+        f"(recorded {record.created_at[:10]}; "
+        f"from conversation {record.source_conversation_id})"
+    )
+    backstory = context.get("backstory", "")
+    note = f" — {backstory}" if backstory else ""
+    return f"{label} {record.content}{note} {origin}"

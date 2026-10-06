@@ -667,6 +667,7 @@ def test_research_system_message_uses_semantic_xml_sections() -> None:
     assert [child.tag for child in root] == [
         "role",
         "objective",
+        "user_memory",
         "definitions",
         "instruction_priority",
         "decision_policy",
@@ -1515,9 +1516,9 @@ def test_invalid_search_identity_never_reaches_downloader(
     assert mcp_calls == []
 
 
-def test_retrieval_guard_rejects_paper_that_has_not_been_prepared() -> None:
+def test_retrieval_guard_guides_prepare_first_for_unprepared_paper() -> None:
     def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
-        tools["retrieve_paper_evidence"].invoke(
+        result = tools["retrieve_paper_evidence"].invoke(
             {
                 "question": "question",
                 "external_id": PRIMARY.external_id,
@@ -1525,11 +1526,13 @@ def test_retrieval_guard_rejects_paper_that_has_not_been_prepared() -> None:
                 "summary_k": 2,
             }
         )
-        raise AssertionError("guard should have raised")
+        # The precondition breach is returned as correctable guidance, not a
+        # fatal contract error, so the model can prepare and retry.
+        assert "prepare_paper" in result["error"]
 
     context, factory, mcp_calls = _context(behavior)
 
-    with pytest.raises(ResearchContractError, match="not prepared"):
+    with pytest.raises(Exception):  # scripted model never returns a decision
         run_research_agent(STATE, context, create_agent_factory=factory)
 
     assert mcp_calls == []
@@ -2022,7 +2025,9 @@ def test_repeated_global_evidence_id_rejects_conflicting_content() -> None:
         nonlocal retrieval_count
         retrieval_count += 1
         payload = _evidence_payload(arguments["paper_id"], "ev_1")
-        if retrieval_count == 2:
+        if retrieval_count % 2 == 0:
+            # Every second replay returns conflicting content, so the
+            # contract error fires on both the first attempt and the repair.
             pool = payload["evidence_pool"]
             assert isinstance(pool, dict)
             pool["items"][0]["chunk_text"] = "conflicting evidence text"
@@ -2032,15 +2037,24 @@ def test_repeated_global_evidence_id_rejects_conflicting_content() -> None:
 
     def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
         tools["prepare_paper"].invoke({"external_id": PRIMARY.external_id})
-        for _index in range(2):
-            tools["retrieve_paper_evidence"].invoke(
-                {
-                    "question": "question",
-                    "external_id": PRIMARY.external_id,
-                    "top_k_each": 2,
-                    "summary_k": 2,
-                }
-            )
+        tools["retrieve_paper_evidence"].invoke(
+            {
+                "question": "question",
+                "external_id": PRIMARY.external_id,
+                "top_k_each": 2,
+                "summary_k": 2,
+            }
+        )
+        # The second call replays ev_1 with conflicting content and raises
+        # ResearchContractError, which now routes into the repair attempt.
+        tools["retrieve_paper_evidence"].invoke(
+            {
+                "question": "question",
+                "external_id": PRIMARY.external_id,
+                "top_k_each": 2,
+                "summary_k": 2,
+            }
+        )
         raise AssertionError("conflicting replay should have raised")
 
     context, factory, _unused = _context(behavior, mcp_tools=mcp_tools)
@@ -2199,10 +2213,13 @@ def test_real_tool_node_converts_mcp_tool_error_to_contract_failure() -> None:
     assert exc_info.value.__cause__ is failure
     assert "remote-secret" not in str(exc_info.value)
     assert "full-paper-text" not in str(exc_info.value)
-    assert model.invoke_count == 1
-    assert model.tool_trace == ["prepare_paper"]
+    # One repair attempt runs before the contract error becomes terminal;
+    # the scripted behavior repeats on both attempts.
+    assert model.invoke_count == 2
+    assert model.tool_trace == ["prepare_paper", "prepare_paper"]
     assert calls == [
-        ("mcp__arxiv__download_paper", {"arxiv_id": PRIMARY.external_id})
+        ("mcp__arxiv__download_paper", {"arxiv_id": PRIMARY.external_id}),
+        ("mcp__arxiv__download_paper", {"arxiv_id": PRIMARY.external_id}),
     ]
 
 

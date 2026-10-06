@@ -38,10 +38,7 @@ class MemorySearchIndex:
         self._half_life_days = recency_half_life_days
         self._now = now or datetime.now(timezone.utc)
         self._index = BM25Index().build(
-            {
-                record.memory_id: f"{record.kind}\n{record.content}"
-                for record in self._records
-            }
+            {record.memory_id: _card_text(record) for record in self._records}
         )
 
     def search(self, query: str, top_k: int) -> list[ScoredMemory]:
@@ -84,6 +81,20 @@ class MemorySearchIndex:
             stamp = stamp.replace(tzinfo=timezone.utc)
         age_days = max((self._now - stamp).total_seconds() / 86400.0, 0.0)
         return 0.5 ** (age_days / max(self._half_life_days, 1e-9))
+
+
+def _card_text(record: UserMemoryRecord) -> str:
+    """Card fields joined for lexical indexing; disambiguation context
+    (subject/topic/backstory) participates in matching."""
+    context = record.context or {}
+    parts = [
+        record.kind,
+        str(context.get("topic", "")),
+        str(context.get("subject", "")),
+        record.content,
+        str(context.get("backstory", "")),
+    ]
+    return "\n".join(part for part in parts if part)
 
 
 def search_user_memories(

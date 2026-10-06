@@ -32,6 +32,7 @@ def initialize_turn(
             "research_trace": None,
             "research_context_delta": None,
             "research_result": None,
+            "user_memory_context": None,
             "answer_draft": None,
             "published_message_id": None,
             "error": None,

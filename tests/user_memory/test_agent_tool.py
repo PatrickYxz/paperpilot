@@ -70,3 +70,15 @@ def test_tool_invoke_survives_store_failure():
     context.task_store.list_user_memories.side_effect = RuntimeError("db down")
     tool = _build_user_memory_tool(context)
     assert "failed" in tool.invoke({"query": "q"})
+
+
+def test_tool_renders_card_labels():
+    record = _record()
+    object.__setattr__(
+        record, "context",
+        {"topic": "research_focus", "subject": "user", "backstory": "stated when asking papers"},
+    )
+    tool = _build_user_memory_tool(_context([record]))
+    out = tool.invoke({"query": "distillation"})
+    assert "[fact|research_focus|user]" in out
+    assert "stated when asking papers" in out

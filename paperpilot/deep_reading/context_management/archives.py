@@ -146,6 +146,7 @@ class ResearchExecutionOutcome:
     result: ResearchResult
     trace: ResearchTrace
     context_delta: ValidatedContextDelta | None = None
+    user_memory_context: str = ""
 
     def __getattr__(self, name: str) -> Any:
         # Existing graph and tests consume ResearchResult attributes directly.

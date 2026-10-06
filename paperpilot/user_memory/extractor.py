@@ -1,7 +1,11 @@
-"""LLM extraction of long-term memory candidates with span verification.
+"""LLM extraction of long-term memory cards with span verification.
 
-The extractor may only propose; every candidate must carry a support span
-that literally appears in this turn's messages, or the pipeline drops it.
+Cards follow the book's Advanced JSON Cards idea: besides the fact itself,
+each card records who the fact is about (subject), how that subject relates
+to the user (relationship), and why it was captured (backstory) — the
+disambiguation context that plain key-value notes lose. The extractor may
+only propose; every card must carry a support span that literally appears
+in this turn's messages, or the pipeline drops it.
 """
 from __future__ import annotations
 
@@ -14,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 MEMORY_KINDS = ("preference", "fact", "project", "paper_note")
 
 _EXTRACTION_SYSTEM_PROMPT = (
-    "You extract durable long-term memories about the user from one "
+    "You extract durable long-term memory cards about the user from one "
     "research-assistant conversation turn. Follow three rules: "
     "SELECTIVITY — keep only facts useful in future conversations, never "
     "one-off details of this turn (e.g. which PDF page was read, how many "
@@ -22,7 +26,13 @@ _EXTRACTION_SYSTEM_PROMPT = (
     "behavior into stable traits ('prefers methods with code released') "
     "instead of replaying events; STRUCTURE — output concise, "
     "self-contained statements resolvable without this conversation. "
-    "For every memory, copy a support_span: a verbatim substring from the "
+    "Every card is a structured record: subject (who the fact is about — "
+    "'user' unless it concerns someone else, e.g. 'user's advisor'), "
+    "relationship (how the subject relates to the user, 'self' for the "
+    "user), topic (fine-grained theme like research_focus, "
+    "reading_preference, team, tooling), and backstory (one clause on why "
+    "this matters, e.g. 'mentioned when asking for paper recommendations'). "
+    "For every card, copy a support_span: a verbatim substring from the "
     "conversation that proves it. If nothing durable appears, return an "
     "empty list."
 )
@@ -33,6 +43,10 @@ class MemoryCandidate(BaseModel):
 
     kind: Literal["preference", "fact", "project", "paper_note"]
     content: str = Field(min_length=4, max_length=400)
+    subject: str = Field(default="user", min_length=1, max_length=80)
+    relationship: str = Field(default="self", min_length=1, max_length=80)
+    topic: str = Field(default="general", min_length=1, max_length=60)
+    backstory: str = Field(default="", max_length=200)
     support_span: str = Field(min_length=8, max_length=400)
 
 
@@ -47,7 +61,7 @@ def build_extraction_prompt(*, user_text: str, assistant_text: str) -> str:
         "Conversation turn:\n\n"
         f"USER:\n{user_text}\n\n"
         f"ASSISTANT:\n{assistant_text}\n\n"
-        "Extract durable user memories as JSON per the system rules. "
+        "Extract durable user memory cards as JSON per the system rules. "
         "Kinds: preference (long-term likes/dislikes), fact (stable traits: "
         "research fields, affiliations, expertise), project (ongoing work "
         "and its goals), paper_note (the user's settled takeaway about one "

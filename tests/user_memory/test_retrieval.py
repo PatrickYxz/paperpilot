@@ -96,3 +96,15 @@ def test_turn_summary_search_matches_question_and_prefix():
     # Prefix clue only: conversation id is not in the raw texts.
     hits = search_turn_summaries(summaries, "conversation conv-b", top_k=1)
     assert hits[0][0].user_message_id == "m2"
+
+
+def test_card_topic_and_subject_participate_in_matching():
+    records = [
+        _record("m-team", "Supervises two master's students.", "2026-10-01T00:00:00+00:00"),
+        _record("m-focus", "Main research area is speech recognition.", "2026-10-01T00:00:00+00:00"),
+    ]
+    records[0] = records[0].__class__(
+        **{**records[0].__dict__, "context": {"topic": "team", "subject": "user"}}
+    )
+    hits = search_user_memories(records, "team", top_k=1)
+    assert hits[0].record.memory_id == "m-team"

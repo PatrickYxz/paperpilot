@@ -28,6 +28,7 @@ class DeepReadingState(TypedDict, total=False):
     retrieved_archive_ids: list[str]
     context_input_tokens: int | None
     research_result: dict[str, object] | None
+    user_memory_context: str | None
     research_trace: dict[str, object] | None
     research_context_delta: dict[str, object] | None
     answer_draft: dict[str, object] | None
