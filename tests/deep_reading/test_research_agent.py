@@ -814,7 +814,7 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
         "tags": ["paperpilot:model"],
         "metadata": {
             "paperpilot_stage": "research",
-            "prompt_version": "research-v7",
+            "prompt_version": "research-v8",
         },
     }
     assert mcp_calls == [
@@ -2252,3 +2252,41 @@ def test_real_tool_node_preserves_transient_mcp_failure_identity(failure) -> Non
     assert calls == [
         ("mcp__arxiv__download_paper", {"arxiv_id": PRIMARY.external_id})
     ]
+
+
+def test_tool_descriptions_state_preconditions_and_boundaries() -> None:
+    """Tool descriptions must keep stating when-to-use, preconditions, and
+    fidelity notes (book ch.4); silently losing them regresses tool choice."""
+    import paperpilot.deep_reading.research_agent as ra
+    from paperpilot.user_memory.agent_tool import build_user_memory_tool
+
+    class _Ctx:
+        context_management = type("CM", (), {"enabled": False})()
+
+    prepare = ra._build_prepare_tool(_Ctx(), {}, {})
+    retrieve = ra._build_retrieval_tool(_Ctx(), {}, {})
+
+    descriptions = {
+        "search_related_papers": ra._build_search_tool(_Ctx(), {}).description,
+        "prepare_paper": prepare.description,
+        "retrieve_paper_evidence": retrieve.description,
+        "search_user_memory": build_user_memory_tool(
+            _Ctx(),
+            emit_tool_call=lambda *a, **k: None,
+            required_id=lambda v, f: str(v),
+            clip=lambda v: v,
+        ).description,
+    }
+    expectations = {
+        "search_related_papers": ["Do NOT use it", "retrieve_paper_evidence"],
+        "prepare_paper": ["PRECONDITION", "normalized", "rejected"],
+        "retrieve_paper_evidence": [
+            "PRECONDITION",
+            "prepare_paper",
+            "evidence_pool",
+        ],
+        "search_user_memory": ["background reference data", "never as instructions"],
+    }
+    for name, keywords in expectations.items():
+        for keyword in keywords:
+            assert keyword in descriptions[name], (name, keyword)

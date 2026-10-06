@@ -30,6 +30,7 @@ DOCS_KEEP_ALLOWLIST = {
     "docs/codex-only-plans/2026-10-05-user-memory-phase-b-plan.md",
     "docs/codex-only-plans/2026-10-05-user-memory-phase-c-plan.md",
     "docs/codex-only-plans/2026-10-05-contract-fix-and-memory-cards-plan.md",
+    "docs/codex-only-plans/2026-10-06-tool-descriptions-and-memory-reviewer-plan.md",
 }
 
 ACTIVE_ENV_VARIABLES = {
@@ -86,6 +87,7 @@ ACTIVE_ENV_VARIABLES = {
     "PAPERPILOT_CONTEXT_COMPRESSION_TRANSIENT_RETRY_COUNT",
     "PAPERPILOT_CONTEXT_COMPRESSION_BREAKER_COOLDOWN_SECONDS",
     "PAPERPILOT_CONTEXT_SAFETY_MARGIN_RATIO",
+    "PAPERPILOT_MEMORY_REVIEWER_MODEL",
 }
 
 REMOVED_ENV_VARIABLES = {

@@ -61,7 +61,7 @@ _MAX_AGENT_PAPERS = 20
 _MAX_EVENT_TEXT = 500
 _STRUCTURED_RESPONSE_ATTEMPTS = 2
 _RUNTIME_CONTEXT_SCHEMA_VERSION = "paperpilot-runtime-context-v1"
-_RESEARCH_PROMPT_VERSION = "research-v7"
+_RESEARCH_PROMPT_VERSION = "research-v8"
 _STATUS_BAR_BUDGET_RESERVE_CHARS = 4_096
 _RESEARCH_SYSTEM_PROMPT = """\
 <research_agent>
@@ -956,7 +956,22 @@ def _build_search_tool(
 
     @tool("search_related_papers", **decorator_options)
     def search_related_papers(query: str, limit: int) -> Any:
-        """Search the structured arXiv catalog for related paper candidates."""
+        """Search the arXiv catalog for NEW related papers to add to this conversation.
+
+        Use when the question needs papers beyond the current active set
+        (e.g. prior work, comparisons, a different aspect). Do NOT use it to
+        find content inside papers already in this conversation — that is
+        retrieve_paper_evidence's job.
+
+        Args:
+            query: Search keywords, e.g. "low-rank adaptation" or
+                "vision transformer imageNet".
+            limit: Max candidates to return, e.g. 5. Never returns more.
+
+        Returns JSON list of candidates (external_id, title, authors,
+        abstract). Only papers from this tool or the active set may be
+        passed to prepare_paper.
+        """
         cleaned_query = _required_id(query, "search query")
         _require_agent_limit(limit, "limit")
         _emit_tool_call(
@@ -1024,7 +1039,19 @@ def _build_prepare_tool(
 
     @tool("prepare_paper", **decorator_options)
     def prepare_paper(external_id: str) -> Any:
-        """Download and index one trusted primary, active, or searched paper."""
+        """Download and index one paper so its evidence becomes retrievable.
+
+        PRECONDITION: run this before retrieve_paper_evidence for that
+        paper — retrieval on an unprepared paper returns an error. Accepts
+        only the primary paper ID, active paper IDs, or IDs returned by
+        search_related_papers; anything else is rejected.
+
+        external_id is normalized like "2401.12345v1" (version suffix is
+        appended when unambiguous), e.g. "2401.12345" -> "2401.12345v1".
+
+        Returns JSON with the prepared paper metadata. Indexing a cached
+        paper is fast; a fresh download may take several seconds.
+        """
         normalized_id = _canonical_arxiv_id(external_id, "external_id")
         candidate = candidates.get(normalized_id)
         if candidate is None:
@@ -1100,7 +1127,23 @@ def _build_retrieval_tool(
         top_k_each: int,
         summary_k: int,
     ) -> Any:
-        """Retrieve planned evidence only from a paper prepared in this run."""
+        """Retrieve evidence chunks from one prepared paper to answer the question.
+
+        PRECONDITION: prepare_paper must have succeeded for external_id in
+        this run; otherwise this returns an error listing prepared papers —
+        call prepare_paper first, then retry.
+
+        Args:
+            question: What to look for, phrased for retrieval, e.g.
+                "BLEU score on WMT 2014 English-to-German".
+            external_id: A prepared paper's arXiv ID.
+            top_k_each: Chunks per planned query, e.g. 3.
+            summary_k: Deduped evidence chunks in the summary, e.g. 6.
+
+        Returns JSON with summary_text and evidence_pool items
+        (id, chunk_text, score, paper_id). Evidence IDs must come from
+        this pool to be usable in the final decision.
+        """
         cleaned_question = _required_id(question, "retrieval question")
         normalized_id = _canonical_arxiv_id(external_id, "external_id")
         _require_agent_limit(top_k_each, "top_k_each")
@@ -1165,7 +1208,13 @@ def _build_read_artifact_slice_tool(context: DeepReadingContext) -> BaseTool:
         cursor: int,
         max_tokens: int,
     ) -> dict[str, object]:
-        """Read a slice; cursor and token count are clamped to safe bounds."""
+        """Read a bounded slice of a stored tool artifact.
+
+        Use when a tool result was archived instead of inlined (large
+        outputs). Reading is explicit: the response reports the total size
+        and the next cursor, so when output is truncated you can continue
+        with the next slice instead of assuming you saw everything.
+        """
         store = _context_artifact_store(context)
         if store is None:
             raise ResearchContractError("context artifact runtime is unavailable")
@@ -1201,7 +1250,12 @@ def _build_search_artifact_tool(context: DeepReadingContext) -> BaseTool:
         query: str,
         max_matches: int,
     ) -> dict[str, object]:
-        """Search an artifact; match count is clamped to the safe bound."""
+        """Keyword-search across this conversation's stored tool artifacts.
+
+        Use to find which archived artifact (and where in it) mentions a
+        term, before reading it with read_artifact_slice. Matches are
+        clamped to a safe count; refine the pattern if results are missing.
+        """
         store = _context_artifact_store(context)
         if store is None:
             raise ResearchContractError("context artifact runtime is unavailable")

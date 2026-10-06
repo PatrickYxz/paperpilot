@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import logging
 
+from paperpilot.user_memory.dashscope_model import build_reviewer_model_from_env
 from paperpilot.user_memory.profile import (
     generate_profile,
     profile_due_for_refresh,
 )
+from paperpilot.user_memory.reviewer import review_memory_cards
 from paperpilot.user_memory.extractor import (
     extract_memory_candidates,
     verify_candidates,
@@ -40,6 +42,18 @@ def run_memory_extraction(
         model=model,
     )
     verified = verify_candidates(candidates, [user_text, assistant_text])
+    reviewer_model = build_reviewer_model_from_env()
+    if reviewer_model is not None and verified:
+        verified, rejection_reasons = review_memory_cards(
+            cards=verified,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            model=reviewer_model,
+        )
+        for reason in rejection_reasons:
+            logging.getLogger("paperpilot.user_memory").info(
+                "memory card rejected by reviewer: %s", reason
+            )
 
     written = 0
     for index, candidate in enumerate(verified, start=1):

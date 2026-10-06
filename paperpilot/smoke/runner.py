@@ -48,6 +48,12 @@ def run_scenario(
                 raise RuntimeError(
                     f"memory seed turn failed: {seed_question[:60]!r}"
                 )
+            # The memory extraction (plus the reviewer stage when
+            # enabled) keeps running after the task reports completed, and
+            # its DB writes can briefly contend with the next task's; wait
+            # out that window so the probe conversation both sees the
+            # memories and avoids the write-write race.
+            time.sleep(20.0)
         if first_conversation:
             api.open_conversation(scenario)
         else:
