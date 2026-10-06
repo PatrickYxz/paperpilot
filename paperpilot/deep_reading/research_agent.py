@@ -25,6 +25,11 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from paperpilot.papers import PaperCandidate, normalize_arxiv_id
 from paperpilot.compute.agent_tool import build_computation_tool
+from paperpilot.feature_flags import (
+    computation_tool_enabled,
+    memory_tool_enabled,
+    profile_injection_enabled,
+)
 from paperpilot.user_memory.agent_tool import (
     build_user_memory_tool,
     load_user_profile,
@@ -467,25 +472,30 @@ def run_research_agent(
         evidence_ledger,
     )
     memory_capture: dict[str, str] = {}
-    computation_tool = build_computation_tool(
-        context,
-        emit_tool_call=_emit_tool_call,
-        clip=_clip,
-        required_id=_required_id,
-    )
     registered_tools: list[BaseTool] = [
         search_tool,
         prepare_tool,
         retrieval_tool,
-        computation_tool,
-        build_user_memory_tool(
-            context,
-            emit_tool_call=_emit_tool_call,
-            required_id=_required_id,
-            clip=_clip,
-            memory_capture=memory_capture,
-        ),
     ]
+    if computation_tool_enabled():
+        registered_tools.append(
+            build_computation_tool(
+                context,
+                emit_tool_call=_emit_tool_call,
+                clip=_clip,
+                required_id=_required_id,
+            )
+        )
+    if memory_tool_enabled():
+        registered_tools.append(
+            build_user_memory_tool(
+                context,
+                emit_tool_call=_emit_tool_call,
+                required_id=_required_id,
+                clip=_clip,
+                memory_capture=memory_capture,
+            )
+        )
     prior_result_messages: list[AnyMessage] | None = None
     if context.context_management.enabled:
         registered_tools.extend(
@@ -498,7 +508,11 @@ def run_research_agent(
         state,
         primary_external_id=primary_external_id,
         active_external_ids=list(candidate_ledger),
-        user_profile=load_user_profile(context),
+        user_profile=(
+            load_user_profile(context)
+            if profile_injection_enabled()
+            else None
+        ),
     )
 
     last_structured_error: Exception | None = None

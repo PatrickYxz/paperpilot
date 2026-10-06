@@ -41,6 +41,7 @@ class ScenarioOutcome:
 
     scenario: Scenario
     turns: list[TurnObservation] = field(default_factory=list)
+    attribution: dict | None = None
     error: str = ""
 
     @property

@@ -16,6 +16,7 @@ from paperpilot.mcp_servers.colbert.index_manager import (
     IndexManager,
     IndexNotFoundError,
 )
+from paperpilot.feature_flags import retrieval_mode
 from paperpilot.retrieval.llm_query_planner import plan_with_llm
 from paperpilot.retrieval.planned_retrieval import run_planned_retrieval
 
@@ -77,14 +78,18 @@ def search(
 
 
 def _search_impl(
-    query: str, paper_id: str, top_k: int, mode: str = "hybrid"
+    query: str,
+    paper_id: str,
+    top_k: int,
+    mode: str | None = None,
 ) -> list[dict]:
-    if mode not in IndexManager.SEARCH_MODES:
-        raise ValueError(
-            f"mode must be one of {IndexManager.SEARCH_MODES}, got {mode!r}"
-        )
     assert _manager is not None, "IndexManager not initialized"
-    return _manager.search(query, paper_id, top_k, mode=mode)
+    resolved_mode = mode or retrieval_mode()
+    if resolved_mode not in IndexManager.SEARCH_MODES:
+        raise ValueError(
+            f"mode must be one of {IndexManager.SEARCH_MODES}, got {resolved_mode!r}"
+        )
+    return _manager.search(query, paper_id, top_k, mode=resolved_mode)
 
 
 @mcp.tool()

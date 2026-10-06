@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from paperpilot.smoke.adapter import ConversationApi
+from paperpilot.smoke.attribution import attribute_failure
 from paperpilot.smoke.checks import (
     CheckResult,
     ScenarioOutcome,
@@ -76,7 +77,20 @@ def run_scenario(
     except Exception as exc:  # noqa: BLE001
         outcome.error = f"{type(exc).__name__}: {exc}"
     elapsed = time.monotonic() - started
-    return outcome, evaluate_checks(outcome, context_management=context_management), elapsed
+    checks = evaluate_checks(outcome, context_management=context_management)
+    failed_names = [check.name for check in checks if not check.passed]
+    if failed_names or outcome.error:
+        events = [event for turn in outcome.turns for event in turn.events]
+        attribution = attribute_failure(events, failed_names)
+        outcome.attribution = {
+            "category": attribution.category,
+            "summary": attribution.summary,
+            "first_error_event_id": attribution.first_error_event_id,
+            "evidence": attribution.evidence,
+        }
+        if outcome.error:
+            outcome.attribution["harness_error"] = outcome.error[:200]
+    return outcome, checks, elapsed
 
 
 def build_report_row(
@@ -105,6 +119,8 @@ def build_report_row(
         "passed": all(c.passed for c in checks) if checks else False,
     }
     if outcome is not None:
+        if getattr(outcome, "attribution", None):
+            row["attribution"] = outcome.attribution
         first_turn = outcome.turns[0] if outcome.turns else None
         row["citations_count"] = len(first_turn.citations) if first_turn else 0
         row["turns"] = [

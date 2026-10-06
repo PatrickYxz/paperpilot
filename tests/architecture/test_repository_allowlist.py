@@ -32,6 +32,7 @@ DOCS_KEEP_ALLOWLIST = {
     "docs/codex-only-plans/2026-10-05-contract-fix-and-memory-cards-plan.md",
     "docs/codex-only-plans/2026-10-06-tool-descriptions-and-memory-reviewer-plan.md",
     "docs/codex-only-plans/2026-10-06-compute-sandbox-and-fingerprint-plan.md",
+    "docs/codex-only-plans/2026-10-06-eval-attribution-ablation-plan.md",
 }
 
 ACTIVE_ENV_VARIABLES = {
@@ -89,6 +90,10 @@ ACTIVE_ENV_VARIABLES = {
     "PAPERPILOT_CONTEXT_COMPRESSION_BREAKER_COOLDOWN_SECONDS",
     "PAPERPILOT_CONTEXT_SAFETY_MARGIN_RATIO",
     "PAPERPILOT_MEMORY_REVIEWER_MODEL",
+    "PAPERPILOT_MEMORY_TOOL_ENABLED",
+    "PAPERPILOT_PROFILE_INJECTION_ENABLED",
+    "PAPERPILOT_COMPUTATION_TOOL_ENABLED",
+    "PAPERPILOT_RETRIEVAL_MODE",
 }
 
 REMOVED_ENV_VARIABLES = {

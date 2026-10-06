@@ -12,6 +12,7 @@ from typing import Any
 from paperpilot.smoke.adapter import ConversationApi
 from paperpilot.smoke.judge import run_judge_check
 from paperpilot.smoke.runner import build_report_row, run_scenario
+from paperpilot.smoke.stats import summarize_repeats
 from paperpilot.smoke.runtime import build_isolated_app
 from paperpilot.smoke.scenarios import DEFAULT_CASES_PATH, ScenarioError, load_scenarios
 
@@ -48,6 +49,17 @@ def main(argv: list[str] | None = None) -> int:
         help="LLM-as-judge scoring for scenarios with expected_points",
     )
     parser.add_argument("--judge-model", default=None, help="model for --judge")
+    parser.add_argument(
+        "--ablate",
+        action="store_true",
+        help="run the feature ablation matrix on selected scenarios",
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="run each scenario N times; report Pass^k / Pass@k reliability",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -102,16 +114,25 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[dict[str, Any]] = []
     with client:
         api = ConversationApi(client)
+        if args.ablate:
+            return _run_ablate_mode(args, api, selected, base_dir)
         for index, scenario in enumerate(selected, start=1):
-            print(f"[{index}/{len(selected)}] {scenario.id} :: {scenario.question[:80]}")
-            outcome, checks, elapsed = run_scenario(
-                api,
-                scenario,
-                context_management=args.context_management,
-                timeout_s=args.timeout,
+            print(
+                f"[{index}/{len(selected)}] {scenario.id} :: "
+                f"{scenario.question[:80]}"
+                + (f" (x{args.repeat})" if args.repeat > 1 else "")
             )
-            if args.judge:
-                if scenario.expected_points:
+            repeat_passed: list[bool] = []
+            outcome = checks = None
+            elapsed = 0.0
+            for _rep in range(max(1, args.repeat)):
+                outcome, checks, elapsed = run_scenario(
+                    api,
+                    scenario,
+                    context_management=args.context_management,
+                    timeout_s=args.timeout,
+                )
+                if args.judge and scenario.expected_points:
                     checks.append(
                         run_judge_check(
                             scenario,
@@ -125,8 +146,19 @@ def main(argv: list[str] | None = None) -> int:
                             ),
                         )
                     )
-                else:
-                    print(f"       judge skipped: {scenario.id} has no expected_points")
+                rep_passed = all(check.passed for check in checks)
+                repeat_passed.append(rep_passed)
+                if not rep_passed:
+                    print(f"       rep {len(repeat_passed)} failed")
+                    for check in checks:
+                        if not check.passed:
+                            print(f"       FAIL {check.name}: {check.detail}")
+                    attribution = getattr(outcome, "attribution", None)
+                    if attribution:
+                        print(
+                            f"       attribution[{attribution['category']}]: "
+                            f"{attribution['summary']}"
+                        )
             row = build_report_row(
                 scenario,
                 checks,
@@ -134,12 +166,19 @@ def main(argv: list[str] | None = None) -> int:
                 context_management=args.context_management,
                 outcome=outcome,
             )
+            if args.repeat > 1:
+                row["repeats"] = summarize_repeats(repeat_passed)
+                print(
+                    f"    reliability: Pass^{args.repeat}="
+                    f"{row['repeats']['pass_k_consecutive']} "
+                    f"Pass@{args.repeat}={row['repeats']['pass_at_k']} "
+                    f"rate={row['repeats']['single_pass_rate']:.2f} "
+                    f"(95% CI {row['repeats']['wilson95_low']:.2f}-"
+                    f"{row['repeats']['wilson95_high']:.2f})"
+                )
             rows.append(row)
             verdict = "PASS" if row["passed"] else "FAIL"
             print(f"    -> {verdict} ({row['elapsed_s']}s) {row['status']}")
-            for check in checks:
-                if not check.passed:
-                    print(f"       FAIL {check.name}: {check.detail}")
             raw_path = base_dir / f"outcome-{scenario.id}.json"
             raw_path.write_text(
                 json.dumps(
@@ -175,3 +214,55 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"all {len(rows)} scenarios passed")
     return 0
+
+
+def _count_tokens(outcome) -> int:
+    total = 0
+    for turn in outcome.turns:
+        for event in turn.events:
+            if event.get("type") != "model_usage":
+                continue
+            payload = event.get("payload") or event.get("payload_json") or {}
+            if isinstance(payload, str):
+                import json as _json
+
+                try:
+                    payload = _json.loads(payload)
+                    payload = payload or {}
+                except (TypeError, ValueError):
+                    payload = {}
+            total += int(payload.get("input_tokens", 0) or 0)
+            total += int(payload.get("output_tokens", 0) or 0)
+    return total
+
+
+def _run_ablate_mode(args, api, selected, base_dir) -> int:
+    from paperpilot.smoke.ablation import (
+        render_ablation_table,
+        run_ablation_matrix,
+    )
+
+    by_id = {scenario.id: scenario for scenario in selected}
+
+    def make_runner(scenario):
+        def _run_one():
+            outcome, checks, _elapsed = run_scenario(
+                api,
+                scenario,
+                context_management=args.context_management,
+                timeout_s=args.timeout,
+            )
+            return all(check.passed for check in checks), _count_tokens(outcome)
+
+        return _run_one
+
+    results = run_ablation_matrix(
+        [scenario.id for scenario in selected],
+        lambda scenario_id: make_runner(by_id[scenario_id]),
+    )
+    print()
+    print(render_ablation_table(results))
+    ablation_path = base_dir / "ablation_report.json"
+    ablation_path.write_text(json.dumps(results, indent=2))
+    print(f"ablation report: {ablation_path}")
+    return 0 if results and results[0]["passes"] > 0 else 1
