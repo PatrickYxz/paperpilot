@@ -96,7 +96,7 @@ def render_ablation_table(results: list[dict[str, Any]]) -> str:
     for row in results:
         lines.append(
             f"{row['config']:<22} "
-            f"{row['passes']:>3}/{row['scenarios']:<3} "
+            f"{row['passes']:>3}/{row['trials']:<3} "
             f"{row['pass_rate']:>7.2f} "
             f"{row['total_tokens']:>9} "
             f"{row.get('pass_rate_delta', 0):>+8.2f} "

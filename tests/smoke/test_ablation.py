@@ -60,7 +60,7 @@ def test_matrix_runs_all_configs_and_restores_env():
 def test_render_table_includes_all_rows():
     configs = ablation_configs()
     results = [
-        {"config": label, "scenarios": 2, "passes": 1, "pass_rate": 0.5,
+        {"config": label, "scenarios": 2, "trials": 4, "passes": 2, "pass_rate": 0.5,
          "total_tokens": 1000, "pass_rate_delta": -0.5, "token_delta_ratio": 1.2}
         for label, _ in configs
     ]
