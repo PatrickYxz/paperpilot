@@ -24,6 +24,7 @@ from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from paperpilot.papers import PaperCandidate, normalize_arxiv_id
+from paperpilot.compute.agent_tool import build_computation_tool
 from paperpilot.user_memory.agent_tool import (
     build_user_memory_tool,
     load_user_profile,
@@ -61,7 +62,7 @@ _MAX_AGENT_PAPERS = 20
 _MAX_EVENT_TEXT = 500
 _STRUCTURED_RESPONSE_ATTEMPTS = 2
 _RUNTIME_CONTEXT_SCHEMA_VERSION = "paperpilot-runtime-context-v1"
-_RESEARCH_PROMPT_VERSION = "research-v8"
+_RESEARCH_PROMPT_VERSION = "research-v9"
 _STATUS_BAR_BUDGET_RESERVE_CHARS = 4_096
 _RESEARCH_SYSTEM_PROMPT = """\
 <research_agent>
@@ -466,10 +467,17 @@ def run_research_agent(
         evidence_ledger,
     )
     memory_capture: dict[str, str] = {}
+    computation_tool = build_computation_tool(
+        context,
+        emit_tool_call=_emit_tool_call,
+        clip=_clip,
+        required_id=_required_id,
+    )
     registered_tools: list[BaseTool] = [
         search_tool,
         prepare_tool,
         retrieval_tool,
+        computation_tool,
         build_user_memory_tool(
             context,
             emit_tool_call=_emit_tool_call,
@@ -564,6 +572,7 @@ def run_research_agent(
                     candidates=candidate_ledger,
                     prepared=prepared_ledger,
                     evidence=evidence_ledger,
+                    repeated_tool_calls=repeated_tool_calls(context),
                 )
             )
         agent = create_agent_factory(
@@ -637,11 +646,14 @@ def run_research_agent(
             user_memory_context=memory_capture.get("context", ""),
         )
 
-    if isinstance(last_structured_error, ResearchContractError):
-        raise last_structured_error
-    raise AgentBudgetExceededError(
-        "research agent structured response attempts exhausted after 2 attempts"
-    ) from last_structured_error
+    try:
+        if isinstance(last_structured_error, ResearchContractError):
+            raise last_structured_error
+        raise AgentBudgetExceededError(
+            "research agent structured response attempts exhausted after 2 attempts"
+        ) from last_structured_error
+    finally:
+        clear_tool_fingerprints(context)
 
 
 def _emit_contract_failure(
@@ -678,6 +690,7 @@ def _structured_response_repair_message(
     candidates: Mapping[str, PaperCandidate],
     prepared: Mapping[str, PaperCandidate],
     evidence: Mapping[str, EvidenceItem],
+    repeated_tool_calls: Sequence[str] = (),
 ) -> HumanMessage:
     from xml.etree.ElementTree import Element, SubElement, tostring
 
@@ -707,6 +720,13 @@ def _structured_response_repair_message(
                 "id": evidence_id,
                 "paper_external_id": item.paper_external_id,
             },
+        )
+    if repeated_tool_calls:
+        repeated_element = SubElement(root, "repeated_tool_calls")
+        repeated_element.text = (
+            "These exact tool calls were already made several times with no "
+            "progress — do NOT repeat them unchanged; change strategy or "
+            "return a decision: " + " | ".join(repeated_tool_calls[:5])
         )
     instruction = SubElement(root, "instruction")
     if isinstance(
@@ -1784,6 +1804,24 @@ def _event_arguments(arguments: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+_TOOL_FINGERPRINTS: dict[str, dict[str, int]] = {}
+_REPETITION_WARNING_THRESHOLD = 3
+
+
+def repeated_tool_calls(context: DeepReadingContext) -> list[str]:
+    """Fingerprints already called enough times to look like a stall."""
+    store = _TOOL_FINGERPRINTS.get(context.task_id, {})
+    return [
+        fingerprint
+        for fingerprint, count in store.items()
+        if count >= _REPETITION_WARNING_THRESHOLD
+    ]
+
+
+def clear_tool_fingerprints(context: DeepReadingContext) -> None:
+    _TOOL_FINGERPRINTS.pop(context.task_id, None)
+
+
 def _emit_tool_call(
     context: DeepReadingContext,
     *,
@@ -1791,6 +1829,19 @@ def _emit_tool_call(
     name: str,
     arguments: Mapping[str, object],
 ) -> None:
+    fingerprint = f"{name}:{json.dumps(dict(arguments), sort_keys=True, ensure_ascii=False)}"
+    store = _TOOL_FINGERPRINTS.setdefault(context.task_id, {})
+    store[fingerprint] = store.get(fingerprint, 0) + 1
+    if store[fingerprint] == _REPETITION_WARNING_THRESHOLD:
+        context.event_sink(
+            "tool_repetition_warning",
+            {
+                "stage": stage,
+                "name": name,
+                "repeats": store[fingerprint],
+                "fingerprint": fingerprint[:300],
+            },
+        )
     context.event_sink(
         "tool_call",
         {"stage": stage, "name": name, "arguments": dict(arguments)},

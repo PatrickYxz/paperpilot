@@ -27,6 +27,9 @@ from pydantic import PrivateAttr
 from paperpilot.deep_reading.nodes import DeepReadingContext
 from paperpilot.deep_reading.context_management.editing import ResearchContextMiddleware
 from paperpilot.deep_reading.research_agent import (
+    _emit_tool_call,
+    clear_tool_fingerprints,
+    repeated_tool_calls,
     AgentResearchDecision,
     DeepReadingTaskError,
     ResearchContractError,
@@ -802,6 +805,7 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
         "search_related_papers",
         "prepare_paper",
         "retrieve_paper_evidence",
+        "run_computation",
         "search_user_memory",
     ]
     response_format = create_call["response_format"]
@@ -814,7 +818,7 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
         "tags": ["paperpilot:model"],
         "metadata": {
             "paperpilot_stage": "research",
-            "prompt_version": "research-v8",
+            "prompt_version": "research-v9",
         },
     }
     assert mcp_calls == [
@@ -1005,6 +1009,7 @@ def test_agent_installs_official_per_attempt_limits_and_model_retry() -> None:
         "search_related_papers",
         "prepare_paper",
         "retrieve_paper_evidence",
+        "run_computation",
         "search_user_memory",
     ]
     assert [tool.name for tool in todo_middleware.tools] == ["write_todos"]
@@ -1039,6 +1044,7 @@ def test_enabled_context_registers_read_tools_and_fixed_middleware_order() -> No
         "search_related_papers",
         "prepare_paper",
         "retrieve_paper_evidence",
+        "run_computation",
         "search_user_memory",
         "read_artifact_slice",
         "search_artifact",
@@ -2290,3 +2296,33 @@ def test_tool_descriptions_state_preconditions_and_boundaries() -> None:
     for name, keywords in expectations.items():
         for keyword in keywords:
             assert keyword in descriptions[name], (name, keyword)
+
+
+def test_tool_fingerprint_warns_on_third_repeat_and_repairs_mention_it() -> None:
+    from unittest.mock import MagicMock
+
+    context = MagicMock(spec=DeepReadingContext)
+    context.task_id = "task-fingerprint"
+    context.event_sink = lambda event, payload: events.append((event, payload))
+    events: list[tuple[str, dict]] = []
+
+    for _ in range(3):
+        _emit_tool_call(
+            context,
+            stage="research",
+            name="retrieve_paper_evidence",
+            arguments={"question": "same", "external_id": "2401.00001v1"},
+        )
+    warnings = [payload for kind, payload in events if kind == "tool_repetition_warning"]
+    assert len(warnings) == 1 and warnings[0]["repeats"] == 3
+    assert repeated_tool_calls(context), "fingerprint should be reported"
+
+    # A different call signature does not count toward the same fingerprint.
+    _emit_tool_call(
+        context,
+        stage="research",
+        name="retrieve_paper_evidence",
+        arguments={"question": "different", "external_id": "2401.00001v1"},
+    )
+    clear_tool_fingerprints(context)
+    assert repeated_tool_calls(context) == []
