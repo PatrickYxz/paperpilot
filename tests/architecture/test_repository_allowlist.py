@@ -33,6 +33,7 @@ DOCS_KEEP_ALLOWLIST = {
     "docs/codex-only-plans/2026-10-06-tool-descriptions-and-memory-reviewer-plan.md",
     "docs/codex-only-plans/2026-10-06-compute-sandbox-and-fingerprint-plan.md",
     "docs/codex-only-plans/2026-10-06-eval-attribution-ablation-plan.md",
+    "docs/codex-only-plans/2026-10-07-posttraining-bridge-plan.md",
 }
 
 ACTIVE_ENV_VARIABLES = {

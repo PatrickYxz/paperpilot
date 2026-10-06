@@ -50,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--judge-model", default=None, help="model for --judge")
     parser.add_argument(
+        "--export-training",
+        action="store_true",
+        help="after the run, export SFT/DPO/negative-label assets from outcomes",
+    )
+    parser.add_argument(
         "--ablate",
         action="store_true",
         help="run the feature ablation matrix on selected scenarios",
@@ -148,6 +153,37 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 rep_passed = all(check.passed for check in checks)
                 repeat_passed.append(rep_passed)
+                raw_path = base_dir / (
+                    f"outcome-{scenario.id}"
+                    + (f"-r{len(repeat_passed)}" if args.repeat > 1 else "")
+                    + ".json"
+                )
+                raw_path.write_text(
+                    json.dumps(
+                        {
+                            "scenario_id": scenario.id,
+                            "question": scenario.question,
+                            "passed": rep_passed,
+                            "attribution": getattr(outcome, "attribution", None),
+                            "turns": [
+                                {
+                                    "task": turn.task,
+                                    "assistant_message": turn.assistant_message,
+                                    "citations": turn.citations,
+                                    "events": turn.events,
+                                    "artifacts": turn.artifacts,
+                                    "error": turn.error,
+                                }
+                                for turn in outcome.turns
+                            ],
+                            "error": outcome.error,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    ),
+                    encoding="utf-8",
+                )
                 if not rep_passed:
                     print(f"       rep {len(repeat_passed)} failed")
                     for check in checks:
@@ -179,29 +215,19 @@ def main(argv: list[str] | None = None) -> int:
             rows.append(row)
             verdict = "PASS" if row["passed"] else "FAIL"
             print(f"    -> {verdict} ({row['elapsed_s']}s) {row['status']}")
-            raw_path = base_dir / f"outcome-{scenario.id}.json"
-            raw_path.write_text(
-                json.dumps(
-                    {
-                        "turns": [
-                            {
-                                "task": turn.task,
-                                "assistant_message": turn.assistant_message,
-                                "citations": turn.citations,
-                                "events": turn.events,
-                                "artifacts": turn.artifacts,
-                                "error": turn.error,
-                            }
-                            for turn in outcome.turns
-                        ],
-                        "error": outcome.error,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                    default=str,
-                ),
-                encoding="utf-8",
-            )
+
+
+    if args.export_training:
+        from paperpilot.smoke.training_export import (
+            export_training_assets,
+            load_run_artifacts,
+            write_training_assets,
+        )
+
+        outcomes, report_rows = load_run_artifacts(base_dir)
+        assets = export_training_assets(outcomes, report_rows)
+        written = write_training_assets(assets, base_dir / "training_assets")
+        print(f"training assets ({assets.summary()}): {[p.name for p in written]}")
 
     with report_path.open("w", encoding="utf-8") as handle:
         for row in rows:
