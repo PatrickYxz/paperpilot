@@ -1,14 +1,24 @@
-"""Real invocation of the registered search_user_memory agent tool.
+"""Real invocation of the search_user_memory agent tool.
 
-Guards against silent import loss inside research_agent: the tool body
-references user_memory helpers that only resolve at call time.
+Invokes through the same harness helpers the research agent injects,
+guarding against silent import loss that module-level checks cannot catch.
 """
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from paperpilot.deep_reading.research_agent import _build_user_memory_tool
+from paperpilot.user_memory.agent_tool import build_user_memory_tool
+from paperpilot.deep_reading.research_agent import _emit_tool_call, _clip, _required_id
 from paperpilot.web.store.records import UserMemoryRecord
+
+
+def _tool(context):
+    return build_user_memory_tool(
+        context,
+        emit_tool_call=_emit_tool_call,
+        required_id=_required_id,
+        clip=_clip,
+    )
 
 
 def _context(records, summaries=()):
@@ -37,12 +47,12 @@ def _record(memory_id="m1", content="User works on distillation."):
 
 
 def test_tool_invoke_with_no_memories():
-    tool = _build_user_memory_tool(_context([]))
+    tool = _tool(_context([]))
     assert "No stored user memories" in tool.invoke({"query": "anything"})
 
 
 def test_tool_invoke_returns_matching_memory_and_notice():
-    tool = _build_user_memory_tool(
+    tool = _tool(
         _context([_record(content="User works on distillation.")])
     )
     out = tool.invoke({"query": "distillation"})
@@ -59,7 +69,7 @@ def test_tool_invoke_includes_conversation_digest_hits():
         narrative = "Found rank 8 sufficient."
         created_at = "2026-09-01T00:00:00Z"
 
-    tool = _build_user_memory_tool(_context([], [_Summary()]))
+    tool = _tool(_context([], [_Summary()]))
     out = tool.invoke({"query": "lora rank"})
     assert "conv-9" in out
     assert "rank 8" in out
@@ -68,7 +78,7 @@ def test_tool_invoke_includes_conversation_digest_hits():
 def test_tool_invoke_survives_store_failure():
     context = _context([])
     context.task_store.list_user_memories.side_effect = RuntimeError("db down")
-    tool = _build_user_memory_tool(context)
+    tool = _tool(context)
     assert "failed" in tool.invoke({"query": "q"})
 
 
@@ -78,7 +88,7 @@ def test_tool_renders_card_labels():
         record, "context",
         {"topic": "research_focus", "subject": "user", "backstory": "stated when asking papers"},
     )
-    tool = _build_user_memory_tool(_context([record]))
+    tool = _tool(_context([record]))
     out = tool.invoke({"query": "distillation"})
     assert "[fact|research_focus|user]" in out
     assert "stated when asking papers" in out
