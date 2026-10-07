@@ -53,3 +53,17 @@
 边界（4.4 输出形态原则：布局敏感内容保留图像）。flag：
 PAPERPILOT_PAGE_VISION_TOOL_ENABLED（默认开；DashScope 配额恢复前
 工具运行时优雅降级返回提示文本）。真实验证待 DashScope 恢复。
+
+---
+
+## 附 2：第十章落点（2026-10-08 追加）
+
+管理者模式（书 10.4.4）落地为 `collect_evidence_parallel` 工具：
+主 agent 自主决定何时 fan-out（书中"不要用规则代替模型决策"），
+每篇已 prepare 论文一个有界子 worker（检索一次 + LLM 读池写一句
+论文笔记，即灵台"分神"式短时工作者），ThreadPoolExecutor 并行
+（cap 4），evidence 回填共享 ledger（decision/write_answer 可引
+用）但 chunk 全文不进主上下文（隔离核心），单论文失败隔离。flag：
+PAPERPILOT_PARALLEL_EVIDENCE_ENABLED。双论文 smoke 场景
+（multipaper-comparison）保持草稿：agent 能 search+prepare 第二篇，
+但 decision 引用触发合约失败待校准（归因器定位为 contract_failure）。

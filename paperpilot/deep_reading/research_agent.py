@@ -25,10 +25,16 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from paperpilot.papers import PaperCandidate, normalize_arxiv_id
 from paperpilot.compute.agent_tool import build_computation_tool
+from functools import partial
+
+from paperpilot.deep_reading.parallel_evidence import (
+    build_parallel_evidence_tool,
+)
 from paperpilot.deep_reading.vlm_tool import build_page_vision_tool
 from paperpilot.feature_flags import (
     computation_tool_enabled,
     page_vision_tool_enabled,
+    parallel_evidence_enabled,
     memory_tool_enabled,
     profile_injection_enabled,
 )
@@ -486,6 +492,21 @@ def run_research_agent(
                 emit_tool_call=_emit_tool_call,
                 clip=_clip,
                 required_id=_required_id,
+            )
+        )
+    if parallel_evidence_enabled():
+        registered_tools.append(
+            build_parallel_evidence_tool(
+                context,
+                prepared=prepared_ledger,
+                evidence=evidence_ledger,
+                call_mcp_json=partial(_call_mcp_json, context),
+                decode_evidence_pool=_decode_evidence_pool,
+                contract_error=ResearchContractError,
+                emit_tool_call=_emit_tool_call,
+                clip=_clip,
+                required_id=_required_id,
+                require_agent_limit=_require_agent_limit,
             )
         )
     if page_vision_tool_enabled():
