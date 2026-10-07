@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from paperpilot.web.db_models import (
     ConversationRow,
@@ -168,3 +168,21 @@ def list_user_turn_summaries(
             )
             for archive, question in rows
         ]
+
+
+def archive_user_memory(
+    session_factory: SessionFactory,
+    memory_id: str,
+    *,
+    reason: str,
+) -> bool:
+    """Flip one card to archived (append-only: the row is never deleted)."""
+    with session_factory.begin() as session:
+        row = session.get(UserMemoryRow, memory_id)
+        if row is None or row.status != MEMORY_STATUS_ACTIVE:
+            return False
+        row.status = "archived"
+        context = json.loads(row.context_json or "{}")
+        context["archived_reason"] = reason
+        row.context_json = json.dumps(context, ensure_ascii=False, sort_keys=True)
+        return True

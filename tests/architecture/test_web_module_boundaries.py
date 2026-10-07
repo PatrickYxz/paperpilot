@@ -93,6 +93,7 @@ EXPECTED_TASK_STORE_METHODS = {
     "get_user_profile",
     "upsert_user_profile",
     "list_user_turn_summaries",
+    "archive_user_memory",
 }
 
 
@@ -145,6 +146,7 @@ EXPECTED_TASK_STORE_SIGNATURES = {
     "get_user_profile": "(self, user_id: 'str') -> 'UserProfileRecord | None'",
     "upsert_user_profile": "(self, *, user_id: 'str', profile_text: 'str', source_memory_count: 'int') -> 'UserProfileRecord'",
     "list_user_turn_summaries": "(self, user_id: 'str', *, limit: 'int' = 50) -> 'list[UserTurnSummary]'",
+    "archive_user_memory": "(self, memory_id: 'str', *, reason: 'str') -> 'bool'",
 }
 
 

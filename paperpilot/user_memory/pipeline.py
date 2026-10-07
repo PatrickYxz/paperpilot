@@ -4,6 +4,12 @@ from __future__ import annotations
 import logging
 
 from paperpilot.user_memory.reviewer_model import build_reviewer_model_from_env
+from paperpilot.user_memory.consolidation import (
+    apply_proposals,
+    build_consolidation_proposals,
+    consolidation_due,
+    review_proposals,
+)
 from paperpilot.user_memory.profile import (
     generate_profile,
     profile_due_for_refresh,
@@ -82,6 +88,9 @@ def run_memory_extraction(
         refresh_user_profile_if_due(
             store=store, model=model, user_id=task.user_id
         )
+        consolidate_user_memories_if_due(
+            store=store, model=model, user_id=task.user_id
+        )
     return written
 
 
@@ -110,3 +119,34 @@ def refresh_user_profile_if_due(*, store, model, user_id: str) -> bool:
     except Exception:
         _LOGGER.warning("user profile refresh failed", exc_info=True)
         return False
+
+
+def consolidate_user_memories_if_due(*, store, model, user_id: str) -> dict | None:
+    """Sleep-learning pass: propose, review, apply (book ch.8)."""
+    from paperpilot.user_memory.consolidation import (
+        _last_consolidation_at,
+    )
+    import time as _time
+
+    active = store.list_user_memories(user_id)
+    if not consolidation_due(user_id, len(active)):
+        return None
+    _last_consolidation_at[user_id] = _time.monotonic()
+
+    proposals = build_consolidation_proposals(memories=active, model=model)
+    if not proposals:
+        return {"merged": 0, "archived": 0, "proposed": 0}
+
+    from paperpilot.user_memory.reviewer_model import build_reviewer_model_from_env
+
+    reviewer = build_reviewer_model_from_env()
+    if reviewer is not None:
+        proposals = review_proposals(proposals, active, reviewer)
+    counts = apply_proposals(
+        store=store, user_id=user_id, proposals=proposals, memories=active
+    )
+    counts["proposed"] = len(proposals)
+    logging.getLogger("paperpilot.user_memory").info(
+        "memory consolidation: %s", counts
+    )
+    return counts

@@ -505,6 +505,18 @@ class TaskStore:
             active_only=active_only,
         )
 
+    def archive_user_memory(
+        self,
+        memory_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        return user_memories.archive_user_memory(
+            self._session_factory,
+            memory_id,
+            reason=reason,
+        )
+
     def count_task_memories(self, task_id: str) -> int:
         return user_memories.count_task_memories(
             self._session_factory,
