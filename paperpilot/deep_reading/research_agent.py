@@ -25,8 +25,10 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from paperpilot.papers import PaperCandidate, normalize_arxiv_id
 from paperpilot.compute.agent_tool import build_computation_tool
+from paperpilot.deep_reading.vlm_tool import build_page_vision_tool
 from paperpilot.feature_flags import (
     computation_tool_enabled,
+    page_vision_tool_enabled,
     memory_tool_enabled,
     profile_injection_enabled,
 )
@@ -484,6 +486,18 @@ def run_research_agent(
                 emit_tool_call=_emit_tool_call,
                 clip=_clip,
                 required_id=_required_id,
+            )
+        )
+    if page_vision_tool_enabled():
+        registered_tools.append(
+            build_page_vision_tool(
+                context,
+                call_mcp_text=_call_mcp_text,
+                emit_tool_call=_emit_tool_call,
+                clip=_clip,
+                required_id=_required_id,
+                require_agent_limit=_require_agent_limit,
+                canonical_arxiv_id=_canonical_arxiv_id,
             )
         )
     if memory_tool_enabled():
@@ -1332,6 +1346,30 @@ def _context_tool_ingestor(context: DeepReadingContext) -> Any | None:
 def _context_editing_adapter(context: DeepReadingContext) -> Any | None:
     runtime = getattr(context, "context_management_runtime", None)
     return None if runtime is None else getattr(runtime, "editing_adapter", None)
+
+
+def _call_mcp_text(
+    context: DeepReadingContext,
+    *,
+    name: str,
+    arguments: dict[str, object],
+) -> str:
+    """Call an MCP tool that returns plain text (not JSON)."""
+    custom_tool = _required_mcp_tool(context.mcp_tools, name)
+    _emit_tool_call(
+        context,
+        stage="research",
+        name=name,
+        arguments=_event_arguments(arguments),
+    )
+    raw = custom_tool.handler(arguments)
+    _emit_tool_result(
+        context,
+        stage="research",
+        name=name,
+        content=str(raw),
+    )
+    return str(raw)
 
 
 def _call_mcp_json(

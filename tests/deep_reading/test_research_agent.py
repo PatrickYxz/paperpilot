@@ -806,6 +806,7 @@ def test_agent_uses_exact_tools_budget_and_authoritative_selected_result() -> No
         "prepare_paper",
         "retrieve_paper_evidence",
         "run_computation",
+        "analyze_paper_page",
         "search_user_memory",
     ]
     response_format = create_call["response_format"]
@@ -1010,6 +1011,7 @@ def test_agent_installs_official_per_attempt_limits_and_model_retry() -> None:
         "prepare_paper",
         "retrieve_paper_evidence",
         "run_computation",
+        "analyze_paper_page",
         "search_user_memory",
     ]
     assert [tool.name for tool in todo_middleware.tools] == ["write_todos"]
@@ -1045,6 +1047,7 @@ def test_enabled_context_registers_read_tools_and_fixed_middleware_order() -> No
         "prepare_paper",
         "retrieve_paper_evidence",
         "run_computation",
+        "analyze_paper_page",
         "search_user_memory",
         "read_artifact_slice",
         "search_artifact",

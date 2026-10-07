@@ -41,3 +41,15 @@
   检索不丢关键事实。
 - 风险：LLM 误合并 → Reviewer 审批 + append-only 可回滚 +
   support_span 保留；阈值触发风暴 → 冷却。
+
+---
+
+## 附：第九章落点（2026-10-08 追加）
+
+第九章（语音/CUA/机器人）与垂直论文助手不适用，不强行落地。
+唯一衔接点：第四章 4.4.1「工具化多模态分析」——`analyze_paper_page`
+工具把 VLM server（understand_paper_page）接入 agent 工具面，论文
+图表/布局问题走视觉路径；描述写明「纯文本问题优先文本检索」的
+边界（4.4 输出形态原则：布局敏感内容保留图像）。flag：
+PAPERPILOT_PAGE_VISION_TOOL_ENABLED（默认开；DashScope 配额恢复前
+工具运行时优雅降级返回提示文本）。真实验证待 DashScope 恢复。
