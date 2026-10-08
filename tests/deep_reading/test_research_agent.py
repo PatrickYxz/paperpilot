@@ -1377,17 +1377,18 @@ def test_tool_events_are_bounded_and_do_not_include_downloaded_text() -> None:
     assert max(len(json.dumps(payload)) for _kind, payload in events) <= 800
 
 
-def test_prepare_guard_rejects_untrusted_external_id_before_mcp_call() -> None:
-    def behavior(tools: Mapping[str, Any], _attempt: int) -> object:
-        tools["prepare_paper"].invoke({"external_id": "2401.99999v1"})
-        raise AssertionError("guard should have raised")
+def test_prepare_accepts_explicit_arxiv_id_not_in_catalog() -> None:
+    """User-named explicit ids are legitimate preparation targets even when
+    catalog/search never surfaced them (multipaper deep-research flows)."""
+    context, factory, mcp_calls = _context(lambda tools, attempt: None)
 
-    context, factory, mcp_calls = _context(behavior)
+    import paperpilot.deep_reading.research_agent as ra
 
-    with pytest.raises(ResearchContractError, match="not allowed"):
-        run_research_agent(STATE, context, create_agent_factory=factory)
-
-    assert mcp_calls == []
+    prepared: dict = {}
+    tool = ra._build_prepare_tool(context, {}, prepared)
+    result = tool.invoke({"external_id": "2401.99999v1"})
+    assert result["external_id"] == "2401.99999v1"
+    assert mcp_calls, "explicit id should reach the downloader"
 
 
 def test_model_arxiv_url_is_normalized_before_downloader_call() -> None:
@@ -2332,3 +2333,20 @@ def test_tool_fingerprint_warns_on_third_repeat_and_repairs_mention_it() -> None
     )
     clear_tool_fingerprints(context)
     assert repeated_tool_calls(context) == []
+
+
+def test_lookup_candidate_tolerates_missing_version() -> None:
+    from paperpilot.deep_reading.research_agent import _lookup_candidate
+
+    versioned = PaperCandidate(
+        external_id="1512.03385v1", title="ResNet", authors=["He"],
+        abstract="", source_url="https://arxiv.org/abs/1512.03385",
+    )
+    candidates = {"1512.03385v1": versioned}
+    # bare id resolves the single versioned entry
+    assert _lookup_candidate(candidates, "1512.03385") is versioned
+    # exact match still wins
+    assert _lookup_candidate(candidates, "1512.03385v1") is versioned
+    # ambiguous versions or unknown ids stay None
+    assert _lookup_candidate({"1512.03385v1": versioned, "1512.03385v2": versioned}, "1512.03385") is None
+    assert _lookup_candidate(candidates, "2401.99999v1") is None

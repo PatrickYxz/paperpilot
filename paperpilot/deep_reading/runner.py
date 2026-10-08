@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import inspect
 import json
+import threading
 import logging
 from typing import TYPE_CHECKING, Any, cast
 
@@ -67,6 +68,7 @@ if TYPE_CHECKING:
 ModelFactory = Callable[..., Any]
 PaperSearch = Callable[[str, int], list[PaperCandidate]]
 _STRUCTURED_RESPONSE_ATTEMPTS = 2
+_EVENT_WRITE_LOCK = threading.Lock()
 _LOGGER = logging.getLogger("paperpilot.web.runtime")
 
 
@@ -627,13 +629,29 @@ class DeepReadingRunner:
         stage = raw_stage if isinstance(raw_stage, str) else None
         raw_name = payload.get("name")
         name = raw_name if isinstance(raw_name, str) else event_type
-        self._task_store.add_event(
-            task_id=task_id,
-            type=event_type,
-            stage=stage,
-            message=name,
-            payload=payload,
-        )
+        # ToolNode runs parallel tool calls in worker threads; serialize
+        # event writes in-process and retry past transient SQLite write
+        # contention (busy_timeout should cover it, but fast-fail locks
+        # have been observed under parallel prepare calls).
+        with _EVENT_WRITE_LOCK:
+            last_exc: Exception | None = None
+            for attempt in range(3):
+                try:
+                    self._task_store.add_event(
+                        task_id=task_id,
+                        type=event_type,
+                        stage=stage,
+                        message=name,
+                        payload=payload,
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    if type(exc).__name__ != "OperationalError":
+                        raise
+                    last_exc = exc
+                    time.sleep(0.5 * (attempt + 1))
+            assert last_exc is not None
+            raise last_exc
 
     def _record_model_usage_events(
         self,

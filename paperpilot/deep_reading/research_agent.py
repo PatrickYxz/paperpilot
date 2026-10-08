@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -500,7 +501,9 @@ def run_research_agent(
                 context,
                 prepared=prepared_ledger,
                 evidence=evidence_ledger,
-                call_mcp_json=partial(_call_mcp_json, context),
+                call_mcp_json=partial(
+                    _call_mcp_json, context, emit_events=False
+                ),
                 decode_evidence_pool=_decode_evidence_pool,
                 contract_error=ResearchContractError,
                 emit_tool_call=_emit_tool_call,
@@ -660,6 +663,17 @@ def run_research_agent(
             # Tool-precondition or argument errors the model can correct:
             # route them into the bounded repair attempt instead of failing
             # the whole task on the first offense.
+            try:
+                context.event_sink(
+                    "research_tool_error",
+                    {
+                        "stage": "research",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:400],
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
             last_structured_error = exc
             continue
         except StructuredOutputError as exc:
@@ -674,6 +688,7 @@ def run_research_agent(
             structured_response = _structured_response(result)
             decision = AgentResearchDecision.model_validate(structured_response)
         except (ValidationError, _StructuredResponseError) as exc:
+            _emit_decision_invalid(context, exc, result)
             last_structured_error = exc
             continue
 
@@ -696,6 +711,18 @@ def run_research_agent(
         )
 
     try:
+        if last_structured_error is not None:
+            try:
+                context.event_sink(
+                    "research_attempts_exhausted",
+                    {
+                        "stage": "research",
+                        "error_type": type(last_structured_error).__name__,
+                        "error": str(last_structured_error)[:400],
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
         if isinstance(last_structured_error, ResearchContractError):
             raise last_structured_error
         raise AgentBudgetExceededError(
@@ -703,6 +730,27 @@ def run_research_agent(
         ) from last_structured_error
     finally:
         clear_tool_fingerprints(context)
+
+
+def _emit_decision_invalid(
+    context: DeepReadingContext,
+    exc: Exception,
+    result: object,
+) -> None:
+    """Persist an unparsable/invalid decision for diagnosis (best-effort)."""
+    try:
+        raw = result.get("structured_response") if isinstance(result, Mapping) else result
+        context.event_sink(
+            "research_decision_invalid",
+            {
+                "stage": "research",
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:400],
+                "raw": str(raw)[:600],
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _emit_contract_failure(
@@ -1122,10 +1170,17 @@ def _build_prepare_tool(
         paper is fast; a fresh download may take several seconds.
         """
         normalized_id = _canonical_arxiv_id(external_id, "external_id")
-        candidate = candidates.get(normalized_id)
+        candidate = _lookup_candidate(candidates, normalized_id)
         if candidate is None:
-            raise ResearchContractError(
-                f"paper ID is not allowed for preparation: {normalized_id}"
+            # An explicit, well-formed arXiv id named by the user is a
+            # legitimate preparation target even when catalog/search never
+            # surfaced it; metadata fills in after the download.
+            candidate = PaperCandidate(
+                external_id=normalized_id,
+                title=f"arXiv:{normalized_id}",
+                authors=[],
+                abstract=None,
+                source_url=f"https://arxiv.org/abs/{normalized_id}",
             )
         if normalized_id in prepared:
             result = {
@@ -1170,6 +1225,11 @@ def _build_prepare_tool(
                 "build MCP paper IDs do not include the requested paper ID"
             )
         prepared[normalized_id] = candidate
+        # Catalog-external papers prepared via an explicit id must also be
+        # authoritative for decision paper_uses, or materialization rejects
+        # them ("paper use ID is not authoritative").
+        if isinstance(candidates, dict):
+            candidates.setdefault(normalized_id, candidate)
         result = {"external_id": normalized_id, "status": "prepared"}
         if context.context_management.enabled:
             return json.dumps(result), result
@@ -1217,7 +1277,7 @@ def _build_retrieval_tool(
         normalized_id = _canonical_arxiv_id(external_id, "external_id")
         _require_agent_limit(top_k_each, "top_k_each")
         _require_agent_limit(summary_k, "summary_k")
-        candidate = prepared.get(normalized_id)
+        candidate = _lookup_candidate(prepared, normalized_id)
         if candidate is None:
             return {
                 "error": (
@@ -1399,9 +1459,11 @@ def _call_mcp_json(
     name: str,
     arguments: dict[str, object],
     stage: Literal["prepare", "research"],
+    emit_events: bool = True,
 ) -> dict[str, object]:
     custom_tool = _required_mcp_tool(context.mcp_tools, name)
-    _emit_tool_call(
+    if emit_events:
+        _emit_tool_call(
         context,
         stage=stage,
         name=name,
@@ -1420,6 +1482,8 @@ def _call_mcp_json(
         if not isinstance(decoded, dict):
             raise ResearchContractError(f"{name} JSON payload must be an object")
     except json.JSONDecodeError as exc:
+        if not emit_events:
+            raise
         _emit_tool_result(
             context,
             stage=stage,
@@ -1427,12 +1491,13 @@ def _call_mcp_json(
             content="invalid JSON payload",
         )
         raise ResearchContractError(f"{name} did not return valid JSON") from exc
-    _emit_tool_result(
-        context,
-        stage=stage,
-        name=name,
-        content="validated JSON object",
-    )
+    if emit_events:
+        _emit_tool_result(
+            context,
+            stage=stage,
+            name=name,
+            content="validated JSON object",
+        )
     return decoded
 
 
@@ -1520,7 +1585,8 @@ def _decode_evidence_pool(
             )
         except ValidationError as exc:
             raise ResearchContractError(
-                f"invalid evidence item returned by MCP: {evidence_id}"
+                f"invalid evidence item returned by MCP: {evidence_id}: "
+                f"{str(exc)[:200]}"
             ) from exc
 
     raw_summary_ids = pool.get("summary_items")
@@ -1818,6 +1884,32 @@ def _required_id(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ResearchContractError(f"{field_name} must be a non-blank string")
     return value.strip()
+
+
+_ARXIV_BARE_ID_RE = re.compile(r"\d{4}\.\d{4,5}")
+
+
+def _lookup_candidate(
+    candidates: Mapping[str, PaperCandidate], external_id: str
+) -> PaperCandidate | None:
+    """Exact lookup, then tolerate missing version suffixes.
+
+    Search results carry versioned ids (1512.03385v1) while agents often
+    pass the bare id (1512.03385); a bare id matches any single versioned
+    key with the same base.
+    """
+    exact = candidates.get(external_id)
+    if exact is not None:
+        return exact
+    if _ARXIV_BARE_ID_RE.fullmatch(external_id):
+        matches = [
+            candidate
+            for key, candidate in candidates.items()
+            if key.startswith(external_id + "v")
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    return None
 
 
 def _canonical_arxiv_id(value: object, field_name: str) -> str:
